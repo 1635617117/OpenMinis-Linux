@@ -655,7 +655,7 @@ class ChatViewModel(
         /** Each "load older" tap grows the cap by this many messages. */
         const val VISIBLE_MESSAGE_CAP_STEP: Int = 100
         const val MAX_LOADED_MESSAGE_WINDOW: Int = 400
-        private const val MAX_AGENT_HISTORY_MESSAGES: Int = 400
+        internal const val MAX_AGENT_HISTORY_MESSAGES: Int = 400
         /**
          * Sessions with this many or fewer messages bypass the windowing
          * machinery entirely — the derived `uiMessages` returns the same
@@ -668,7 +668,7 @@ class ChatViewModel(
         // assistant tool_use entry on retry (the API rejects unmatched
         // tool_use_ids). SUCCESS / FAILED / TIMEOUT / CANCELLED all have a
         // matching tool_result row already persisted and survive the retry.
-        private val IN_FLIGHT_TOOL_STATUSES = setOf(
+        internal val IN_FLIGHT_TOOL_STATUSES = setOf(
             ToolBlockStatus.STREAMING,
             ToolBlockStatus.PENDING,
             ToolBlockStatus.RUNNING,
@@ -1312,7 +1312,7 @@ class ChatViewModel(
      * and the regular auto-follow finally fires. Each ViewModel entry that
      * starts a fresh agent-loop turn emits to this flow.
      */
-    private val _forceScrollToBottom = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    internal val _forceScrollToBottom = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val forceScrollToBottom: SharedFlow<Unit> = _forceScrollToBottom.asSharedFlow()
 
     /**
@@ -6053,7 +6053,7 @@ class ChatViewModel(
      * [clearInlineError], so a recovered turn can't merge-resurrect the old
      * banner on the next reload. No-op when there's no session/row yet.
      */
-    private fun clearPersistedLastAssistantError() {
+    internal fun clearPersistedLastAssistantError() {
         val sid = realSessionId.ifEmpty { sessionId }
         if (sid.isEmpty()) return
         viewModelScope.launch(Dispatchers.IO) {
@@ -6062,229 +6062,6 @@ class ChatViewModel(
         }
     }
 
-    /** Retry the last agent turn (triggered by inline error Retry button).
-     *
-     *  T258: ports iOS AIChatViewModel.retry() (AIChatViewModel.swift:2079).
-     *  Earlier behaviour blew away the entire failed assistant ChatMessage —
-     *  including its already-completed tool_use cards — and reset
-     *  agentHistory back to the last "real" user message, so on Retry every
-     *  succeeded tool re-executed from scratch (the bug the user reported).
-     *
-     *  New behaviour:
-     *   - Keep the assistant ChatMessage in the UI; clear its error sticker
-     *     and the streaming/awaiting flags. Drop only tool blocks still in
-     *     STREAMING / PENDING / RUNNING state — those have no matching
-     *     tool_result and would orphan the request body.
-     *   - From agentHistory, pop ONLY a trailing assistant entry (i.e. the
-     *     turn whose stream errored). If the tail is already user(tool_result),
-     *     the failure happened on the NEXT LLM call before any output —
-     *     history is already valid, leave it.
-     *   - GC orphaned tool_result rows whose tool_use is no longer in
-     *     agentHistory (defends against the API "unexpected tool_use_id" 400).
-     *   - Sync the DB: if we popped a trailing assistant, drop just its
-     *     persisted row so a re-load doesn't resurrect the failed turn.
-     */
-    fun retryLast() {
-        if (_isStreaming.value) return
-        // T-streaming-side-channel: belt-and-suspenders flush in case any
-        // delta survived an earlier abnormal exit; retryLast is gated on
-        // !isStreaming so this is normally a no-op.
-        flushAllStreamingDeltas()
-        val msgs = _messages.value.toMutableList()
-        val lastAssistantIdx = msgs.indexOfLast { it.role == "assistant" }
-        if (lastAssistantIdx < 0) return
-        // [T-android-tool-autoscroll] Start-of-turn snap — see resume().
-        _forceScrollToBottom.tryEmit(Unit)
-
-        // 1. Keep the assistant message; clear error + streaming flags + drop
-        //    in-flight tool blocks (STREAMING args / PENDING dispatch /
-        //    RUNNING execution all have no tool_result, so they'd orphan).
-        val lastMsg = msgs[lastAssistantIdx]
-        val keptToolBlocks = lastMsg.toolBlocks.filter { block ->
-            block.toolStatus !in IN_FLIGHT_TOOL_STATUSES
-        }
-        msgs[lastAssistantIdx] = lastMsg.copy(
-            error = null,
-            isStreaming = false,
-            isAwaitingModelResponse = false,
-            toolBlocks = keptToolBlocks,
-        )
-        _messages.value = msgs
-        // [T-error-persist-android] Clear the persisted error sticker on the last
-        // assistant row up-front. The DB-sync below only DELETES the trailing
-        // assistant row when a trailing assistant was popped (Case A); in the
-        // Case B path (tail = user(tool_result), next LLM call errored) the
-        // stamped row is an EARLIER completed turn that is NOT deleted, so
-        // without this clear the new successful turn would merge-resurrect the
-        // old error banner on reload (msg.error ?: prev.error). Harmless in
-        // Case A too — the row is deleted moments later regardless.
-        clearPersistedLastAssistantError()
-
-        // 2. Pop ONLY a trailing assistant entry from agentHistory (mirrors
-        //    iOS retry() :2107-2109). If the tail is already user(tool_result),
-        //    the next-turn LLM call errored — leave history alone.
-        val poppedAssistant = if (agentHistory.lastOrNull()?.role == LLMMessage.Role.ASSISTANT) {
-            val last = agentHistory.removeAt(agentHistory.size - 1)
-            last
-        } else null
-
-        // 3. GC orphaned tool_result parts whose tool_use is gone (mirrors
-        //    iOS retry() :2114-2128). Walks backward so removeAt is safe.
-        val liveToolUseIds = agentHistory.flatMap { m ->
-            m.contentParts.filterIsInstance<AgentContentPart.ToolUse>().map { it.id }
-        }.toSet()
-        for (i in agentHistory.indices.reversed()) {
-            val m = agentHistory[i]
-            if (m.role != LLMMessage.Role.USER) continue
-            val cleanedParts = m.contentParts.filter { p ->
-                p !is AgentContentPart.ToolResult || p.id in liveToolUseIds
-            }
-            when {
-                cleanedParts.isEmpty() && m.contentParts.isNotEmpty() ->
-                    agentHistory.removeAt(i)
-                cleanedParts.size < m.contentParts.size ->
-                    agentHistory[i] = m.copy(contentParts = cleanedParts)
-            }
-        }
-
-        val initialProvider = currentProvider ?: return
-        var provider: LLMProvider = initialProvider
-        _error.value = null
-
-        // T145: claim _isStreaming synchronously — see retryFromMessage for rationale.
-        AppLogger.info(TAG_STREAM, "retryLast _isStreaming=true (sync, sid=$activeSessionId)")
-        _isStreaming.value = true
-
-        viewModelScope.launch {
-            var streamLaunched = false
-            try {
-            val sid = realSessionId.takeIf { it.isNotEmpty() } ?: sessionId
-
-            // T258: only sync the DB when step 2 popped a trailing assistant
-            // entry from agentHistory. In that case the persisted partial-
-            // assistant row would resurrect the failed turn on next session
-            // load — drop it (and only it) by deleting from its sort_order.
-            // Completed assistant + tool_result rows for earlier turns are
-            // unchanged and stay persisted, so retry preserves their cards.
-            // toolLoopDetector keeps its accumulated state — completed tools
-            // shouldn't be unlearned just because the next turn errored.
-            if (poppedAssistant != null) {
-                val dbMessages = chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES)
-                val trailingAssistantSortOrder = dbMessages
-                    .lastOrNull { it.role == "assistant" }?.sortOrder
-                if (trailingAssistantSortOrder != null) {
-                    chatRepository.deleteMessagesAfter(sid, trailingAssistantSortOrder)
-                    AppLogger.info(
-                        TAG_STREAM,
-                        "retryLast: deleted trailing assistant row sortOrder=$trailingAssistantSortOrder, kept ${trailingAssistantSortOrder} prior rows",
-                    )
-                }
-            } else {
-                AppLogger.info(
-                    TAG_STREAM,
-                    "retryLast: agentHistory tail was user(tool_result) — no DB cleanup needed",
-                )
-            }
-
-            // Refresh OAuth token if needed
-            if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                try {
-                    val activeEntryId = _activeEntryId.value
-                    val entry = activeEntryId?.let { id -> providerRepository.config.value.modelEntries.find { it.id == id } }
-                    val instance = entry?.let { e -> providerRepository.config.value.instances.find { it.id == e.providerInstanceId } }
-                    if (instance != null) {
-                        val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                        val freshToken = manager?.validAccessToken()
-                        if (freshToken != null) {
-                            val storedKey = providerRepository.loadApiKey(instance.id)
-                            if (freshToken != storedKey) {
-                                providerRepository.saveApiKey(instance.id, freshToken)
-                                provider = ProviderFactory.create(instance, freshToken, currentModel ?: provider.model, context)
-                                currentProvider = provider
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "OAuth token refresh failed: ${e.message}")
-                }
-            }
-
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
-
-            // _isStreaming was already set synchronously at the top.
-            streamLaunched = true
-            streamJob = launch(Dispatchers.IO) {
-                AppLogger.info(TAG_STREAM, "retryLast streamJob ENTER sid=$activeSessionId")
-                try {
-                    SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "retryLast streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-                    val fallbackProviders = buildFallbackProviders(provider)
-                    try {
-                        AppLogger.info(TAG_STREAM, "retryLast runAgentLoop CALL")
-                        runAgentLoop(
-                            provider = provider,
-                            systemPrompt = systemPrompt,
-                            fallbackProviders = fallbackProviders,
-                            fallbackStrategy = activeFallbackStrategy,
-                        )
-                        AppLogger.info(TAG_STREAM, "retryLast runAgentLoop RETURN normal")
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                        AppLogger.info(TAG_STREAM, "retryLast drainQueuedPrompts RETURN")
-                    } catch (e: CancellationException) {
-                        AppLogger.info(TAG_STREAM, "retryLast runAgentLoop CANCELLED")
-                        Log.d(TAG, "Agent loop cancelled")
-                    } catch (e: Exception) {
-                        AppLogger.error(TAG_STREAM, "retryLast runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
-                        Log.e(TAG, "Agent loop error (retryLast)", e)
-                        setInlineError(e.message ?: "Unknown error")
-                        // T298: completion notifier should show the ❌ variant.
-                        SessionActivityTracker.markStreamError(activeSessionId)
-                    } finally {
-                        AppLogger.info(TAG_STREAM, "retryLast streamJob FINALLY enter")
-                        // [T-android-overlay-reply-status-34599] Surface
-                        // the assistant's most recent reply text to the
-                        // overlay BEFORE setInactive so the post-completion
-                        // overlay state (no-running, has-outcome) carries a
-                        // non-null excerpt. Reading _messages here is safe:
-                        // we're in the finally block of the agent loop and
-                        // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        SessionConcurrencyManager.releaseSlot(activeSessionId)
-                        AppLogger.info(TAG_STREAM, "retryLast streamJob FINALLY exit")
-                    }
-                } catch (e: CancellationException) {
-                    AppLogger.info(TAG_STREAM, "retryLast streamJob CANCELLED waiting for slot")
-                    Log.d(TAG, "Cancelled while waiting for concurrency slot")
-                }
-                // [T-android-stale-streamjob-clears-isstreaming] guard.
-                if (streamJob === coroutineContext[Job]) {
-                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (about to set)")
-                    _isStreaming.value = false
-                } else {
-                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming SKIPPED (stale job)")
-                }
-                AppLogger.info(TAG_STREAM, "retryLast streamJob EXIT")
-            }
-            } finally {
-                if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "retryLast _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
-                }
-            }
-        }
-    }
 
     /**
      * Unwrap exceptions thrown inside callbackFlow.
