@@ -107,11 +107,9 @@ class RootfsManager private constructor(private val context: Context) {
             _installState.value = RootfsInstallState.Preparing
             Log.i(TAG, "Installing Ubuntu rootfs...")
 
-            // Clean up any partial install
-            if (rootfsDir.exists()) {
-                rootfsDir.deleteRecursively()
-            }
-            rootfsDir.mkdirs()
+            val staging = File(rootfsDir.parentFile, rootfsDir.name + ".staging")
+            staging.deleteRecursively()
+            staging.mkdirs()
 
             // Extract rootfs from assets.
             // AAPT may decompress .tar.gz → .tar automatically, so try both names.
@@ -141,12 +139,16 @@ class RootfsManager private constructor(private val context: Context) {
                 }
                 if (assetName.endsWith(".gz")) {
                     GZIPInputStream(progressStream).use { gzipStream ->
-                        extractTar(gzipStream, rootfsDir)
+                        extractTar(gzipStream, staging)
                     }
                 } else {
-                    extractTar(progressStream, rootfsDir)
+                    extractTar(progressStream, staging)
                 }
             }
+            if (!File(staging, "usr/bin").isDirectory && !File(staging, "bin").isDirectory) {
+                throw java.io.IOException("rootfs staging has no guest tree")
+            }
+            RootfsStaging.promote(staging, rootfsDir)
 
             _installState.value = RootfsInstallState.Finalizing
 
@@ -184,6 +186,12 @@ class RootfsManager private constructor(private val context: Context) {
             Log.i(TAG, "Rootfs installation complete")
             _installState.value = RootfsInstallState.Installed
         } catch (t: Throwable) {
+            File(rootfsDir.parentFile, rootfsDir.name + ".staging").deleteRecursively()
+            if (t is java.util.zip.ZipException && isInstalled) {
+                Log.w(TAG, "ZipException left the installed rootfs untouched", t)
+                _installState.value = RootfsInstallState.Installed
+                return@withContext
+            }
             Log.e(TAG, "Rootfs installation failed", t)
             _installState.value = RootfsInstallState.Failed(t.message ?: t.javaClass.simpleName)
             throw t
@@ -1001,7 +1009,8 @@ class RootfsManager private constructor(private val context: Context) {
 
         while (true) {
             val bytesRead = readFully(input, header)
-            if (bytesRead < 512) break
+            if (bytesRead == 0) break
+            if (bytesRead < 512) throw java.io.IOException("short tar header: $bytesRead")
 
             // Check for end-of-archive (two consecutive zero blocks)
             if (header.all { it == 0.toByte() }) break
@@ -1063,7 +1072,9 @@ class RootfsManager private constructor(private val context: Context) {
                         while (remaining > 0) {
                             val toRead = minOf(buf.size.toLong(), remaining).toInt()
                             val n = input.read(buf, 0, toRead)
-                            if (n < 0) break
+                            if (n < 0) {
+                                throw java.io.IOException("short read of $name, $remaining bytes missing")
+                            }
                             output.write(buf, 0, n)
                             remaining -= n
                         }
@@ -1126,7 +1137,7 @@ class RootfsManager private constructor(private val context: Context) {
         while (remaining > 0) {
             val toRead = minOf(buf.size.toLong(), remaining).toInt()
             val n = input.read(buf, 0, toRead)
-            if (n < 0) break
+            if (n < 0) throw java.io.IOException("short tar skip: $remaining")
             remaining -= n
         }
     }

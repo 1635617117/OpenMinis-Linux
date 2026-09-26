@@ -356,6 +356,11 @@ data class ModelOverrides(
     val compactThresholdPercent: Int? = null,
     /** Same-provider retries on 429 / 5xx / network. null = default 5. */
     val maxRetries: Int? = null,
+    /**
+     * Sampling temperature for this entry only. Null omits the field.
+     * NaN, Infinity, and values outside 0.0–2.0 must not be stored.
+     */
+    val temperature: Double? = null,
 ) {
     val isEmpty: Boolean
         get() = displayName == null
@@ -368,6 +373,7 @@ data class ModelOverrides(
             && autoCompactEnabled == null
             && compactThresholdPercent == null
             && maxRetries == null
+            && temperature == null
 }
 
 @Serializable

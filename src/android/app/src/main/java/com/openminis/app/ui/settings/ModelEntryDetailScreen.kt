@@ -107,6 +107,10 @@ fun ModelEntryDetailScreen(
                 ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES).toString(),
         )
     }
+    var temperatureText by remember {
+        mutableStateOf(overrides.temperature?.let { if (it % 1.0 == 0.0) it.toInt().toString() else it.toString() }.orEmpty())
+    }
+    var temperatureError by remember { mutableStateOf(false) }
 
     SettingsScaffold(
         title = stringResource(R.string.model_entry_model_detail),
@@ -142,6 +146,12 @@ fun ModelEntryDetailScreen(
                         if (audioOutput) add("audio")
                         if (videoOutput) add("video")
                     }
+                    val parsedTemperature = com.openminis.app.provider.SamplingPolicy.parseUserInput(temperatureText)
+                    if (temperatureText.isNotBlank() && parsedTemperature == null) {
+                        temperatureError = true
+                        return@MinisButton
+                    }
+                    temperatureError = false
                     val newOverrides = ModelOverrides(
                         displayName = displayName.trim().takeIf { it.isNotEmpty() && it != baseModel.displayName },
                         maxOutputTokens = maxOutputTokensText.trim().toIntOrNull()?.takeIf { it > 0 },
@@ -161,6 +171,7 @@ fun ModelEntryDetailScreen(
                             ?: com.openminis.app.data.AutoCompactPrefs.DEFAULT_THRESHOLD_PERCENT,
                         maxRetries = maxRetriesText.trim().toIntOrNull()?.coerceIn(0, 8)
                             ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES,
+                        temperature = parsedTemperature,
                     )
                     val updated = if (entry.isCustom) {
                         entry.copy(baseModel = baseModel.copy(id = modelId), overrides = newOverrides, isHidden = isHidden)
@@ -231,6 +242,25 @@ fun ModelEntryDetailScreen(
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
+                Spacer(Modifier.height(12.dp))
+                RowLabel(text = stringResource(R.string.modeldetail_temperature))
+                SectionTextField(
+                    value = temperatureText,
+                    onValueChange = {
+                        temperatureText = it.filter { c -> c.isDigit() || c == '.' }.take(6)
+                        temperatureError = false
+                    },
+                    placeholder = stringResource(R.string.modeldetail_temperature_placeholder),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                )
+                if (temperatureError) {
+                    Text(
+                        text = stringResource(R.string.modeldetail_temperature_invalid),
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
 

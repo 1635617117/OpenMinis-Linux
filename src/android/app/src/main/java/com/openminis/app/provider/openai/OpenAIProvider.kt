@@ -17,6 +17,8 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.provider.thinking.ThinkingResolveContext
 import com.openminis.app.provider.thinking.ThinkingRuleResolver
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.SamplingIdentity
+import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.VendorMedia
 import com.openminis.app.provider.VendorMediaKind
 import com.openminis.app.provider.applyUserAgentOverride
@@ -713,7 +715,11 @@ class OpenAIProvider private constructor(
         } else if (usesChatCompletionsAPI) {
             buildRequestBody(messages, systemPrompt, maxTokens, stream = stream, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
         } else {
-            buildResponsesAPIBody(messages, systemPrompt, maxTokens, stream = stream, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
+            buildResponsesAPIBody(
+                messages, systemPrompt, maxTokens, stream = stream,
+                imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel,
+                temperature = temperature,
+            )
         }
         // T302: serialize the request body exactly once. Pre-T302 we called
         // body.toString() three times per request (debug log + OAuth byte
@@ -1630,16 +1636,19 @@ class OpenAIProvider private constructor(
         }
 
         if (body != null) RequestBodyGate.check(body, "rawPassthrough")
+        val admitted = body?.estimatedBytes ?: 0L
 
         val verb = method.uppercase()
         val builder = Request.Builder().url(url)
         // GET never carries a body. POST/PUT/PATCH/DELETE with Empty/null still
         // need a RequestBody — OkHttp rejects method(POST, null).
-        val requestBody = if (verb == "GET") {
-            null
-        } else {
-            body?.toOkHttpRequestBody()
-                ?: ByteArray(0).toRequestBody(HttpBody.JSON_MEDIA_TYPE)
+        val requestBody = com.openminis.app.data.body.Admission.occupy(admitted) {
+            if (verb == "GET") {
+                null
+            } else {
+                body?.toOkHttpRequestBody()
+                    ?: ByteArray(0).toRequestBody(HttpBody.JSON_MEDIA_TYPE)
+            }
         }
         builder.method(verb, requestBody)
         val token = getToken()
@@ -2629,9 +2638,9 @@ class OpenAIProvider private constructor(
         // OpenAI-compatible relay would 400 on the unknown key.
         resolvedServiceTier()?.let { body.put("service_tier", it) }
 
-        if (temperature != null) {
-            body.put("temperature", temperature)
-        }
+        SamplingPolicy.wire(
+            SamplingIdentity.of(this), model.id, temperature, thinkingLevel.isEnabled,
+        )?.let { body.put("temperature", it) }
 
         if (stream && !isOpenRouter) {
             body.put("stream_options", JSONObject().put("include_usage", true))
@@ -3545,6 +3554,7 @@ class OpenAIProvider private constructor(
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        temperature: Double? = null,
     ): JSONObject {
         // T264: same vision-capability gate as buildRequestBody. Responses API
         // path (Codex OAuth) is currently always wired to a vision-capable
@@ -3560,6 +3570,9 @@ class OpenAIProvider private constructor(
         val body = JSONObject()
         body.put("model", model.id)
         body.put("stream", stream)
+        SamplingPolicy.wire(
+            SamplingIdentity.of(this), model.id, temperature, thinkingLevel.isEnabled,
+        )?.let { body.put("temperature", it) }
         // [T-android-xai-priority] xAI documents service_tier for both text
         // inference endpoints. xAI currently always resolves to the Chat
         // Completions path (forceChatCompletions), so this is belt-and-braces

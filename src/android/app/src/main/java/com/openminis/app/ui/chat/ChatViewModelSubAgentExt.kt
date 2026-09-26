@@ -49,7 +49,9 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
         val mainEntry = _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
         val mainName = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "main"
         val mainMax = (mainEntry?.model?.maxOutputTokens ?: currentModel?.maxOutputTokens ?: 4096).coerceIn(256, 8192)
-        val mainMember = PlanDiscussionOrchestrator.Member(mainName, "facilitator", provider, mainMax)
+        val mainMember = PlanDiscussionOrchestrator.Member(
+            mainName, "facilitator", provider, mainMax, mainEntry?.overrides?.temperature,
+        )
         val stances = listOf("architect", "skeptic", "implementer", "operator")
         val pool = MultiAgentSettings.retainLive(
             multiAgentSettings.selectedModelEntryIds.value,
@@ -66,6 +68,7 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
                     stance = stances[i % stances.size],
                     provider = p,
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
+                    temperature = entry.overrides.temperature,
                 )
             }
         }
@@ -512,6 +515,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
             val result = com.openminis.app.tools.WritePathGuard.withPaths(writePaths) {
                 SubAgentRunner.run(
                     provider = provider,
+                    temperature = entry.overrides.temperature,
                     modelDisplayName = entry.model.displayName,
                     userPrompt = prompt,
                     role = role,

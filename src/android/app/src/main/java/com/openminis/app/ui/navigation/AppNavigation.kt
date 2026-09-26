@@ -349,19 +349,14 @@ fun AppNavigation(
         // preference, even after they dismissed the share dialog. Avoids
         // re-entering the session that may have been the crash trigger.
         //
-        // [T-android-larky-longsession-followup] Beacon-driven restart-count
-        // gate: the previous cycle ended in crash_or_stall AND the rolling
-        // count of consecutive crashed launches exceeds the threshold
-        // (default 3). Catches the "process repeatedly killed re-entering
-        // the same monster session" pattern that the existing
-        // HangDetector breaker misses when hangs short-circuit before the
-        // SharedPreferences counter increments. Resets automatically the
-        // moment the user has ANY non-crash_or_stall cycle (clean_exit /
-        // silent_kill / first_launch) — see LaunchCycleBeacon.lastRestartCount.
+        // An auto-entered route that did not survive a 60s healthy tick is not
+        // entered again. silent_kill and a tombstone-less reboot do not clear
+        // that fuse, and there is no "wait for 3 restarts" exception.
         val mode = if (
             com.openminis.app.diagnostics.HangDetector.shouldForceHomeOnLaunch(context) ||
             com.openminis.app.crash.CrashFrequencyDetector.shouldForceHomeOnLaunch(context) ||
-            com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch()
+            com.openminis.app.diagnostics.LaunchCycleBeacon.shouldForceHomeOnLaunch() ||
+            com.openminis.app.diagnostics.RouteFuse.blocksAnyUnhealthy(context)
         ) 3 else rawMode
         val autoThresholdMs = 15L * 60 * 1000
         // [T-android-first-launch-lands-home] Read once, before the mode
@@ -428,6 +423,10 @@ fun AppNavigation(
             }
         }
         if (target != null) {
+            val autoSession = target.removePrefix("chat/").substringBefore("?")
+            if (autoSession.isNotEmpty() && !autoSession.startsWith("__new__")) {
+                com.openminis.app.diagnostics.RouteFuse.noteAutoEnter(context, autoSession)
+            }
             // T314: navigate directly without the safeNavigate guard.
             // safeNavigate exists to defang back-then-tap-settings races
             // where a popped destination is mid-tear-down — it requires

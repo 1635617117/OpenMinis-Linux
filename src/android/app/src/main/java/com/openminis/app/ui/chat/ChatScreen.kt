@@ -735,8 +735,11 @@ fun ChatScreen(
     // hang count was a transient blip and the breaker can release. The call
     // itself is cheap — early-returns when the count is already zero.
     androidx.compose.runtime.LaunchedEffect(sessionId) {
+        com.openminis.app.diagnostics.RouteFuse.noteAutoEnter(context, sessionId)
         kotlinx.coroutines.delay(10_000)
         com.openminis.app.diagnostics.HangDetector.markHealthyTick()
+        kotlinx.coroutines.delay(com.openminis.app.data.body.ResourceLimits.HEALTHY_TICK_MS)
+        com.openminis.app.diagnostics.RouteFuse.markHealthy(context, sessionId)
     }
 
     // Drain any pending Move-to transfer when entering this session — the

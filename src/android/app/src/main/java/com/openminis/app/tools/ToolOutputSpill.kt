@@ -29,7 +29,9 @@ object ToolOutputSpill {
             com.openminis.app.sandbox.SessionWorkspace.hostDir(context.filesDir, sessionId, "workspace"),
             "tool-spill",
         )
-        if (!dir.mkdirs() && !dir.isDirectory) return output
+        if (!dir.mkdirs() && !dir.isDirectory) {
+            return "[tool output omitted: spill directory unavailable, ${output.length} chars]"
+        }
         val file = File(dir, "$safeId.txt")
         return try {
             file.writeText(output)
@@ -39,7 +41,7 @@ object ToolOutputSpill {
                 output = output,
             )
         } catch (_: Exception) {
-            output.take(LIMIT)
+            "[tool output omitted: spill write failed, ${output.length} chars]"
         }
     }
 

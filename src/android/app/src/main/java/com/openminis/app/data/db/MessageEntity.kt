@@ -61,4 +61,11 @@ data class MessageEntity(
     @ColumnInfo(name = "provider_type") val providerType: String? = null,
     /** Diagnostics / disambiguation only — the UI never resolves through it. */
     @ColumnInfo(name = "provider_instance_id") val providerInstanceId: String? = null,
+    /** UTF-8 size of the original body. Backfilled by migration 19; not a row count. */
+    @ColumnInfo(name = "body_bytes") val bodyBytes: Long = 0,
+    /** BodyStore ref. Null means the body is still inline in parts_json. */
+    @ColumnInfo(name = "body_ref") val bodyRef: String? = null,
+    @ColumnInfo(name = "body_sha") val bodySha: String? = null,
+    /** At most 8KB. Hot paths read this, never the full parts_json cell. */
+    @ColumnInfo(name = "preview") val preview: String? = null,
 )

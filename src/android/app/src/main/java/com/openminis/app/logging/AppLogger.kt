@@ -412,11 +412,14 @@ object AppLogger {
         val dir = resolveLogDir() ?: return null
         val file = File(dir, filename)
         if (!file.exists()) return null
-        return BoundedText.readFileRange(
-            file,
-            offset.coerceAtLeast(0).toLong(),
-            limit.coerceAtMost(BoundedText.MAX_LOG_READ_BYTES),
-        )
+        val bytes = limit.coerceAtMost(BoundedText.MAX_LOG_READ_BYTES).toLong()
+        return com.openminis.app.data.body.Admission.occupy(bytes) {
+            BoundedText.readFileRange(
+                file,
+                offset.coerceAtLeast(0).toLong(),
+                bytes.toInt(),
+            )
+        }
     }
 
     fun logFileSize(filename: String): Long {

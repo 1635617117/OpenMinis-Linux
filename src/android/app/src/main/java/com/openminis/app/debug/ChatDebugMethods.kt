@@ -121,7 +121,13 @@ internal object ChatDebugMethods {
         val pageArgs = args.toMutableList()
         pageArgs += limit
         pageArgs += offset
-        val pageSql = "SELECT * FROM messages WHERE session_id = ?$roleClause " +
+        val pageSql = "SELECT id, session_id, role, " +
+            "CASE WHEN body_ref IS NOT NULL THEN parts_json " +
+            "WHEN body_bytes <= 2048 THEN parts_json " +
+            "ELSE COALESCE(preview, '[{\"type\":\"text\",\"text\":\"[body kept on disk]\"}]') END AS parts_json, " +
+            "created_at, token_usage, sort_order, reasoning_content, stream_interrupt_count, updated_at, error_info, " +
+            "model_id, model_display_name, provider_type, provider_instance_id, body_bytes, body_ref, body_sha, preview " +
+            "FROM messages WHERE session_id = ?$roleClause " +
             "ORDER BY sort_order ASC, created_at ASC LIMIT ? OFFSET ?"
         val sliced = repo.dao.runMessagesQuery(
             androidx.sqlite.db.SimpleSQLiteQuery(pageSql, pageArgs.toTypedArray())

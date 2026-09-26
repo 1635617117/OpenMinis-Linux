@@ -50,6 +50,8 @@ export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE}"
 export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-$SSL_CERT_FILE}"
 export PIP_CERT="${PIP_CERT:-$SSL_CERT_FILE}"
 export NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}"
+ulimit -v 262144 || exit 1
+export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=192"
 
 # Toolchain paths (populated by minis-dev-setup / minis-android-sdk-setup).
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"

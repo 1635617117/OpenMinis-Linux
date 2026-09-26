@@ -19,7 +19,7 @@ class EvolutionLlm(
             AppLogger.warning(TAG, "LLM fused after repeated failures")
             return null
         }
-        val provider = pickProvider() ?: run {
+        val picked = pickProvider() ?: run {
             AppLogger.warning(TAG, "no usable provider")
             return null
         }
@@ -28,15 +28,15 @@ class EvolutionLlm(
             return null
         }
         return try {
-            val response = withTimeout(45_000) {
-                provider.sendMessage(
+            val response = com.openminis.app.data.body.Admission.occupy(user.toByteArray().size.toLong()) { withTimeout(45_000) {
+                picked.provider.sendMessage(
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = user)),
                     systemPrompt = system,
                     maxTokens = maxTokens,
-                    temperature = 0.2,
+                    temperature = picked.temperature,
                     thinkingLevel = ThinkingLevel.OFF,
                 )
-            }
+            } }
             prefs.recordLlmSuccess()
             response.text.takeIf { it.isNotBlank() }
         } catch (t: Throwable) {
@@ -46,7 +46,12 @@ class EvolutionLlm(
         }
     }
 
-    private fun pickProvider(): com.openminis.app.provider.LLMProvider? {
+    private data class Picked(
+        val provider: com.openminis.app.provider.LLMProvider,
+        val temperature: Double?,
+    )
+
+    private fun pickProvider(): Picked? {
         val cfg = providerRepository.config.value
         val enabled = cfg.instances.filter { it.isEnabled }.associateBy { it.id }
         val entry = cfg.modelEntries.firstOrNull { e ->
@@ -54,9 +59,10 @@ class EvolutionLlm(
         } ?: return null
         val instance = enabled[entry.providerInstanceId] ?: return null
         val key = providerRepository.usableApiKey(instance) ?: return null
-        return runCatching {
+        val provider = runCatching {
             ProviderFactory.create(instance, key, entry.model, context)
-        }.getOrNull()
+        }.getOrNull() ?: return null
+        return Picked(provider, entry.overrides.temperature)
     }
 
     companion object {

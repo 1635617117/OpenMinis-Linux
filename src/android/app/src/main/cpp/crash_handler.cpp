@@ -47,11 +47,40 @@
 #include <sys/syscall.h>
 #include <android/log.h>
 #include <unwind.h>
+#include <exception>
 
 #define LOG_TAG "MinisCrashHandler"
 
 // Plenty of headroom for "<logs_dir>/native-crash-YYYY-MM-DD_HH-MM-SS.log".
 static char g_log_dir[512] = {0};
+static char g_terminate_type[96] = {0};
+
+static void copy_type_name(const char* name) {
+    size_t i = 0;
+    if (name == nullptr) name = "unknown";
+    for (; name[i] != '\0' && i + 1 < sizeof(g_terminate_type); ++i) {
+        g_terminate_type[i] = name[i];
+    }
+    g_terminate_type[i] = '\0';
+}
+
+static void minis_terminate() {
+    const char* name = "uncaught";
+    std::exception_ptr ep = std::current_exception();
+    if (ep) {
+        try {
+            std::rethrow_exception(ep);
+        } catch (const std::bad_alloc&) {
+            name = "std::bad_alloc";
+        } catch (const std::exception&) {
+            name = "std::exception";
+        } catch (...) {
+            name = "unknown";
+        }
+    }
+    copy_type_name(name);
+    std::abort();
+}
 
 // Reentrancy guard. If the handler crashes itself, we want the second
 // signal to skip straight to SIG_DFL rather than recursing.
@@ -298,6 +327,7 @@ Java_com_openminis_app_crash_NativeCrashHandler_nativeInstall(
 
     // mkdir is fine here — we're on the JVM thread, not in a signal.
     mkdir(g_log_dir, 0755);
+    std::set_terminate(minis_terminate);
 
     struct sigaction sa{};
     sa.sa_sigaction = crash_signal_handler;

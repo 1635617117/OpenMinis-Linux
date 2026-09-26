@@ -48,7 +48,11 @@ object WorkspaceMover {
         val movedSubdirs: List<String>,
         val bytesMoved: Long,
         val alreadyInPlace: List<String>,
-    )
+        val conflicts: List<String> = emptyList(),
+        val refused: Boolean = false,
+    ) {
+        val succeeded: Boolean get() = !refused && conflicts.isEmpty()
+    }
 
     data class CopyResult(
         val copiedSubdirs: List<String>,
@@ -76,7 +80,7 @@ object WorkspaceMover {
     ): MoveResult {
         if (!SessionWorkspace.isSafeId(sessionId) || !SessionWorkspace.isSafeId(folderId)) {
             AppLogger.warning(TAG, "refusing move: unsafe id session=$sessionId folder=$folderId")
-            return MoveResult(emptyList(), 0L, emptyList())
+            return MoveResult(emptyList(), 0L, emptyList(), refused = true)
         }
         val sessionRoot = SessionWorkspace.base(filesDir, sessionId)
         val projectRoot = SessionWorkspace.projectBase(filesDir, folderId)
@@ -85,6 +89,7 @@ object WorkspaceMover {
 
         val moved = mutableListOf<String>()
         val skipped = mutableListOf<String>()
+        val conflicts = mutableListOf<String>()
         var bytes = 0L
 
         for (sub in SessionWorkspace.SHARED_SUBDIRS) {
@@ -105,19 +110,52 @@ object WorkspaceMover {
                     "merge conflict for $sub (session=$sessionId folder=$folderId); " +
                         "session copy left in place",
                 )
-                skipped.add(sub)
+                conflicts.add(sub)
                 continue
             }
             bytes += moveTree(src, dst)
             moved.add(sub)
         }
 
-        AppLogger.info(
-            TAG,
-            "moved session=$sessionId into folder=$folderId subdirs=$moved " +
-                "bytes=$bytes skipped=$skipped",
-        )
-        return MoveResult(moved, bytes, skipped)
+        if (conflicts.isNotEmpty()) {
+            writeConflictRecord(filesDir, sessionId, folderId, conflicts)
+            AppLogger.warning(
+                TAG,
+                "merge conflict session=$sessionId folder=$folderId subdirs=$conflicts; " +
+                    "not a successful move",
+            )
+        } else {
+            AppLogger.info(
+                TAG,
+                "moved session=$sessionId into folder=$folderId subdirs=$moved " +
+                    "bytes=$bytes skipped=$skipped",
+            )
+        }
+        return MoveResult(moved, bytes, skipped, conflicts)
+    }
+
+    private fun writeConflictRecord(
+        filesDir: File,
+        sessionId: String,
+        folderId: String,
+        conflicts: List<String>,
+    ) {
+        val dir = File(filesDir, "workspace-conflicts")
+        dir.mkdirs()
+        val file = File(dir, "$sessionId.json")
+        val body = buildString {
+            append("{\"sessionId\":\"").append(sessionId)
+            append("\",\"folderId\":\"").append(folderId)
+            append("\",\"recoverable\":true,\"conflicts\":[")
+            append(conflicts.joinToString(",") { "\"$it\"" })
+            append("]}")
+        }
+        val tmp = File(dir, "$sessionId.json.tmp")
+        tmp.writeText(body)
+        if (!tmp.renameTo(file)) {
+            file.writeText(body)
+            tmp.delete()
+        }
     }
 
     /**

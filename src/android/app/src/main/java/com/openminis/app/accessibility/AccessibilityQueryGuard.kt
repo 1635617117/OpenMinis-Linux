@@ -22,7 +22,13 @@ internal object AccessibilityQueryGuard {
     private val failures = AtomicInteger()
     private val openedUntil = AtomicLong()
 
+    fun submit(operation: Runnable) {
+        if (System.currentTimeMillis() < openedUntil.get()) return
+        executor.execute(operation)
+    }
+
     fun <T> query(fallback: T, operation: Callable<T>): T {
+        if (onMainThread()) return fallback
         val now = System.currentTimeMillis()
         if (now < openedUntil.get()) return fallback
         val future = executor.submit(operation)
@@ -38,5 +44,12 @@ internal object AccessibilityQueryGuard {
             }
             fallback
         }
+    }
+
+    private fun onMainThread(): Boolean = try {
+        val main = android.os.Looper.getMainLooper()?.thread
+        main != null && main == Thread.currentThread()
+    } catch (_: Throwable) {
+        false
     }
 }

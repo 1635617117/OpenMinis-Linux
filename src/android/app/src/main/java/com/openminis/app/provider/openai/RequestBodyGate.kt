@@ -70,7 +70,9 @@ object RequestBodyGate {
      */
     fun check(body: HttpBody, context: String) {
         val estimated = body.estimatedBytes
-        if (estimated < 0) return // unknown size; nothing sensible to refuse
+        if (estimated < 0) {
+            throw LLMError.ProviderError("Request size is unknown; refusing to build it.")
+        }
 
         // ---- Gate 1: fixed ceiling -------------------------------------
         if (estimated >= MAX_BODY_BYTES) {
@@ -93,7 +95,9 @@ object RequestBodyGate {
         // 0 means "no information" (a hardened ROM, or a runtime that refuses
         // to tell us). Treat that as unknown, never as "no memory" — failing a
         // request we could have made is worse than letting it through.
-        if (available <= 0) return
+        if (available <= 0) {
+            throw LLMError.ProviderError("Heap headroom is unknown; refusing to build this request.")
+        }
         if (needed > available) {
             val neededMb = needed / (1024 * 1024)
             val availableMb = available / (1024 * 1024)

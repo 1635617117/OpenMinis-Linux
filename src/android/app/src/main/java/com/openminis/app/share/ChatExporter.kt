@@ -94,7 +94,9 @@ object ChatExporter {
         session: ChatSessionEntity,
         repository: ChatRepository,
         format: String,
-    ): Pair<Uri, Summary> = withContext(Dispatchers.IO) {
+    ): Pair<Uri, Summary> = com.openminis.app.data.body.Admission.occupy(
+        com.openminis.app.data.body.ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+    ) { withContext(Dispatchers.IO) {
         exportLock.withLock {
             val isJson = format == "json"
             val ext = if (isJson) "json" else "txt"
@@ -133,7 +135,7 @@ object ChatExporter {
                 runCatching { workDir.deleteRecursively() }
             }
         }
-    }
+    } }
 
     /**
      * Bulk export. One zip with a folder per session plus `manifest.json`.
@@ -145,7 +147,9 @@ object ChatExporter {
         sessions: List<ChatSessionEntity>,
         repository: ChatRepository,
         format: String,
-    ): Pair<Uri, Summary> = withContext(Dispatchers.IO) {
+    ): Pair<Uri, Summary> = com.openminis.app.data.body.Admission.occupy(
+        com.openminis.app.data.body.ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+    ) { withContext(Dispatchers.IO) {
         if (sessions.isEmpty()) {
             throw IllegalArgumentException("no sessions to export")
         }
@@ -236,7 +240,7 @@ object ChatExporter {
                 runCatching { workDir.deleteRecursively() }
             }
         }
-    }
+    } }
 
     private suspend fun streamTranscript(
         repository: ChatRepository,

@@ -85,7 +85,12 @@ class BackupExporter(
         onProgress: ((String) -> Unit)? = null,
     ): Summary = activityLock.withLock { exportBody(options, onProgress) }
 
-    private suspend fun exportBody(options: Options, onProgress: ((String) -> Unit)?): Summary {
+    private suspend fun exportBody(options: Options, onProgress: ((String) -> Unit)?): Summary =
+        com.openminis.app.data.body.Admission.occupy(com.openminis.app.data.body.ResourceLimits.SESSION_PREVIEW_BUDGET.toLong()) {
+        exportBodyAdmitted(options, onProgress)
+    }
+
+    private suspend fun exportBodyAdmitted(options: Options, onProgress: ((String) -> Unit)?): Summary {
         // [T-backup-credentials-without-encryption] There is deliberately NO
         // "refuse to export credentials without a passphrase" guard here.
         //

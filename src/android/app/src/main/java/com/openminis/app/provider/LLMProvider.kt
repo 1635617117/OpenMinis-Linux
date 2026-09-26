@@ -123,6 +123,29 @@ interface LLMProvider : ModelProvider {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): LLMResponse {
         val level = clampThinkingLevel(thinkingLevel)
+        val instanceId = SamplingIdentity.of(this)
+        val wire = SamplingPolicy.wire(instanceId, model.id, temperature, level.isEnabled)
+        return try {
+            sendMessageOnce(messages, systemPrompt, maxTokens, wire, imageParts, tools, level)
+        } catch (e: Throwable) {
+            if (wire != null && SamplingPolicy.isTemperatureRejection(e)) {
+                SamplingPolicy.deny(instanceId, model.id)
+                sendMessageOnce(messages, systemPrompt, maxTokens, null, imageParts, tools, level)
+            } else {
+                throw e
+            }
+        }
+    }
+
+    private suspend fun sendMessageOnce(
+        messages: List<LLMMessage>,
+        systemPrompt: String?,
+        maxTokens: Int,
+        temperature: Double?,
+        imageParts: List<LLMMessage.ImagePart>,
+        tools: List<AgentToolDefinition>,
+        level: ThinkingLevel,
+    ): LLMResponse {
         try {
             return withTimeout(nonStreamDeadlineMs) {
                 ProviderKeyGate.withPermit(callGateKey) {
@@ -132,9 +155,6 @@ interface LLMProvider : ModelProvider {
                 }
             }
         } catch (e: TimeoutCancellationException) {
-            // Re-classify as transient (retryable) instead of letting the bare
-            // CancellationException reach the turn-level catch, which treats
-            // cause-less cancellations as user-initiated job cancellation.
             throw LLMError.TransientError(
                 "non-stream call exceeded ${nonStreamDeadlineMs / 1000}s deadline",
             )
@@ -152,17 +172,47 @@ interface LLMProvider : ModelProvider {
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
     ): Flow<LLMStreamChunk> {
         val level = clampThinkingLevel(thinkingLevel)
-        val inner = streamMessageClamped(
-            messages, systemPrompt, maxTokens, temperature, imageParts, tools, level,
-        )
-        val key = callGateKey
-        if (key.isBlank()) return inner
+        val instanceId = SamplingIdentity.of(this)
+        val first = SamplingPolicy.wire(instanceId, model.id, temperature, level.isEnabled)
         // channelFlow: [ProviderKeyGate.withPermit] uses withContext(HeldKeys),
         // which is a different coroutine than the collector. Regular `flow { emit }`
         // forbids that (IllegalStateException: Flow invariant is violated).
         return channelFlow {
-            ProviderKeyGate.withPermit(key) {
-                inner.collect { send(it) }
+            var temp = first
+            var stripped = false
+            while (true) {
+                var emitted = false
+                try {
+                    val inner = streamMessageClamped(
+                        messages, systemPrompt, maxTokens, temp, imageParts, tools, level,
+                    )
+                    val key = callGateKey
+                    if (key.isBlank()) {
+                        inner.collect {
+                            emitted = true
+                            send(it)
+                        }
+                    } else {
+                        ProviderKeyGate.withPermit(key) {
+                            inner.collect {
+                                emitted = true
+                                send(it)
+                            }
+                        }
+                    }
+                    break
+                } catch (e: Throwable) {
+                    // A 400 that arrives before any token is a sampling rejection,
+                    // not a transient network retry. Strip the field once and
+                    // remember the pair. Do not rewrite the value to 1.
+                    if (!stripped && !emitted && temp != null && SamplingPolicy.isTemperatureRejection(e)) {
+                        stripped = true
+                        SamplingPolicy.deny(instanceId, model.id)
+                        temp = null
+                        continue
+                    }
+                    throw e
+                }
             }
         }
     }

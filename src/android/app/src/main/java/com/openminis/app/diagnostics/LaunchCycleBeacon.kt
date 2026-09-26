@@ -48,47 +48,19 @@ object LaunchCycleBeacon {
      * no_prior_launch) this stays at 0, which means [shouldForceHomeOnLaunch]
      * naturally returns false for users who didn't actually crash.
      *
-     * Reset semantics: the field is process-scoped. It's recomputed once per
-     * process at [recordLaunch] (called from MinisApp.onCreate). A single
-     * cycle that does NOT end in crash_or_stall — even silent_kill, which
-     * dwarfs real crashes for daily users — resets the field to 0 on the
-     * very next launch, restoring auto-recovery. So a user who hits a
-     * crash-loop, then closes the app cleanly (or even gets MIUI-killed in
-     * the background), is back to normal launch behavior on their next tap.
+     * Diagnostic only. A silent_kill does not clear [RouteFuse] and does not
+     * re-enable automatic entry. There is no restart-count threshold.
      */
     @Volatile
     var lastRestartCount: Int = 0
         private set
 
     /**
-     * [T-android-larky-longsession-followup] Threshold for the
-     * "skip auto-recovery" breaker. When the previous launch ended in
-     * crash_or_stall AND [lastRestartCount] exceeds this value (strictly
-     * greater than), the launch resolver lands on the session list instead
-     * of auto-recovering the previous chat — protects against being thrown
-     * straight back into a session that's killing the process.
-     *
-     * The "> 3" wording in the spec means a fourth consecutive bad cycle
-     * triggers it; choosing 3 as the strict-greater-than threshold matches
-     * that interpretation while leaving the user 3 free retries (which can
-     * be normal if e.g. they hit a transient OOM that won't repeat).
+     * One unhealthy previous cycle is enough. A silent kill, a stall, or a
+     * watchdog reboot with no tombstone is not given three free retries, and
+     * clearing a counter does not re-enable automatic entry.
      */
-    const val RESTART_COUNT_FORCE_HOME_THRESHOLD: Int = 3
-
-    /**
-     * [T-android-larky-longsession-followup] True when the previous cycle
-     * ended in crash_or_stall AND the rolling restart-count exceeds
-     * [RESTART_COUNT_FORCE_HOME_THRESHOLD]. Joined with the existing
-     * HangDetector / CrashFrequencyDetector breakers in AppNavigation's
-     * launch resolver — any one of them flips the launch to mode 3 (home),
-     * the others stay untouched.
-     *
-     * Always false for users whose previous cycle was clean_exit, silent_kill,
-     * first_launch, or no_prior_launch — those reset [lastRestartCount] to 0
-     * (it's only written in the crash_or_stall branch of [recordLaunch]).
-     */
-    fun shouldForceHomeOnLaunch(): Boolean =
-        lastCycleWasCrash && lastRestartCount > RESTART_COUNT_FORCE_HOME_THRESHOLD
+    fun shouldForceHomeOnLaunch(): Boolean = lastCycleWasCrash
 
     fun recordLaunch(context: Context) {
         val file = beaconFile(context)

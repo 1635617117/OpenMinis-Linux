@@ -535,7 +535,7 @@ internal suspend fun performTest(
                     ),
                     systemPrompt = null,
                     maxTokens = 128,
-                    temperature = null,
+                    temperature = entry.overrides.temperature,
                 )
                 val text = resp.text.trim()
                 QuickTestState.TextReply(

@@ -10,6 +10,25 @@ import androidx.sqlite.db.SupportSQLiteQuery
 import kotlinx.coroutines.flow.Flow
 
 /**
+ * Hot-path projection. Large parts_json cells are not selected. A body_ref
+ * row already stores a stub. A small inline row is safe to return. Everything
+ * else returns the preview written by migration 19 or the next write.
+ */
+private const val SAFE_MESSAGE_FROM = """
+SELECT id, session_id, role,
+CASE
+  WHEN body_ref IS NOT NULL THEN parts_json
+  WHEN body_bytes <= 2048 THEN parts_json
+  ELSE COALESCE(preview, '[{"type":"text","text":"[body kept on disk]"}]')
+END AS parts_json,
+created_at, token_usage, sort_order, reasoning_content,
+stream_interrupt_count, updated_at, error_info,
+model_id, model_display_name, provider_type, provider_instance_id,
+body_bytes, body_ref, body_sha, preview
+FROM messages
+"""
+
+/**
  * Row projection for `ChatRepository.querySessionsMeta` (T188 — backing
  * the `minis-sessions-cli list` offload command). The SELECT shape is
  * dynamic (built from optional keyword/date/IN-list conditions), so we
@@ -17,6 +36,12 @@ import kotlinx.coroutines.flow.Flow
  * here must exactly match the aliases the dynamic SQL emits — Room
  * binds by column name, not by ordinal.
  */
+data class MessageBodyMeta(
+    val id: String,
+    @ColumnInfo(name = "body_bytes") val bodyBytes: Long,
+    @ColumnInfo(name = "body_ref") val bodyRef: String?,
+)
+
 data class SessionMetaRow(
     val id: String,
     val title: String?,
@@ -206,16 +231,16 @@ interface ChatDao {
     suspend fun clearFolderForSessions(folderId: String)
 
     // Messages
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY sort_order ASC")
+    @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order ASC")
     suspend fun loadMessages(sessionId: String): List<MessageEntity>
 
-    @Query("SELECT * FROM messages WHERE id = :messageId AND session_id = :sessionId LIMIT 1")
+    @Query("$SAFE_MESSAGE_FROM WHERE id = :messageId AND session_id = :sessionId LIMIT 1")
     suspend fun getMessage(sessionId: String, messageId: String): MessageEntity?
 
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY sort_order DESC LIMIT 1")
+    @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order DESC LIMIT 1")
     suspend fun lastMessage(sessionId: String): MessageEntity?
 
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId AND role = :role ORDER BY sort_order DESC LIMIT 1")
+    @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId AND role = :role ORDER BY sort_order DESC LIMIT 1")
     suspend fun lastMessageByRole(sessionId: String, role: String): MessageEntity?
     /**
      * [T-android-huge-session-load-oom] Tail-bounded variant of [loadMessages].
@@ -234,14 +259,14 @@ interface ChatDao {
      * this degrades to the full history - identical to [loadMessages].
      */
     @Query("""
-        SELECT * FROM messages
+        $SAFE_MESSAGE_FROM
         WHERE session_id = :sessionId
         ORDER BY sort_order ASC
         LIMIT :limit OFFSET :offset
     """)
     suspend fun loadMessagesTail(sessionId: String, limit: Int, offset: Int): List<MessageEntity>
 
-    @Query("SELECT * FROM messages WHERE session_id = :sessionId ORDER BY sort_order ASC")
+    @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order ASC LIMIT 200")
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
@@ -256,7 +281,7 @@ interface ChatDao {
      * to what is actually new. [limit] bounds a first run over a long history.
      */
     @Query(
-        "SELECT * FROM messages WHERE role = 'user' AND created_at > :since " +
+        "$SAFE_MESSAGE_FROM WHERE role = 'user' AND created_at > :since " +
             "ORDER BY created_at ASC LIMIT :limit",
     )
     suspend fun loadUserMessagesSince(since: Long, limit: Int): List<MessageEntity>
@@ -328,7 +353,7 @@ interface ChatDao {
 
     // Last message preview for session list
     @Query("""
-        SELECT parts_json FROM messages
+        SELECT substr(COALESCE(preview, parts_json), 1, 8192) FROM messages
         WHERE session_id = :sessionId
         ORDER BY sort_order DESC LIMIT 1
     """)
@@ -343,7 +368,8 @@ interface ChatDao {
      * iOS ChatStore.interruptedSessionIds().
      */
     @Query("""
-        SELECT m.session_id AS session_id, m.role AS role, m.parts_json AS parts_json
+        SELECT m.session_id AS session_id, m.role AS role,
+               substr(COALESCE(m.preview, m.parts_json), 1, 8192) AS parts_json
         FROM messages m
         WHERE m.sort_order = (
             SELECT MAX(m2.sort_order) FROM messages m2 WHERE m2.session_id = m.session_id
@@ -394,7 +420,28 @@ interface ChatDao {
     @Query("UPDATE messages SET parts_json = :partsJson, updated_at = :updatedAt WHERE id = :id")
     suspend fun updateMessageParts(id: String, partsJson: String, updatedAt: Long = System.currentTimeMillis())
 
-    @Query("SELECT parts_json FROM messages WHERE id = :id")
+    @Query(
+        "UPDATE messages SET parts_json = :partsJson, body_bytes = :bodyBytes, " +
+            "body_ref = :bodyRef, body_sha = :bodySha, preview = :preview, updated_at = :updatedAt " +
+            "WHERE id = :id",
+    )
+    suspend fun updateMessageBody(
+        id: String,
+        partsJson: String,
+        bodyBytes: Long,
+        bodyRef: String?,
+        bodySha: String?,
+        preview: String?,
+        updatedAt: Long = System.currentTimeMillis(),
+    )
+
+    @Query("SELECT substr(parts_json, :offset, :len) FROM messages WHERE id = :id")
+    suspend fun readPartsChunk(id: String, offset: Int, len: Int): String?
+
+    @Query("SELECT id, body_bytes, body_ref FROM messages WHERE id = :id")
+    suspend fun bodyMeta(id: String): MessageBodyMeta?
+
+    @Query("SELECT substr(COALESCE(preview, parts_json), 1, 65536) FROM messages WHERE id = :id")
     suspend fun messagePartsJson(id: String): String?
 
     // [T-error-persist-android] Write/clear the terminal error sticker on a
@@ -490,7 +537,7 @@ interface ChatDao {
      * as a tie-breaker for messages inserted in the same millisecond.
      */
     @Query("""
-        SELECT * FROM messages
+        $SAFE_MESSAGE_FROM
         WHERE session_id = :sessionId
         ORDER BY sort_order ASC, created_at ASC
         LIMIT :limit OFFSET :offset
@@ -508,7 +555,7 @@ interface ChatDao {
      * combinations instead of four hand-written ones.
      */
     @Query("""
-        SELECT * FROM messages
+        $SAFE_MESSAGE_FROM
         WHERE session_id = :sessionId
           AND (:startMs IS NULL OR created_at >= :startMs)
           AND (:endMs IS NULL OR created_at <= :endMs)

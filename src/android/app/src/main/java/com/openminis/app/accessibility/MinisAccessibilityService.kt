@@ -84,28 +84,36 @@ class MinisAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
-        val src = event.source
-        val rec = try {
-            val rect = android.graphics.Rect()
-            src?.getBoundsInScreen(rect)
-            val xy = if (src != null && !rect.isEmpty) "${rect.centerX()},${rect.centerY()}" else null
-            RecordedEvent(
-                type = AccessibilityEvent.eventTypeToString(event.eventType),
-                packageName = event.packageName?.toString(),
-                className = event.className?.toString(),
-                text = event.text?.joinToString(" ") { it?.toString() ?: "" }?.takeIf { it.isNotBlank() },
-                timestamp = System.currentTimeMillis(),
-                viewId = src?.viewIdResourceName,
-                contentDescription = src?.contentDescription?.toString()?.takeIf { it.isNotBlank() },
-                xy = xy,
-            )
-        } finally {
-            src?.recycle()
-        }
-        eventRing.offer(rec)
-        while (eventRing.size > EVENT_RING_CAP) eventRing.poll()
-        for (listener in eventListeners) {
-            try { listener(rec) } catch (_: Throwable) {}
+        val copy = AccessibilityEvent.obtain(event)
+        AccessibilityQueryGuard.submit {
+            val src = try {
+                copy.source
+            } catch (_: Throwable) {
+                null
+            }
+            try {
+                val rect = android.graphics.Rect()
+                src?.getBoundsInScreen(rect)
+                val xy = if (src != null && !rect.isEmpty) "${rect.centerX()},${rect.centerY()}" else null
+                val rec = RecordedEvent(
+                    type = AccessibilityEvent.eventTypeToString(copy.eventType),
+                    packageName = copy.packageName?.toString(),
+                    className = copy.className?.toString(),
+                    text = copy.text?.joinToString(" ") { it?.toString() ?: "" }?.takeIf { it.isNotBlank() },
+                    timestamp = System.currentTimeMillis(),
+                    viewId = src?.viewIdResourceName,
+                    contentDescription = src?.contentDescription?.toString()?.takeIf { it.isNotBlank() },
+                    xy = xy,
+                )
+                eventRing.offer(rec)
+                while (eventRing.size > EVENT_RING_CAP) eventRing.poll()
+                for (listener in eventListeners) {
+                    try { listener(rec) } catch (_: Throwable) {}
+                }
+            } finally {
+                src?.recycle()
+                copy.recycle()
+            }
         }
     }
 

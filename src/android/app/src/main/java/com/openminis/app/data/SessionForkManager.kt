@@ -104,6 +104,9 @@ class SessionForkManager(
         while (offset < messageTotal) {
             val page = chatRepository.dao.loadMessagesPage(sessionId, offset, 50)
             if (page.isEmpty()) break
+            val pageBytes = page.sumOf { (it.preview?.length ?: it.partsJson.length).toLong() }
+            if (!com.openminis.app.data.body.Admission.tryAdmit(pageBytes)) break
+            try {
             for (msg in page) {
                 val newMsg = chatRepository.appendMessage(
                     sessionId = new.id,
@@ -116,6 +119,9 @@ class SessionForkManager(
                 oldToNewSort[msg.id] = newMsg.sortOrder
             }
             offset += page.size
+            } finally {
+                com.openminis.app.data.body.Admission.release(pageBytes)
+            }
         }
 
         // [T-session-duplicate-compact-marker-android] Copy compact markers

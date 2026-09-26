@@ -569,9 +569,7 @@ class SessionListViewModel(
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
                     systemPrompt = GROUP_SUGGEST_SYSTEM_PROMPT,
                     maxTokens = maxTokens,
-                    // null, not 0.3 — the gpt-5.x family 400s on anything but
-                    // temperature=1, which would silently skip the candidate.
-                    temperature = null,
+                    temperature = entry.overrides.temperature,
                     thinkingLevel = ThinkingLevel.OFF,
                 )
                 val parsed = parseGroupSuggestion(response.text, folders)
@@ -872,13 +870,7 @@ class SessionListViewModel(
                             // OAuth Claude Code prefix at the provider layer.
                             systemPrompt = com.openminis.app.ui.chat.TITLE_GEN_SYSTEM_PROMPT,
                             maxTokens = titleMaxTokens,
-                            // [T-android-titlegen-temperature] null (not 0.3) so
-                            // buildRequestBody omits the field — the gpt-5.x
-                            // family only accepts temperature=1 and 400s on any
-                            // other value, which would silently skip that
-                            // candidate. Aligns with the auto-title path and iOS
-                            // AIChatViewModel.swift:11244.
-                            temperature = null,
+                            temperature = entry.overrides.temperature,
                             thinkingLevel = ThinkingLevel.OFF,
                         )
                         val (title, category) = parseTitleResponse(response.text)

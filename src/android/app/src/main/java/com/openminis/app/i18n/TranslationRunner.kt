@@ -63,7 +63,7 @@ object TranslationRunner {
                 messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = text)),
                 systemPrompt = "You are a translator. Return only the translation into $target. No preface.",
                 maxTokens = 4096,
-                temperature = 0.2,
+                temperature = entry.overrides.temperature,
                 thinkingLevel = ThinkingLevel.OFF,
             )
             val body = response.text.trim()

@@ -184,6 +184,8 @@ object PRootKernel {
         customEnvironment["GIT_SSL_CAINFO"] = "/etc/ssl/certs/ca-certificates.crt"
         customEnvironment["PIP_CERT"] = "/etc/ssl/certs/ca-certificates.crt"
         customEnvironment["NODE_EXTRA_CA_CERTS"] = "/etc/ssl/certs/ca-certificates.crt"
+        customEnvironment["NODE_OPTIONS"] = GuestLimits.nodeOptions(customEnvironment["NODE_OPTIONS"])
+        customEnvironment["BASH_ENV"] = "/etc/profile.d/minis-limits.sh"
 
         // Inject device timezone so Alpine userspace sees local time.
         // Mirrors iOS ISHShellExecutor.m:335-353 — uses POSIX TZ format with a
@@ -812,7 +814,7 @@ object PRootKernel {
         // Shell command
         cmd.add("/bin/bash")
         cmd.add("-c")
-        cmd.add(shellCommand)
+        cmd.add(GuestLimits.wrap(shellCommand))
 
         Log.d(TAG, "proot cmd: ${cmd.take(cmd.size - 1).joinToString(" ")} <shellCommand ${shellCommand.length} bytes>")
         return cmd

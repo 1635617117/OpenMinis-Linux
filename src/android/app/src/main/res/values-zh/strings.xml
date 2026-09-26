@@ -1228,6 +1228,9 @@
     <string name="modeldetail_auto_compact">自动压缩上下文</string>
     <string name="modeldetail_compact_threshold">压缩阈值（上下文窗口的 50–95%）</string>
     <string name="modeldetail_max_retries">429 / 5xx 最大重试次数（0–8）</string>
+    <string name="modeldetail_temperature">温度（0.0–2.0）</string>
+    <string name="modeldetail_temperature_placeholder">不发送</string>
+    <string name="modeldetail_temperature_invalid">请输入 0.0 到 2.0 的数字，或留空以不发送。</string>
     <string name="modeldetail_context_window">上下文窗口</string>
     <string name="modeldetail_thinking">思考</string>
     <string name="modeldetail_capabilities_footer">上下文窗口和最大输出 Token 数（以 tokens 计）。留空使用服务商默认值。对支持扩展推理的模型启用思考模式。</string>

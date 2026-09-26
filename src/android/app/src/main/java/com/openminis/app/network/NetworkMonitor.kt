@@ -18,7 +18,7 @@ import okhttp3.OkHttpClient
 
 /**
  * Monitors network connectivity changes using ConnectivityManager.NetworkCallback.
- * Evicts the OkHttp connection pool on network transitions to prevent stale connections.
+ * A flap merges connectivity status. It does not evict the connection pool.
  */
 class NetworkMonitor {
 
@@ -35,9 +35,8 @@ class NetworkMonitor {
          * every long-lived LLM provider OkHttpClient (OpenAI / Anthropic /
          * Gemini) — OkHttp explicitly supports sharing one pool across
          * clients. Routing them all through this instance is what lets
-         * [evictConnectionPool] actually reach provider connections:
-         * previously eviction only covered the single client registered via
-         * [start], and MinisApp registers none, so eviction was a no-op.
+         * a flap must not clear it. A brief loss is merged back into the
+         * current status instead of tearing idle sockets down.
          * Through a local VPN/proxy (e.g. clash at 127.0.0.1:7890) the TCP
          * socket to localhost survives network flaps, so the pool kept
          * handing the dead h2 tunnel to every retry — requests wrote into it
@@ -61,6 +60,9 @@ class NetworkMonitor {
      * thread so ConnectivityManager isn't held up by file I/O.
      */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val flapLock = Any()
+    private var pendingLoss: Runnable? = null
+    private val flapHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /**
      * Registers a network callback to observe connectivity changes.
@@ -103,26 +105,16 @@ class NetworkMonitor {
         val callback = object : ConnectivityManager.NetworkCallback() {
 
             override fun onAvailable(network: Network) {
-                val previousStatus = _status.value
-                _status.value = NetworkStatus.CONNECTED
-                if (previousStatus == NetworkStatus.DISCONNECTED) {
-                    Log.d(TAG, "Network transition: DISCONNECTED -> CONNECTED")
-                    evictConnectionPool()
+                cancelPendingLoss()
+                if (_status.value != NetworkStatus.CONNECTED) {
+                    Log.d(TAG, "Network transition: ${_status.value} -> CONNECTED")
+                    _status.value = NetworkStatus.CONNECTED
+                    refreshSandboxDns("onAvailable")
                 }
-                // Always refresh sandbox DNS on availability — an interface
-                // swap (Wi-Fi → cellular) can fire onAvailable without a
-                // prior onLost, and the new interface carries new DNS servers.
-                refreshSandboxDns("onAvailable")
             }
 
             override fun onLost(network: Network) {
-                _status.value = NetworkStatus.DISCONNECTED
-                Log.d(TAG, "Network transition: CONNECTED -> DISCONNECTED")
-                evictConnectionPool()
-                // Rewrite resolv.conf even when disconnected so it falls back
-                // to 8.8.8.8 / 8.8.4.4 instead of sitting stale with a DNS
-                // server that's no longer reachable.
-                refreshSandboxDns("onLost")
+                scheduleLoss()
             }
 
             override fun onCapabilitiesChanged(
@@ -132,12 +124,14 @@ class NetworkMonitor {
                 val hasInternet = networkCapabilities.hasCapability(
                     NetworkCapabilities.NET_CAPABILITY_INTERNET
                 )
-                val newStatus = if (hasInternet) NetworkStatus.CONNECTED else NetworkStatus.DISCONNECTED
-                if (newStatus != _status.value) {
-                    Log.d(TAG, "Network capabilities changed: ${_status.value} -> $newStatus")
-                    _status.value = newStatus
-                    evictConnectionPool()
-                    refreshSandboxDns("onCapabilitiesChanged")
+                if (hasInternet) {
+                    cancelPendingLoss()
+                    if (_status.value != NetworkStatus.CONNECTED) {
+                        _status.value = NetworkStatus.CONNECTED
+                        refreshSandboxDns("onCapabilitiesChanged")
+                    }
+                } else {
+                    scheduleLoss()
                 }
             }
         }
@@ -163,18 +157,30 @@ class NetworkMonitor {
         connectivityManager = null
         okHttpClient = null
         appContext = null
+        cancelPendingLoss()
     }
 
-    /**
-     * Evicts all idle connections from the OkHttp connection pools
-     * to prevent stale connection reuse after a network change.
-     * Always evicts [sharedLLMConnectionPool] (all LLM provider clients),
-     * plus the optional client registered via [start].
-     */
-    private fun evictConnectionPool() {
-        sharedLLMConnectionPool.evictAll()
-        okHttpClient?.connectionPool?.evictAll()
-        Log.d(TAG, "OkHttp connection pools evicted (shared LLM pool + registered client)")
+    private fun scheduleLoss() {
+        synchronized(flapLock) {
+            if (pendingLoss != null) return
+            val loss = Runnable {
+                synchronized(flapLock) { pendingLoss = null }
+                if (_status.value != NetworkStatus.DISCONNECTED) {
+                    Log.d(TAG, "Network transition: ${_status.value} -> DISCONNECTED")
+                    _status.value = NetworkStatus.DISCONNECTED
+                    refreshSandboxDns("onLost")
+                }
+            }
+            pendingLoss = loss
+            flapHandler.postDelayed(loss, NetworkFlapPolicy.DEBOUNCE_MS)
+        }
+    }
+
+    private fun cancelPendingLoss() {
+        synchronized(flapLock) {
+            pendingLoss?.let { flapHandler.removeCallbacks(it) }
+            pendingLoss = null
+        }
     }
 
     /**

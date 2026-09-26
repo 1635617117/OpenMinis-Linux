@@ -65,4 +65,6 @@ data class CompactMarkerEntity(
      * purely additive (migration 17 -> 18 only adds the column).
      */
     @ColumnInfo(name = "summary_chunks") val summaryChunks: String? = null,
+    /** Set when summary_chunks itself exceeded the inline cap. Migration 19 only adds the column. */
+    @ColumnInfo(name = "summary_ref") val summaryRef: String? = null,
 )

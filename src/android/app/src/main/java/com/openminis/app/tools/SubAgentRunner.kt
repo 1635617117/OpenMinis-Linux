@@ -42,6 +42,7 @@ object SubAgentRunner {
         writePaths: List<String> = emptyList(),
         maxTurns: Int = ABSOLUTE_MAX_TURNS,
         roleContext: Context? = null,
+        temperature: Double? = null,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
@@ -71,6 +72,7 @@ object SubAgentRunner {
                     messages = sendHistory,
                     systemPrompt = system,
                     maxTokens = maxTokens.coerceIn(256, 8192),
+                    temperature = temperature,
                     tools = tools,
                     thinkingLevel = ThinkingLevel.OFF,
                 ).collect { chunk ->

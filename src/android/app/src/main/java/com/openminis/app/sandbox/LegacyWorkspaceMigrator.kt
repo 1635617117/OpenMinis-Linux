@@ -79,6 +79,7 @@ object LegacyWorkspaceMigrator {
         val folder = repo.ensureDefaultWorkspace(defaultName)
         var filed = 0
         var movedBytes = 0L
+        var blocked = false
         for (s in sessions) {
             if (s.folderId != null) continue
             // File first, move second. The DB row is the cheap, reversible
@@ -87,23 +88,28 @@ object LegacyWorkspaceMigrator {
             // retries the move (it is idempotent).
             if (!repo.setFolderIfUnfiled(folder.id, s.id)) continue
             filed++
-            movedBytes += runCatching {
-                WorkspaceMover.moveSessionIntoProject(filesDir, s.id, folder.id).bytesMoved
+            val result = runCatching {
+                WorkspaceMover.moveSessionIntoProject(filesDir, s.id, folder.id)
             }.onFailure {
+                blocked = true
                 AppLogger.warning(
                     "LegacyWorkspaceMigrator",
                     "move failed for session=${s.id} (will retry next launch): ${it.message}",
                 )
-            }.getOrDefault(0L)
+            }.getOrNull()
+            if (result == null || !result.succeeded) blocked = true
+            movedBytes += result?.bytesMoved ?: 0L
         }
         seedProjectFromGlobal(filesDir, folder.id)
         AppLogger.info(
             "LegacyWorkspaceMigrator",
             "legacy migrate done: filed=$filed movedBytes=$movedBytes of ${sessions.size} sessions",
         )
-        prefs.edit()
-            .putBoolean(KEY_DONE_V2, true)
-            .putBoolean(KEY_DONE, true)
-            .apply()
+        if (!blocked) {
+            prefs.edit()
+                .putBoolean(KEY_DONE_V2, true)
+                .putBoolean(KEY_DONE, true)
+                .apply()
+        }
     }
 }

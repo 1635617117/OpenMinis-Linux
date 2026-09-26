@@ -87,6 +87,7 @@ class LlmCorrectionStrategy(
             messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
             systemPrompt = SYSTEM_PROMPT,
             maxTokens = correctionMaxTokens(transcript.length, entry.model.maxOutputTokens),
+            temperature = entry.overrides.temperature,
             // Reasoning traces add latency for no benefit here, and on some
             // providers yield empty text with finish_reason=tool_calls.
             thinkingLevel = ThinkingLevel.OFF,

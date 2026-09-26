@@ -2706,6 +2706,7 @@ class ProviderRepository(private val context: Context) {
                         entry.overrides.maxOutputTokens?.let { o.put("maxOutputTokens", it) }
                         entry.overrides.contextWindow?.let { o.put("contextWindow", it) }
                         entry.overrides.supportsReasoning?.let { o.put("supportsReasoning", it) }
+                        entry.overrides.temperature?.let { o.put("temperature", it) }
                         entry.overrides.inputModalities?.let {
                             o.put("inputModalities", JSONArray(it))
                         }
@@ -3154,6 +3155,10 @@ class ProviderRepository(private val context: Context) {
                         maxOutputTokens = if (overridesObj.has("maxOutputTokens")) overridesObj.optInt("maxOutputTokens").takeIf { it > 0 } else null,
                         contextWindow = if (overridesObj.has("contextWindow")) overridesObj.optInt("contextWindow").takeIf { it > 0 } else null,
                         supportsReasoning = if (overridesObj.has("supportsReasoning")) overridesObj.optBoolean("supportsReasoning") else null,
+                        temperature = if (overridesObj.has("temperature")) {
+                            overridesObj.optDouble("temperature").takeUnless { it.isNaN() }
+                                ?.takeIf { it in 0.0..2.0 }
+                        } else null,
                         inputModalities = ovIn,
                         outputModalities = ovOut,
                     )

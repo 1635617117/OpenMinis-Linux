@@ -15,6 +15,8 @@ import com.openminis.app.data.model.LLMUsage
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.SamplingIdentity
+import com.openminis.app.provider.SamplingPolicy
 import com.openminis.app.provider.applyUserAgentOverride
 import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.Dispatchers
@@ -358,9 +360,9 @@ class AnthropicProvider(
         body.put("max_tokens", maxTokens)
         body.put("stream", stream)
 
-        if (temperature != null && !thinkingLevel.isEnabled && !modelRejectsTemperature(model.id)) {
-            body.put("temperature", temperature)
-        }
+        SamplingPolicy.wire(
+            SamplingIdentity.of(this), model.id, temperature, thinkingLevel.isEnabled,
+        )?.let { body.put("temperature", it) }
 
         // Thinking / extended thinking. Two protocol shapes:
         //   - Claude 4.6+ (adaptive): thinking.type="adaptive" + output_config.effort.

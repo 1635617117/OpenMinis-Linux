@@ -271,6 +271,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         // log/crash list still find filesDir/logs on a safe-mode launch —
         // the exact launch where the user is trying to read the crash files.
         AppLogger.primeContext(this)
+        com.openminis.app.platform.OptionalPackages.probe(this)
         com.openminis.app.session.ChatRuntime.binder =
             com.openminis.app.ui.chat.ChatViewModelBinder(this)
 
@@ -1042,6 +1043,7 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
         if (!dropFormulaCaches) return
 
+        com.openminis.app.data.body.Admission.onTrim()
         com.openminis.app.ui.chat.ChatViewModelStore.trimIdle(pressure = level != TRIM_MEMORY_UI_HIDDEN)
         Log.i("MinisApp", "onTrimMemory(level=$level): releasing formula bitmap caches")
         runCatching { com.openminis.app.ui.chat.KatexWebViewPool.evictAll() }

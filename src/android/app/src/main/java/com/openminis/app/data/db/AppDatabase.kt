@@ -20,7 +20,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
         CodeSymbolEntity::class,
         CodeEdgeEntity::class,
     ],
-    version = 18, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 19, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -451,6 +451,35 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Adds body metadata only. Does not rewrite parts_json. length(CAST AS BLOB)
+         * is the UTF-8 byte count and stays inside SQLite. Preview for oversized
+         * rows is a short JSON text part built with json_quote, so the hot path
+         * can show the session without pulling the cell into Java.
+         */
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.addColumnIfMissing("messages", "body_bytes", "INTEGER NOT NULL DEFAULT 0")
+                db.addColumnIfMissing("messages", "body_ref", "TEXT")
+                db.addColumnIfMissing("messages", "body_sha", "TEXT")
+                db.addColumnIfMissing("messages", "preview", "TEXT")
+                db.addColumnIfMissing("compact_markers", "summary_ref", "TEXT")
+                db.execSQL("UPDATE messages SET body_bytes = length(CAST(parts_json AS BLOB))")
+                db.execSQL(
+                    "UPDATE messages SET preview = CASE " +
+                        "WHEN body_bytes <= 2048 THEN parts_json " +
+                        "ELSE '[{\"type\":\"text\",\"text\":' || json_quote(substr(parts_json, 1, 2000)) || '}]' " +
+                        "END",
+                )
+            }
+        }
+
+        val MIGRATION_19_18 = object : Migration(19, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Keep the columns. Older builds ignore extra fields.
+            }
+        }
+
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.addColumnIfMissing("sessions", "permission_mode", "TEXT")
@@ -491,6 +520,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_15_16, MIGRATION_16_15,
                         MIGRATION_16_17, MIGRATION_17_16,
                         MIGRATION_17_18, MIGRATION_18_17,
+                        MIGRATION_18_19, MIGRATION_19_18,
                     )
                     .build()
                     .also { INSTANCE = it }

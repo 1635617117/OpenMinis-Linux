@@ -1,6 +1,8 @@
 package com.openminis.app.data.repository
 
 import android.database.sqlite.SQLiteBlobTooBigException
+import com.openminis.app.data.body.BodyStore
+import com.openminis.app.data.body.ResourceLimits
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
@@ -75,20 +77,40 @@ class ChatRepository(
     ): SessionTail {
         val total = dao.messageCountForSession(sessionId)
         if (total <= 0) return SessionTail(emptyList(), 0)
-        val want = minOf(limit, total)
-        val oldestWantedSort = total - want // 0-based index of first kept row
-        val out = ArrayList<com.openminis.app.data.db.MessageEntity>(want)
-        var pageStart = oldestWantedSort
-        var remaining = want
-        while (remaining > 0) {
-            val page = dao.loadMessagesPage(sessionId, pageStart, minOf(pageSize, remaining))
-            if (page.isEmpty()) break
-            out.addAll(page)
-            pageStart += page.size
-            remaining -= page.size
-            if (page.size < minOf(pageSize, remaining + page.size)) break
+        if (!com.openminis.app.data.body.Admission.tryAdmit(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())) {
+            return SessionTail(emptyList(), total)
         }
-        return SessionTail(out, total)
+        try {
+            val want = minOf(limit, total)
+            val oldestWantedSort = total - want
+            val out = ArrayList<com.openminis.app.data.db.MessageEntity>(want.coerceAtMost(256))
+            var pageStart = oldestWantedSort
+            var remaining = want
+            var previewBytes = 0L
+            while (remaining > 0 && previewBytes < ResourceLimits.SESSION_PREVIEW_BUDGET) {
+                val page = dao.loadMessagesPage(sessionId, pageStart, minOf(pageSize, remaining))
+                if (page.isEmpty()) break
+                for (row in page) {
+                    val rowBytes = (row.preview?.length ?: row.partsJson.length).toLong()
+                    if (!com.openminis.app.data.body.PreviewBudget.canTake(
+                            previewBytes,
+                            rowBytes,
+                            ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+                        )
+                    ) {
+                        return SessionTail(out, total)
+                    }
+                    out.add(row)
+                    previewBytes += rowBytes
+                }
+                pageStart += page.size
+                remaining -= page.size
+                if (page.size < minOf(pageSize, remaining + page.size)) break
+            }
+            return SessionTail(out, total)
+        } finally {
+            com.openminis.app.data.body.Admission.release(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())
+        }
     }
 
     suspend fun loadMessageIds(sessionId: String, pageSize: Int = 500): Set<String> {
@@ -549,8 +571,23 @@ class ChatRepository(
      * boundary cut to trim the kept assistant row to the parts before the
      * target tool_use. Mirrors iOS ChatStore.updateMessageParts.
      */
-    suspend fun updateMessageParts(id: String, partsJson: String) =
-        dao.updateMessageParts(id, partsJson)
+    suspend fun updateMessageParts(id: String, partsJson: String) {
+        val meta = dao.bodyMeta(id)
+        if (meta != null && meta.bodyBytes > ResourceLimits.INLINE_BODY_BYTES &&
+            meta.bodyRef == null && partsJson.length < meta.bodyBytes
+        ) {
+            return
+        }
+        val stored = storeBody(partsJson)
+        dao.updateMessageBody(
+            id = id,
+            partsJson = stored.inline,
+            bodyBytes = stored.bodyBytes,
+            bodyRef = stored.ref,
+            bodySha = stored.sha,
+            preview = stored.preview,
+        )
+    }
 
     /** [T-error-persist-android] Set/clear the error sticker on a row by id. */
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?) =
@@ -592,16 +629,16 @@ class ChatRepository(
         // the row in the same parts_json shape (text part) so downstream
         // parsers — UI rendering and JSON-array consumers in DAO/search
         // — never break on the truncated payload.
-        val capped = if (partsJson.length > MAX_MESSAGE_PARTS_JSON_LENGTH) {
-            buildTruncatedPartsJson(partsJson)
-        } else {
-            partsJson
-        }
+        val stored = storeBody(partsJson)
         val message = MessageEntity(
             id = UUID.randomUUID().toString(),
             sessionId = sessionId,
             role = role,
-            partsJson = capped,
+            partsJson = stored.inline,
+            bodyBytes = stored.bodyBytes,
+            bodyRef = stored.ref,
+            bodySha = stored.sha,
+            preview = stored.preview,
             createdAt = now,
             tokenUsage = tokenUsage,
             sortOrder = sortOrder,
@@ -624,7 +661,7 @@ class ChatRepository(
         //
         // The row's own timestamp is still worth recording: it is what keeps
         // the session sorted as recently-active while a long tool chain runs.
-        val preview = extractTextPreview(capped)
+        val preview = extractTextPreview(stored.inline)
         if (preview != null) {
             dao.updateLastMessage(sessionId, preview, now)
         } else {
@@ -772,6 +809,9 @@ class ChatRepository(
         endMs: Long?,
     ): List<MessageSearchMatch> {
         if (keywords.isEmpty()) return emptyList()
+        val budget = limit.coerceIn(1, 32).toLong() * ResourceLimits.SQL_CELL_BYTES
+        if (!com.openminis.app.data.body.Admission.tryAdmit(budget)) return emptyList()
+        return try {
         val conditions = mutableListOf<String>()
         val args = mutableListOf<Any>()
 
@@ -793,7 +833,8 @@ class ChatRepository(
         }
         val where = conditions.joinToString(" AND ")
         val sql = """
-            SELECT m.session_id, m.id, m.role, m.created_at, m.parts_json
+            SELECT m.session_id, m.id, m.role, m.created_at,
+                   substr(COALESCE(m.preview, m.parts_json), 1, ${ResourceLimits.SQL_CELL_BYTES})
             FROM messages m
             WHERE $where
             ORDER BY m.created_at DESC
@@ -813,7 +854,10 @@ class ChatRepository(
             out += MessageSearchMatch(r.sessionId, r.id, r.role, r.createdAt, snip)
             if (out.size >= limit) break
         }
-        return out
+        out
+        } finally {
+            com.openminis.app.data.body.Admission.release(budget)
+        }
     }
 
     /**
@@ -954,6 +998,37 @@ class ChatRepository(
         if (start > 0) s = "…$s"
         if (end < text.length) s = "$s…"
         return s
+    }
+
+    private data class StoredBody(
+        val inline: String,
+        val bodyBytes: Long,
+        val ref: String?,
+        val sha: String?,
+        val preview: String?,
+    )
+
+    private fun storeBody(partsJson: String): StoredBody {
+        val bytes = partsJson.toByteArray(Charsets.UTF_8)
+        val preview = partsJson.take(ResourceLimits.PREVIEW_BYTES)
+        if (bytes.size <= ResourceLimits.INLINE_BODY_BYTES) {
+            return StoredBody(partsJson, bytes.size.toLong(), null, null, preview)
+        }
+        val dir = filesDir?.let { File(it, "bodies") }
+        val put = if (dir == null) null else BodyStore(dir).put(bytes)
+        val note = if (put?.ok == true) {
+            "body stored (${bytes.size} bytes)"
+        } else {
+            "body omitted; store failed"
+        }
+        val stub = """[{"type":"text","text":${org.json.JSONObject.quote(note)}}]"""
+        return StoredBody(
+            inline = stub,
+            bodyBytes = bytes.size.toLong(),
+            ref = put?.ref,
+            sha = put?.sha,
+            preview = preview,
+        )
     }
 
     companion object {

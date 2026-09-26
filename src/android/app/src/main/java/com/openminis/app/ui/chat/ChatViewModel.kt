@@ -3824,7 +3824,7 @@ class ChatViewModel(
             ),
             systemPrompt = compactSummarySystemPrompt,
             maxTokens = attempt.maxOutFor(userMessage),
-            temperature = null,
+            temperature = attempt.temperature,
             imageParts = emptyList(),
             tools = emptyList(),
             thinkingLevel = ThinkingLevel.OFF,
@@ -3839,6 +3839,7 @@ class ChatViewModel(
         val provider: LLMProvider,
         val model: LLMModel,
         val nextHint: String,
+        val temperature: Double? = null,
     ) {
         fun maxOutFor(userMessage: String): Int {
             val estimatedInput = userMessage.length / 4
@@ -3873,14 +3874,17 @@ class ChatViewModel(
                     provider = provider,
                     model = entry.model,
                     nextHint = "truncate",
+                    temperature = entry.overrides.temperature,
                 )
             }
+        val sessionTemperature = samplingTemperature(_activeEntryId.value)
         val second = fallback ?: CompactAttempt(
             kind = "session-retry",
             label = sessionName,
             provider = sessionProvider,
             model = sessionModel,
             nextHint = "truncate",
+            temperature = sessionTemperature,
         )
         return listOf(
             CompactAttempt(
@@ -3889,6 +3893,7 @@ class ChatViewModel(
                 provider = sessionProvider,
                 model = sessionModel,
                 nextHint = if (fallback != null) "fallback" else "session-retry",
+                temperature = sessionTemperature,
             ),
             second,
         )
@@ -8642,6 +8647,7 @@ class ChatViewModel(
                     currentProvider.streamMessage(
                         applyRequestImageBudget(effectiveAgentHistory()),
                         systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
+                        temperature = samplingTemperature(_activeEntryId.value),
                         tools = agentTools,
                         thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
                     ).collect { chunk ->
@@ -10145,6 +10151,7 @@ class ChatViewModel(
             messages = listOf(LLMMessage(LLMMessage.Role.USER, user)),
             systemPrompt = system,
             maxTokens = 2048,
+            temperature = samplingTemperature(_activeEntryId.value),
             tools = emptyList(),
             thinkingLevel = ThinkingLevel.OFF,
         ).collect { chunk ->
@@ -11853,11 +11860,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
                     messages = listOf(LLMMessage(role = LLMMessage.Role.USER, content = prompt)),
                     systemPrompt = effectiveSystemPrompt,
                     maxTokens = titleMaxTokens,
-                    // Mirror iOS AIChatViewModel.swift:11244 — pass null so
-                    // gpt-5.x family doesn't reject the request (only
-                    // temperature=1 allowed there). buildRequestBody omits
-                    // the field when null.
-                    temperature = null,
+                    temperature = titleTemperature(),
                     thinkingLevel = ThinkingLevel.OFF,
                 )
 
@@ -12057,6 +12060,20 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
      * OAuth-Anthropic Claude-Code-only gate. Falls back to null if no sub is
      * configured — caller uses the primary provider then.
      */
+    private fun samplingTemperature(entryId: String?): Double? {
+        if (entryId.isNullOrBlank()) return null
+        return providerRepository.config.value.modelEntries
+            .firstOrNull { it.id == entryId }
+            ?.overrides
+            ?.temperature
+    }
+
+    /** Title sub-entry's own override. Falls back to the serving entry only when no sub-entry exists. */
+    private fun titleTemperature(): Double? {
+        val sub = providerRepository.resolveTitleSubEntry()
+        return if (sub != null) sub.overrides.temperature else samplingTemperature(_activeEntryId.value)
+    }
+
     private fun resolveTitleProvider(): LLMProvider? {
         // [T-disabled-provider-via-group-android] Resolve the dedicated
         // title-generation sub-model (first enabled member of defaultSubGroupId).

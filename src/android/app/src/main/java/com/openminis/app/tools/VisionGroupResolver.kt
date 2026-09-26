@@ -247,6 +247,7 @@ object VisionGroupResolver {
                 messages = listOf(message),
                 systemPrompt = SYSTEM_PROMPT,
                 maxTokens = 2048,
+                temperature = entry.overrides.temperature,
                 imageParts = listOf(LLMMessage.ImagePart(data = imageData, mimeType = mimeType)),
             )
             response.text

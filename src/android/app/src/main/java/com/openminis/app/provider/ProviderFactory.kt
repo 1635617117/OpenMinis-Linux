@@ -237,6 +237,7 @@ object ProviderFactory {
         // custom-rule path (Gemini/Anthropic use their own emitters), so this is the
         // only type that needs it.
         (provider as? OpenAIProvider)?.thinkingRuleInstanceId = instance.id
+        SamplingIdentity.bind(provider, instance.id)
         return provider
     }
 }

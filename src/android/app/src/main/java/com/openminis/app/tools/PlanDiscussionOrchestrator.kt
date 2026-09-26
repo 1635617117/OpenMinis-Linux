@@ -23,6 +23,7 @@ object PlanDiscussionOrchestrator {
         val stance: String,
         val provider: LLMProvider,
         val maxTokens: Int,
+        val temperature: Double? = null,
     )
 
     data class Result(
@@ -133,6 +134,7 @@ object PlanDiscussionOrchestrator {
                     messages = history,
                     systemPrompt = system,
                     maxTokens = member.maxTokens.coerceIn(256, 8192),
+                    temperature = member.temperature,
                     tools = tools,
                     thinkingLevel = ThinkingLevel.OFF,
                 ).collect { chunk ->

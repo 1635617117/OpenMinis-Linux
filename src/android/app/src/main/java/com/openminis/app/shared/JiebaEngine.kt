@@ -52,13 +52,13 @@ internal class JiebaEngine(context: Context) {
     /** Exact-mode segmentation (HMM on). Empty list if init failed. */
     fun segment(text: String): List<String> {
         if (text.isEmpty() || !ensureInitialized()) return emptyList()
-        return nativeSegment(text).asList()
+        return com.openminis.app.data.body.Admission.nativeCall(text) { nativeSegment(text).asList() }
     }
 
     /** Search-engine-mode segmentation. Empty list if init failed. */
     fun segmentForSearch(text: String): List<String> {
         if (text.isEmpty() || !ensureInitialized()) return emptyList()
-        return nativeSegmentForSearch(text).asList()
+        return com.openminis.app.data.body.Admission.nativeCall(text) { nativeSegmentForSearch(text).asList() }
     }
 
     /**
@@ -73,7 +73,7 @@ internal class JiebaEngine(context: Context) {
      */
     fun posTag(text: String): List<Pair<String, String>> {
         if (text.isEmpty() || !ensureInitialized()) return emptyList()
-        val flat = nativePosTag(text)
+        val flat = com.openminis.app.data.body.Admission.nativeCall(text) { nativePosTag(text) }
         val out = ArrayList<Pair<String, String>>(flat.size / 2)
         var i = 0
         while (i + 1 < flat.size) {

@@ -1321,6 +1321,9 @@
     <string name="modeldetail_auto_compact">Auto compact</string>
     <string name="modeldetail_compact_threshold">Compact at % of context window (50–95)</string>
     <string name="modeldetail_max_retries">Max retries on 429 / 5xx (0–8)</string>
+    <string name="modeldetail_temperature">Temperature (0.0–2.0)</string>
+    <string name="modeldetail_temperature_placeholder">Omit</string>
+    <string name="modeldetail_temperature_invalid">Enter a number from 0.0 to 2.0, or leave blank to omit.</string>
     <string name="modeldetail_context_window">Context Window</string>
     <string name="modeldetail_thinking">Thinking</string>
     <string name="modeldetail_capabilities_footer">Context window and max output tokens (in tokens). Leave empty to use provider defaults. Enable Thinking for models that support extended reasoning.</string>
