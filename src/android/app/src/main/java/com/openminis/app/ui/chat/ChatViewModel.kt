@@ -2951,90 +2951,8 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * Summarize [messages], recursively halving when a whole-input attempt
-     * fails. Mirrors iOS `generateCompactSummaryWithSplitting`.
-     *
-     * Depth cap = 3 (matches iOS) so a pathologically large conversation
-     * still terminates instead of fanning out indefinitely. At each split we
-     * halve by message count, summarize each half independently, then
-     * concatenate the partial summaries oldest-first. The concatenation is a
-     * plain string join, NOT a further LLM call — see the comment at the join
-     * for why the extra round-trip was removed. Both platforms must keep this
-     * the same, or the summary a session carries differs by device.
-     */
-    internal suspend fun generateCompactSummaryWithSplitting(
-        messages: List<LLMMessage>,
-        previousSummary: String? = null,
-        depth: Int = 0,
-    ): String {
-        val transcript = buildConversationTextForSummary(messages)
-        val conversationText = if (previousSummary.isNullOrBlank()) {
-            transcript
-        } else {
-            "Previous context summary:\n$previousSummary\n\n" +
-                "New conversation to merge:\n$transcript"
-        }
-        val tokenBudget = compactSegmentTokenBudget(currentModel?.contextWindow ?: 128_000)
-        val estimatedTokens = estimateCompactTokens(conversationText)
-        if (compactAllowSplit && shouldProactivelySplit(
-                messages.size,
-                estimatedTokens,
-                tokenBudget,
-                depth,
-                compactCallsIssued.get(),
-            )
-        ) {
-            AppLogger.info(
-                TAG,
-                "[Compact] proactive split ${messages.size} msgs ~$estimatedTokens tok " +
-                    "(budget=$tokenBudget, depth=$depth)",
-            )
-            return splitCompactHalves(messages, previousSummary, depth)
-        }
-        // [T-android-compact-runaway] Spend one unit of the run's call budget.
-        // The depth cap bounds how DEEP the recursion goes; this bounds how
-        // WIDE it gets in total, which is what actually determines wall-clock
-        // time when each call is slow rather than failing fast.
-        val spent = compactCallsIssued.incrementAndGet()
-        if (spent > MAX_COMPACT_LLM_CALLS) {
-            throw IllegalStateException(
-                "compaction exceeded its budget of $MAX_COMPACT_LLM_CALLS model calls"
-            )
-        }
-        // [T-android-compact-progress] Publish before the call so the UI shows
-        // the segment that is actually running, not the one that just finished.
-        _compactProgress.value = _compactProgress.value?.copy(
-            depth = depth,
-            callsIssued = spent,
-        )
-        return try {
-            generateCompactSummary(conversationText)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            if (!compactAllowSplit || !isSegmentRetryableError(e) || messages.size < 2 || depth >= 3) {
-                throw e
-            }
-            // Don't start a split we cannot afford to finish: a half that
-            // immediately throws on budget would discard the sibling's work.
-            if (compactCallsIssued.get() + 2 > MAX_COMPACT_LLM_CALLS) {
-                AppLogger.info(
-                    TAG,
-                    "[Compact] not splitting at depth=$depth — " +
-                        "${compactCallsIssued.get()}/$MAX_COMPACT_LLM_CALLS calls already spent",
-                )
-                throw e
-            }
-            AppLogger.info(
-                TAG,
-                "[Compact] Splitting ${messages.size} messages after retryable error (depth=$depth)",
-            )
-            return splitCompactHalves(messages, previousSummary = null, depth)
-        }
-    }
 
-    private suspend fun splitCompactHalves(
+    internal suspend fun splitCompactHalves(
         messages: List<LLMMessage>,
         previousSummary: String?,
         depth: Int,
@@ -3052,7 +2970,7 @@ class ChatViewModel(
      * summary. Throws on provider error so the splitter above can detect
      * context-too-large failures and retry with halved input.
      */
-    private suspend fun generateCompactSummary(conversationText: String): String {
+    internal suspend fun generateCompactSummary(conversationText: String): String {
         // Wrap the transcript in explicit BEGIN/END framing so the model
         // treats it as material to summarize rather than as a chat turn to
         // continue. Mirrors iOS AIChatViewModel+Compaction.swift
@@ -3109,7 +3027,7 @@ class ChatViewModel(
 
     /** Two-shot compact: one leaf call per stage, no in-stage split fan-out. */
     @Volatile
-    private var compactAllowSplit = false
+    internal var compactAllowSplit = false
 
     internal fun compactStagePlan(): List<CompactAttempt> {
         val sessionProvider = currentProvider
@@ -3194,7 +3112,7 @@ class ChatViewModel(
      * Both are better served by failing fast and letting the user retry the
      * whole compaction once conditions change.
      */
-    private fun isSegmentRetryableError(error: Throwable): Boolean =
+    internal fun isSegmentRetryableError(error: Throwable): Boolean =
         shouldSplitOnError(error)
 
     /**
