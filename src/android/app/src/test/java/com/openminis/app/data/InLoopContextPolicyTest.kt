@@ -1,6 +1,7 @@
 package com.openminis.app.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -41,16 +42,23 @@ class InLoopContextPolicyTest {
     }
 
     @Test
-    fun `small windows never ask for compaction - only exhaustion`() {
-        // 32K-64K tier: offload only, compactThreshold = 0.
+    fun `small windows auto-compact before the offload line`() {
+        // [T-compact-small-window-auto] The 32K-64K tier no longer refuses
+        // auto-compaction: a bounded tool-heavy history costs far more than a
+        // summary plus a short tail, so the ceiling is reached otherwise.
         val window = 40_000
         val p = ContextPolicy.forContextWindow(window)
-        assertEquals(0, p.compactThreshold)
-        // Well past the exhaust line — must be EXHAUSTED, never NEEDS_COMPACT,
-        // which is why the in-loop guard stops instead of compacting here.
+        assertEquals(window - 15_000, p.compactThreshold)
+        // Fires before offload, so the summary lands while headroom remains.
+        assertTrue(p.compactThreshold < p.offloadThreshold)
         assertEquals(
-            ContextPolicy.CheckResult.EXHAUSTED,
+            ContextPolicy.CheckResult.NEEDS_COMPACT,
             p.check(window - 1_000, window),
+        )
+        // Still quiet below the compact line.
+        assertEquals(
+            ContextPolicy.CheckResult.OK,
+            p.check(p.compactThreshold - 1_000, window),
         )
     }
 
@@ -100,8 +108,15 @@ class InLoopContextPolicyTest {
     }
 
     @Test
-    fun `windows under 64k still never compact even with a high percent`() {
+    fun `small windows ignore the compact percent knob`() {
+        // [T-compact-small-window-auto] The 32K-64K tier now has a real
+        // compactThreshold fixed 15k below the window; the percent knob that
+        // scales the >=64K tiers must not shrink it away again.
         val p = ContextPolicy.forContextWindow(40_000, compactPercent = 95)
-        assertEquals(0, p.compactThreshold)
+        assertEquals(40_000 - 15_000, p.compactThreshold)
+        assertEquals(
+            ContextPolicy.CheckResult.NEEDS_COMPACT,
+            p.check(39_000, 40_000),
+        )
     }
 }

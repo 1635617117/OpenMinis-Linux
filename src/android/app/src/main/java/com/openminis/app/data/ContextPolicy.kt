@@ -53,7 +53,9 @@ data class ContextPolicy(
         /**
          * Produce the policy for a given context window size. Four tiers:
          *   - `<32K`   → offload/compact disabled; UI tells user to start a new chat.
-         *   - `32K–64K` → offload only; exhaust line = ctx − 10k.
+         *   - `32K–64K` → offload + auto-compact (threshold sits 15k below the
+         *     window, ahead of the offload line) so small-window models are not
+         *     doomed to hit the ceiling; `[T-compact-small-window-auto]`.
          *   - `64K–128K` / `≥128K` → offload + compact at [compactPercent] of the window
          *     (default 90).
          */
@@ -74,8 +76,15 @@ data class ContextPolicy(
             contextWindow < 64_000 -> ContextPolicy(
                 offloadThreshold = contextWindow - 10_000,
                 offloadTarget = contextWindow - 15_000,
-                compactThreshold = 0,
-                exhaustedOnly = true,
+                // [T-compact-small-window-auto] Previously 0 (auto-compact
+                // disabled on this tier). On a bounded agentHistory a full
+                // history of tool results is far more expensive than a
+                // summary plus a short verbatim tail, so refusing to compact
+                // here only guaranteed the window ceiling gets hit instead.
+                // Compaction now fires BEFORE the offload line so the heavy
+                // tool payloads get folded while there is still headroom.
+                compactThreshold = contextWindow - 15_000,
+                exhaustedOnly = false,
                 manualCompactAllowed = true,
             )
             contextWindow < 128_000 -> ContextPolicy(

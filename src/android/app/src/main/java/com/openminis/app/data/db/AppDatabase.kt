@@ -20,7 +20,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
         CodeSymbolEntity::class,
         CodeEdgeEntity::class,
     ],
-    version = 17, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 18, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -436,6 +436,21 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // [T-compact-chunk-pool] Additive only: per-compaction summary
+                // chunks for retrieval. Legacy rows stay NULL and keep
+                // reading through `summary`.
+                db.addColumnIfMissing("compact_markers", "summary_chunks", "TEXT")
+            }
+        }
+
+        val MIGRATION_18_17 = object : Migration(18, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Keep the column. Older builds ignore extra fields.
+            }
+        }
+
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.addColumnIfMissing("sessions", "permission_mode", "TEXT")
@@ -475,6 +490,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_13_14, MIGRATION_14_13, MIGRATION_14_15, MIGRATION_15_14,
                         MIGRATION_15_16, MIGRATION_16_15,
                         MIGRATION_16_17, MIGRATION_17_16,
+                        MIGRATION_17_18, MIGRATION_18_17,
                     )
                     .build()
                     .also { INSTANCE = it }

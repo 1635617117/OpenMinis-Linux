@@ -198,6 +198,206 @@ class ChatViewModel(
             if (hasFallbackDistinctFromSession) listOf("session", "fallback")
             else listOf("session", "session-retry")
 
+        /** [T-compact-summary-quality] Floor for an acceptable summary. */
+        internal val MIN_ACCEPTABLE_SUMMARY_CHARS = 120
+
+        /**
+         * [T-compact-summary-quality] A summary is accepted when it is long
+         * enough to carry state AND still echoes something from the user's
+         * latest message — the concrete signal that the model summarized the
+         * conversation instead of answering it or drifting. Pure function so
+         * the policy is testable without an Android ViewModel.
+         */
+        internal fun isCompactSummaryAcceptable(summary: String, messages: List<LLMMessage>): Boolean {
+            val trimmed = summary.trim()
+            if (trimmed.length < MIN_ACCEPTABLE_SUMMARY_CHARS) return false
+            val lastUser = messages.lastOrNull { it.role == LLMMessage.Role.USER } ?: return true
+            val probe = lastUser.content.trim()
+            if (probe.length < 4) return true
+            val lower = trimmed.lowercase()
+            // [T-compact-summary-quality] Reuse the chunk tokenizer so the
+            // check looks for the user's CONTENT terms, not arbitrary
+            // character windows: a 4-gram test is fooled by filler that any
+            // summary shares ("trailing context", "the length floor"), while
+            // real terms ("notification", "pipeline", "压缩", "机制") are
+            // exactly what a faithful summary must echo. Short ASCII words
+            // are dropped - "the"/"and" match everything.
+            val terms = summaryQueryTerms(probe).filter { t ->
+                t.length >= 4 || (t.first().code in 0x4E00..0x9FFF)
+            }
+            if (terms.isEmpty()) return true
+            return terms.any { t -> t in lower }
+        }
+
+        /** [T-compact-chunk-pool] Newest chunks kept in the rolling pool. */
+        internal val SUMMARY_CHUNK_POOL_MAX = 8
+
+        /** Per-chunk cap; a runaway summary must not fill the pool. */
+        internal const val SUMMARY_CHUNK_MAX_CHARS = 4_000
+
+        /** Chunks injected per turn after retrieval. */
+        internal const val SUMMARY_CHUNK_TOP_K = 3
+
+        /**
+         * [T-compact-chunk-pool] Parse the marker column into chunk texts.
+         * Returns an empty list for legacy/garbage rows — every caller must
+         * treat that as "no pool" and fall back to `summary`.
+         */
+        internal fun parseSummaryChunks(json: String?): List<String> =
+            parseSummaryChunkRecords(json).map { it.first }
+
+        /** (text, epochMs) pairs, oldest first. */
+        private fun parseSummaryChunkRecords(json: String?): List<Pair<String, Long>> {
+            if (json.isNullOrBlank()) return emptyList()
+            return runCatching {
+                val arr = org.json.JSONArray(json)
+                val out = ArrayList<Pair<String, Long>>(arr.length())
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val t = o.optString("t").takeIf { it.isNotBlank() } ?: continue
+                    out.add(t to o.optLong("a", 0L))
+                }
+                out
+            }.getOrDefault(emptyList())
+        }
+
+        /**
+         * [T-compact-chunk-pool] Rolling pool update on a successful compact:
+         * keep the newest [SUMMARY_CHUNK_POOL_MAX] chunks (each capped), each
+         * stored as a per-compaction snapshot so earlier material can still be
+         * retrieved by keyword later. Pure function, testable.
+         */
+        internal fun appendSummaryChunk(existingJson: String?, newSummary: String): String {
+            val capped = newSummary.take(SUMMARY_CHUNK_MAX_CHARS)
+            val kept = parseSummaryChunkRecords(existingJson)
+                .filter { it.first.isNotBlank() }
+                .toMutableList()
+            kept.add(capped to System.currentTimeMillis())
+            val trimmed = if (kept.size > SUMMARY_CHUNK_POOL_MAX) {
+                kept.subList(kept.size - SUMMARY_CHUNK_POOL_MAX, kept.size).toList()
+            } else {
+                kept
+            }
+            return runCatching {
+                val arr = org.json.JSONArray()
+                for ((t, a) in trimmed) {
+                    arr.put(org.json.JSONObject().put("t", t).put("a", a))
+                }
+                arr.toString()
+            }.getOrElse { "[]" }
+        }
+
+        /**
+         * [T-compact-chunk-pool] Tokenize a query into comparable units:
+         * ASCII word runs plus CJK bigrams (a Chinese sentence has no spaces,
+         * and a single-gram match is far too noisy). Pure function.
+         */
+        internal fun summaryQueryTerms(query: String): Set<String> {
+            val terms = LinkedHashSet<String>()
+            val lower = query.lowercase()
+            val ascii = StringBuilder()
+            fun flushAscii() {
+                if (ascii.length >= 2) terms.add(ascii.toString())
+                ascii.setLength(0)
+            }
+            var cjkRun = StringBuilder()
+            fun flushCjk() {
+                val run = cjkRun.toString()
+                if (run.length >= 2) {
+                    for (i in 0..run.length - 2) terms.add(run.substring(i, i + 2))
+                } else if (run.length == 1) {
+                    terms.add(run)
+                }
+                cjkRun.setLength(0)
+            }
+            for (c in lower) {
+                when {
+                    c.code < 128 && (c.isLetterOrDigit()) -> ascii.append(c)
+                    c.code in 0x4E00..0x9FFF -> {
+                        flushAscii()
+                        cjkRun.append(c)
+                    }
+                    else -> {
+                        flushAscii()
+                        flushCjk()
+                    }
+                }
+            }
+            flushAscii()
+            flushCjk()
+            return terms
+        }
+
+        /**
+         * [T-compact-chunk-pool] Retrieve the chunks that match the current
+         * instruction, newest-first relevance, then re-sorted chronologically
+         * for injection. Falls back to the most recent chunk when the query
+         * shares no terms with any of them (the tail is what a conversation
+         * most plausibly continues from). Pure function, testable.
+         */
+        internal fun selectSummaryChunks(chunksJson: String?, query: String, topK: Int = SUMMARY_CHUNK_TOP_K): List<String> {
+            val chunks = parseSummaryChunkRecords(chunksJson)
+            if (chunks.isEmpty()) return emptyList()
+            if (chunks.size == 1) return listOf(chunks[0].first)
+            val terms = summaryQueryTerms(query)
+            if (terms.isEmpty()) return listOf(chunks.last().first)
+            val scored = chunks.mapIndexed { idx, (text, at) ->
+                val lower = text.lowercase()
+                var score = 0
+                for (t in terms) {
+                    if (t in lower) score += if (t.length >= 2) 2 else 1
+                }
+                Triple(idx, score, text)
+            }
+            val hits = scored.filter { it.second > 0 }
+                .sortedByDescending { it.second }
+                .take(topK)
+            val chosen = if (hits.isNotEmpty()) {
+                hits
+            } else {
+                listOf(Triple(chunks.lastIndex, 0, chunks.last().first))
+            }
+            return chosen.sortedBy { it.first }.map { it.third }
+        }
+
+        /**
+         * [T-compact-reduced-retry] Newest slice of a failed compaction range
+         * for the last-resort reduced retry. `null` for small ranges — a
+         * 5-message "transcript" does not need slicing, it just needs the
+         * truncation fallback.
+         */
+        internal fun reducedCompactRetryInput(messages: List<LLMMessage>): List<LLMMessage>? {
+            if (messages.size < 12) return null
+            return messages.takeLast((messages.size * 3 / 5).coerceAtLeast(8))
+        }
+
+        /**
+         * [T-compact-detached-anchor] Pure form of the detached assembly:
+         * summary text + verbatim tail, first message forced to `user` with
+         * the summary inlined as a content prefix. Split out of the ViewModel
+         * so the fallback path is covered by tests without an Android host.
+         */
+        internal fun buildDetachedCompactHistory(
+            summaryWrappedText: String,
+            history: List<LLMMessage>,
+            tailSize: Int,
+        ): List<LLMMessage> {
+            val tail = if (history.size > tailSize) {
+                history.subList(history.size - tailSize, history.size).toList()
+            } else {
+                history.toList()
+            }
+            val start = tail.indexOfFirst { it.role == LLMMessage.Role.USER }
+            if (start < 0) {
+                return tail + LLMMessage(role = LLMMessage.Role.USER, content = summaryWrappedText)
+            }
+            val out = ArrayList<LLMMessage>(tail.size - start + 1)
+            val first = tail[start]
+            out.add(first.copy(content = summaryWrappedText + "\n\n" + first.content))
+            out.addAll(tail.subList(start + 1, tail.size))
+            return out
+        }
+
         /** Floor for the dynamic wall-clock timeout. */
         internal const val COMPACT_TIMEOUT_BASE_MS = 90_000L
 
@@ -1162,6 +1362,44 @@ class ChatViewModel(
      */
     private val _lastTurnContextTokens = MutableStateFlow(0)
     val lastTurnContextTokens: StateFlow<Int> = _lastTurnContextTokens.asStateFlow()
+
+    /**
+     * [T-compact-estimate-fallback] Cheap token estimate of the in-memory
+     * agent history, used ONLY as a lower-bound floor when the last usage
+     * chunk is missing or stale (`_lastTurnContextTokens` is refreshed by a
+     * COMPLETED API call, so a tool-heavy stretch that has not produced a
+     * new usage value yet would otherwise look "empty" to ContextPolicy and
+     * skip compaction entirely). ASCII costs ~0.25 tok/char, CJK ~0.6 —
+     * the classic len/4 estimator is ~4x off for CJK and would let long
+     * Chinese sessions sail past the threshold.
+     */
+    private fun estimateAgentHistoryTokens(): Int {
+        var total = 0L
+        for (msg in agentHistory) {
+            total += estimateMixedTokens(msg.content)
+            for (part in msg.contentParts) {
+                when (part) {
+                    is AgentContentPart.Text -> total += estimateMixedTokens(part.text)
+                    is AgentContentPart.ToolUse -> total += estimateMixedTokens(part.input.toString())
+                    is AgentContentPart.ToolResult -> total += estimateMixedTokens(part.content)
+                    is AgentContentPart.ImageData -> total += 1_500
+                }
+            }
+        }
+        return total.toInt()
+    }
+
+    private fun estimateMixedTokens(text: String): Long {
+        if (text.isEmpty()) return 0
+        var ascii = 0
+        var other = 0
+        for (c in text) if (c.code < 128) ascii++ else other++
+        return ascii / 4L + other * 3L / 5L
+    }
+
+    /** max(real usage, estimate) so a stale-but-real reading always wins. */
+    private fun contextTokensForPolicy(): Int =
+        maxOf(_lastTurnContextTokens.value, estimateAgentHistoryTokens())
 
     /**
      * Latest compact summary for the current session, loaded from the DB on
@@ -2661,6 +2899,11 @@ class ChatViewModel(
                     firstKeptMessageId = null,
                     lastCompactedMessageId = lastCompactedDbId,
                     version = 2,
+                    // [T-compact-chunk-pool] Roll this pass's summary into
+                    // the retrieval pool carried by the previous marker, so
+                    // earlier material stays retrievable instead of being
+                    // folded into one ever-changing blob.
+                    summaryChunks = appendSummaryChunk(prev?.summaryChunks, summary),
                 )
                 runCatching { chatRepository.dao.insertCompactMarker(marker) }
                     .onFailure {
@@ -2671,6 +2914,8 @@ class ChatViewModel(
                 // resolve the boundary on the very next outgoing turn.
                 // Mirrors iOS `cachedLatestMarker = marker`.
                 _cachedLatestMarker = marker
+                // Fresh anchor sits inside the window by construction.
+                _compactMarkerDetached = false
                 withContext(Dispatchers.Main) {
                     // Gray out everything in the compacted range; the kept
                     // tail (last N user turns + tool/assistant follow-ups)
@@ -3056,6 +3301,27 @@ class ChatViewModel(
             summary +
             "\n</context-summary>"
 
+        // [T-compact-chunk-pool] When the marker carries a rolling chunk
+        // pool, retrieve the chunks that match the current instruction
+        // instead of injecting the whole monolithic summary. A single-chunk
+        // pool is byte-identical to the v2 blob, so retrieval only kicks in
+        // once several compactions have accumulated.
+        val chunkRetrieved: String? = marker.summaryChunks?.let { json ->
+            val query = agentHistory.lastOrNull { it.role == LLMMessage.Role.USER }?.content.orEmpty()
+            selectSummaryChunks(json, query)
+                .takeIf { it.size >= 2 }
+                ?.joinToString("\n\n---\n\n")
+        }
+        val effectiveSummaryWrappedText = if (chunkRetrieved != null) {
+            "<context-summary>\n" +
+                "The following is retrieved background context from earlier parts of this conversation that were compacted. Only the parts relevant to the current instruction are shown.\n" +
+                "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary.\n\n" +
+                chunkRetrieved +
+                "\n</context-summary>"
+        } else {
+            summaryWrappedText
+        }
+
         // ─── v2 markers (id-only anchor model) ─────────────────────────
         //
         // anchor = lastCompactedMessageId. What we send to the model:
@@ -3077,8 +3343,22 @@ class ChatViewModel(
                 agentHistory.indexOfLast { it.dbMessageId == id }
             } ?: -1
             if (anchorIdx < 0) {
-                Log.w(TAG, "[Compact] effectiveAgentHistory v2: anchorId=${anchorId?.take(8) ?: "nil"} not in agentHistory(size=${agentHistory.size}) — degrading to full history (no summary)")
-                return agentHistory.toList()
+                // [T-compact-detached-anchor] The anchor was evicted from the
+                // bounded window. Degrading to FULL history throws the summary
+                // away on every turn - the session then stays over budget
+                // forever and never recovers on its own. The summary is
+                // independent of the anchor, so inject it with a verbatim
+                // tail instead. Logged once per detection, not per call.
+                if (!_compactMarkerDetached) {
+                    _compactMarkerDetached = true
+                    AppLogger.warning(
+                        TAG,
+                        "[Compact] marker ${marker.id.take(8)} anchor ${anchorId?.take(8) ?: "nil"} " +
+                            "evicted from agentHistory(size=${agentHistory.size}) - " +
+                            "summary+tail injection (tail=${DETACHED_TAIL_MESSAGES})",
+                    )
+                }
+                return detachedCompactHistory(effectiveSummaryWrappedText)
             }
 
             // Step 1: walk back from anchor collecting user-text turns. Stop
@@ -3186,7 +3466,7 @@ class ChatViewModel(
                 // `content: String` as the canonical text payload; any
                 // contentParts the message also carries get preserved.
                 val injected = target.copy(
-                    content = summaryWrappedText + "\n\n" + target.content,
+                    content = effectiveSummaryWrappedText + "\n\n" + target.content,
                 )
                 result.add(injected)
                 if (firstUserOffset + 1 < postAnchor.size) {
@@ -3198,7 +3478,7 @@ class ChatViewModel(
                 // user turn. Safe — no later user follows it to break
                 // alternation.
                 result.addAll(postAnchor)
-                result.add(LLMMessage(role = LLMMessage.Role.USER, content = summaryWrappedText))
+                result.add(LLMMessage(role = LLMMessage.Role.USER, content = effectiveSummaryWrappedText))
             }
             return result
         }
@@ -3207,7 +3487,7 @@ class ChatViewModel(
         //
         // Original behavior preserved unchanged so old markers keep
         // rendering / sending data the same way they always did.
-        val summaryHead = LLMMessage(role = LLMMessage.Role.USER, content = summaryWrappedText)
+        val summaryHead = LLMMessage(role = LLMMessage.Role.USER, content = effectiveSummaryWrappedText)
         val firstKeptId = (marker.firstKeptMessageId?.takeIf { it.isNotEmpty() })
             ?: (marker.boundaryMessageId?.takeIf { it.isNotEmpty() })
 
@@ -3245,6 +3525,42 @@ class ChatViewModel(
      * on every compactAll write and on session reload. */
     @Volatile
     private var _cachedLatestMarker: com.openminis.app.data.db.CompactMarkerEntity? = null
+
+    /**
+     * [T-compact-detached-anchor] True when the latest v2 marker's anchor
+     * message is no longer inside the bounded `agentHistory` window — the
+     * session outgrew [MAX_AGENT_HISTORY_MESSAGES] (or the window moved past
+     * the anchor). The summary text itself is still perfectly usable, so the
+     * read side must degrade to "summary + recent tail" instead of dropping
+     * the summary and sending the full history on every turn. Detected once
+     * per session load so the condition is not re-probed (and re-logged) on
+     * every single LLM call.
+     */
+    @Volatile
+    private var _compactMarkerDetached = false
+
+    /**
+     * Tail size handed to the model when a marker's anchor has been evicted:
+     * summary + the newest [DETACHED_TAIL_MESSAGES] entries verbatim. Sized
+     * to keep the "most recent user turns + their tool round-trips" warm
+     * without re-introducing the full history the summary exists to replace.
+     */
+    internal val DETACHED_TAIL_MESSAGES = 60
+
+    /**
+     * Assemble the outgoing history for a DETACHED marker: the summary is
+     * inlined as a `<context-summary>` text prefix on the first user message
+     * of the tail (same role-alternation-safe technique the v2 branch uses),
+     * followed by the tail verbatim. Mirrors
+     * [effectiveAgentHistoryUncounted]'s v2 path minus the anchor-based
+     * slice, which is the only part that requires a resolvable anchor.
+     */
+    private fun detachedCompactHistory(summaryWrappedText: String): List<LLMMessage> =
+        buildDetachedCompactHistory(
+            summaryWrappedText = summaryWrappedText,
+            history = agentHistory,
+            tailSize = DETACHED_TAIL_MESSAGES,
+        )
 
     /**
      * Result of a bounded walk-back. `priorIdx` is the agentHistory index
@@ -3616,8 +3932,19 @@ class ChatViewModel(
                 val text = withTimeout(stageTimeout) {
                     generateCompactSummaryWithSplitting(messages, existing, 0)
                 }.trim()
-                if (text.isNotEmpty()) return text
-                lastError = IllegalStateException("empty compact summary from ${stage.label}")
+                // [T-compact-summary-quality] A short or off-target summary
+                // silently poisons every later turn: the model then reasons
+                // from a summary that dropped the user's actual goal. Treat a
+                // failing check as a stage failure so the second shot (or the
+                // reduced retry) still gets a chance.
+                if (text.isNotEmpty() && isCompactSummaryAcceptable(text, messages)) {
+                    return text
+                }
+                lastError = IllegalStateException(
+                    if (text.isEmpty()) "empty compact summary from ${stage.label}"
+                    else "compact summary from ${stage.label} failed the quality check " +
+                        "(${text.length} chars)",
+                )
             } catch (e: CancellationException) {
                 if (e is kotlinx.coroutines.TimeoutCancellationException) {
                     lastError = e
@@ -3632,10 +3959,52 @@ class ChatViewModel(
                 compactLeafAttempt = null
             }
         }
-        AppLogger.warning(TAG, "[Compact] both stages failed, truncating older context: ${lastError?.message}")
+        // [T-compact-reduced-retry] Both full-size stages failed. Truncation
+        // is the LAST resort because it discards history outright, so try one
+        // more shot on a reduced input first: the newest slice of the range
+        // plus the previous summary. A provider that refused for size or
+        // complexity reasons can often still answer a smaller request, and
+        // keeping the tail preserves the most recent turns either way.
+        val reduced = reducedCompactRetryInput(messages)
+        if (reduced != null) {
+            AppLogger.warning(
+                TAG,
+                "[Compact] both stages failed (${lastError?.message}); retrying on reduced " +
+                    "input ${reduced.size}/${messages.size} messages before truncating",
+            )
+            withContext(Dispatchers.Main) {
+                appendSystemInfo(
+                    "Both compact attempts failed (${lastError?.message ?: "no output"}). " +
+                        "Retrying on a smaller slice before dropping older context.",
+                    "compact",
+                )
+            }
+            try {
+                compactCallsIssued.set(0)
+                val stageTimeout = minOf(timeoutMs, 120_000L)
+                val text = withTimeout(stageTimeout) {
+                    generateCompactSummaryWithSplitting(reduced, existing, 0)
+                }.trim()
+                if (text.isNotEmpty() && isCompactSummaryAcceptable(text, reduced)) {
+                    AppLogger.info(TAG, "[Compact] reduced-input retry succeeded (${text.length} chars)")
+                    return text
+                }
+                lastError = IllegalStateException("reduced-input retry produced no usable summary")
+            } catch (e: CancellationException) {
+                if (e is kotlinx.coroutines.TimeoutCancellationException) {
+                    lastError = e
+                } else {
+                    throw e
+                }
+            } catch (e: Exception) {
+                lastError = e
+            }
+        }
+        AppLogger.warning(TAG, "[Compact] compaction exhausted, truncating older context: ${lastError?.message}")
         withContext(Dispatchers.Main) {
             appendSystemInfo(
-                "Both compact attempts failed (${lastError?.message ?: "no output"}). Truncating older context to continue.",
+                "Compaction could not summarize (${lastError?.message ?: "no output"}). " +
+                    "Truncating older context to continue.",
                 "compact",
             )
         }
@@ -3715,7 +4084,7 @@ class ChatViewModel(
      * a signal to invoke `/compact` explicitly without blocking their turn.
      */
     private fun checkContextBeforeSend(): PreSendContextAction {
-        val tokens = _lastTurnContextTokens.value
+        val tokens = contextTokensForPolicy()
         if (tokens <= 0) return PreSendContextAction.PROCEED
         // [T-context-window-live-read] Live window (entry re-resolved + group
         // contextLimitTokens folded in) — not the currentModel snapshot.
@@ -3848,7 +4217,7 @@ class ChatViewModel(
      * must read the freshly-compacted history.
      */
     private suspend fun inLoopContextCheck(compactionsSoFar: Int): InLoopContextAction {
-        val tokens = _lastTurnContextTokens.value
+        val tokens = contextTokensForPolicy()
         if (tokens <= 0) return InLoopContextAction.PROCEED
         val window = effectiveContextWindowTokens() ?: return InLoopContextAction.PROCEED
         val policy = ContextPolicy.forContextWindow(window, effectiveCompactPercent())
@@ -5481,6 +5850,7 @@ class ChatViewModel(
         agentHistory.clear()
         _error.value = null
         _cachedLatestMarker = null
+        _compactMarkerDetached = false
         toolLoopDetector.reset()
         _canResume.value = false
         _attachments.value = emptyList()

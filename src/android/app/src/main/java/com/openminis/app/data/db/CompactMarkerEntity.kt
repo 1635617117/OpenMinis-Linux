@@ -54,4 +54,15 @@ data class CompactMarkerEntity(
      * any backfill — matches the SQL `DEFAULT 1` set by MIGRATION_7_8.
      */
     val version: Int = 1,
+    /**
+     * [T-compact-chunk-pool] Rolling pool of per-compaction summaries kept on
+     * the newest marker: a JSON array of `{"t": "<text>", "a": <epochMs>}`.
+     * v2 folding replaced one summary with a bigger one every pass, so the
+     * earliest material faded out completely. With a pool the read side can
+     * retrieve the chunks that actually match the current instruction instead
+     * of injecting (or dropping) one monolithic blob. `null` on every legacy
+     * row, and the read side falls back to [summary] — so the column is
+     * purely additive (migration 17 -> 18 only adds the column).
+     */
+    @ColumnInfo(name = "summary_chunks") val summaryChunks: String? = null,
 )

@@ -246,6 +246,18 @@ class SecurityGateImpl : SecurityGate {
         val command = extractCommand(cmd)
         val risk = commandRisk(cmd, command)
         if (risk == RiskLevel.FATAL_BANNED) {
+            // [2.0.7-baseline-fix] In ASK mode there is no auto-allow, so a
+            // fatal command can only ever be stopped outright. Offering a
+            // confirm dialog means "deny" is a tap away from "run the most
+            // destructive command a user can type" — ASK is the stricter
+            // mode and must stay strictly stricter than YOYO. YOYO keeps the
+            // confirm: its contract is "full-auto except fatal-confirm", and
+            // a session that opened the gate has already said yes.
+            if (mode == PermissionMode.ASK) {
+                return Decision.Denied(
+                    describeFatalViolation(command),
+                )
+            }
             return Decision.NeedConfirm(
                 describeFatalViolation(command),
                 "⚠️ 极端高危操作（格式化 / 清空 / 批量删除）\n\n${preview(cmd)}",
