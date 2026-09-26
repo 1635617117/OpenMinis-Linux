@@ -1,0 +1,179 @@
+package com.openminis.app.ui.chat
+
+import com.openminis.app.data.db.AppDatabase
+import com.openminis.app.tools.CodeGraphTool
+import com.openminis.app.tools.SubAgentKind
+import com.openminis.app.tools.FileEditTool
+import com.openminis.app.tools.FileReadTool
+import com.openminis.app.tools.FileWriteTool
+import com.openminis.app.tools.CronJobTool
+import com.openminis.app.tools.ReadImageTool
+import com.openminis.app.tools.ToolExecutionResult
+import com.openminis.app.security.SecurityGateHolder
+import org.json.JSONObject
+
+internal suspend fun ChatViewModel.executeTool(
+    name: String,
+    argsJson: String,
+    toolId: String,
+    toolBlocks: MutableList<AssistantBlock>,
+    assistantId: String,
+    currentText: String,
+): ToolExecutionResult {
+    // T330: tri-state permission gating moved into the offload IPC
+    // handler (OffloadGate). The CLIs land there whether the LLM
+    // emitted a named tool call or a raw shell command, so the gate
+    // is consistent across both paths. The pre-check that lived here
+    // (`permissionTools = {calendar, location, …}`) was effectively
+    // dead since these tools have no native ChatViewModel executor
+    // — they always fall through to shell_execute or the offload
+    // bridge, which is now where checkPermission runs.
+    val canonical = com.openminis.app.security.ToolAliases.canonical(name)
+    val gated = com.openminis.app.security.SecurityGateHolder.intercept(
+        context, canonical, argsJson, activeSessionId,
+    )
+    if (gated != null) return gated
+    val toolTitle = try { JSONObject(argsJson).optString("tool_title", canonical) } catch (_: Exception) { canonical }
+
+    val result = when (canonical) {
+        FileReadTool.NAME -> {
+            val result = FileReadTool.execute(argsJson, activeSessionId, context)
+            // Record skill usage when SKILL.md under /var/minis/skills/<id>/ is read.
+            if (result.success) {
+                runCatching {
+                    val readPath = JSONObject(argsJson).optString("path", "")
+                    if (readPath.isNotEmpty()) {
+                        skillRepository?.skillIdFromPath(readPath)?.let { sid ->
+                            skillRepository.recordSkillUse(sid)
+                        }
+                    }
+                }
+            }
+            result
+        }
+        FileWriteTool.NAME -> FileWriteTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        FileEditTool.NAME -> FileEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        com.openminis.app.tools.MultiEditTool.NAME -> com.openminis.app.tools.MultiEditTool.execute(argsJson, activeSessionId, context).also { if (it.success) maybeReloadSkillsForPath(argsJson) }
+        com.openminis.app.tools.ListDirTool.NAME -> com.openminis.app.tools.ListDirTool.execute(argsJson, activeSessionId, context)
+        com.openminis.app.tools.GrepTool.NAME, com.openminis.app.tools.GrepSourceTool.NAME ->
+            com.openminis.app.tools.GrepTool.execute(argsJson, activeSessionId, context)
+        com.openminis.app.tools.GlobTool.NAME -> com.openminis.app.tools.GlobTool.execute(argsJson, activeSessionId, context)
+        com.openminis.app.tools.WebFetchTool.NAME -> com.openminis.app.tools.WebFetchTool.execute(argsJson)
+        // T178: pass sessionId + context so read_image routes through
+        // resolveSessionHostPath like file_read/write/edit do — without
+        // these, the tool consults the global last-writer-wins
+        // bindMounts map and would surface another session's
+        // /var/minis/{workspace,attachments,offloads,browser} files.
+        ReadImageTool.NAME -> executeReadImageTool(argsJson)
+        "shell_execute", "shell_exec", "env_exec" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+        "su_exec" -> {
+            val o = JSONObject(argsJson)
+            val cmd = o.optString("command")
+            val quoted = "'" + cmd.replace("'", "'\\''") + "'"
+            o.put("command", "android-su -c " + quoted)
+            executeShellCommand(o.toString(), toolId, toolBlocks, assistantId, currentText)
+        }
+        "browser_use" -> executeBrowserUseTool(argsJson)
+        "memory_write", "save_memory" -> executeMemoryWriteTool(argsJson)
+        "memory_get", "recall_memory" -> executeMemoryGetTool(argsJson)
+        // Evolution was previously reachable only through Settings; the
+        // agent that gathers the evidence had no way to inspect or decide
+        // a proposal. See EvolutionTool for why this is read-mostly.
+        com.openminis.app.tools.EvolutionTool.NAME ->
+            com.openminis.app.tools.EvolutionTool.execute(
+                argsJson,
+                com.openminis.app.evolution.EvolutionHooks.engine,
+            )
+        com.openminis.app.tools.DispatchAgentsTool.NAME -> executeRunSubAgent(
+            com.openminis.app.tools.DispatchAgentsTool.toSpawnArgs(argsJson, context),
+            toolId, toolBlocks, assistantId, currentText,
+        )
+        com.openminis.app.tools.WolfpackTool.NAME -> executeRunSubAgent(
+            com.openminis.app.tools.WolfpackTool.toSpawnArgs(argsJson),
+            toolId, toolBlocks, assistantId, currentText,
+        )
+        com.openminis.app.tools.AgentPlanTool.NAME -> com.openminis.app.tools.AgentPlanTool.execute(argsJson)
+        com.openminis.app.tools.InvokeSkillTool.NAME ->
+            com.openminis.app.tools.InvokeSkillTool.execute(argsJson, skillRepository, activeSessionId)
+        com.openminis.app.tools.SkillManageTool.NAME ->
+            com.openminis.app.tools.SkillManageTool.execute(argsJson, skillRepository)
+        com.openminis.app.tools.AskReasoningTool.NAME ->
+            com.openminis.app.tools.AskReasoningTool.execute(argsJson) { sys, user -> oneShotAsk(sys, user) }
+        com.openminis.app.tools.ExecuteCodeTool.NAME ->
+            com.openminis.app.tools.ExecuteCodeTool.execute(argsJson) { n, a ->
+                executeTool(n, a, toolId, toolBlocks, assistantId, currentText)
+            }
+        com.openminis.app.tools.ProductMediaTools.DESCRIBE_IMAGE -> executeReadImageTool(argsJson)
+        com.openminis.app.tools.ProductMediaTools.GENERATE_IMAGE ->
+            executeGenerateImageTool(argsJson, currentProvider, activeSessionId)
+        com.openminis.app.tools.ProductMediaTools.GENERATE_VIDEO ->
+            executeGenerateVideoTool(argsJson, currentProvider, activeSessionId)
+        com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO ->
+            com.openminis.app.tools.ProductMediaTools.notConfigured(
+                com.openminis.app.tools.ProductMediaTools.TRANSCRIBE_AUDIO,
+                "Attach audio in chat or configure a speech model.",
+            )
+        com.openminis.app.tools.ProductMediaTools.TRANSLATE_TEXT -> {
+            val o = JSONObject(argsJson)
+            val text = o.optString("text")
+            val lang = o.optString("target_lang")
+            val out = oneShotAsk(
+                "You are a translator. Return only the translation into $lang, no preface.",
+                text,
+            )
+            ToolExecutionResult(out, true, toolTitle = "translate_text")
+        }
+        CronJobTool.NAME -> CronJobTool.execute(argsJson, context)
+        SubAgentKind.SPAWN_AGENT, SubAgentKind.RUN_SUBAGENT ->
+            executeRunSubAgent(argsJson, toolId, toolBlocks, assistantId, currentText)
+        com.openminis.app.tools.WebSearchTool.NAME,
+        com.openminis.app.tools.OcrTool.NAME,
+        com.openminis.app.tools.ScreenTimeTool.NAME,
+        -> dispatchHostTool(canonical, argsJson, activeSessionId, context)
+            ?: ToolExecutionResult("unhandled host tool", false)
+        com.openminis.app.tools.SessionLookupTool.SEARCH -> com.openminis.app.tools.SessionLookupTool.executeSearch(
+            argsJson, activeSessionId, context,
+        )
+        com.openminis.app.tools.SessionLookupTool.READ -> com.openminis.app.tools.SessionLookupTool.executeRead(
+            argsJson, activeSessionId, context,
+        )
+        com.openminis.app.tools.AskUserQuestion.NAME, com.openminis.app.tools.AskUserQuestion.ALIAS -> executeAskUserQuestion(argsJson)
+        CodeGraphTool.NAME -> {
+            val args = JSONObject(argsJson).let { json ->
+                buildMap<String, String> {
+                    json.optString("action").takeIf { it.isNotBlank() }?.let { put("action", it) }
+                    json.optString("name").takeIf { it.isNotBlank() }?.let { put("name", it) }
+                    json.optString("path").takeIf { it.isNotBlank() }?.let { put("path", it) }
+                }
+            }
+            ToolExecutionResult(
+                output = runCatching {
+                    CodeGraphTool.execute(
+                        args = args,
+                        sessionId = activeSessionId,
+                        context = context,
+                        dao = AppDatabase.getInstance(context).codeIndexDao(),
+                        resolvePath = { path ->
+                            com.openminis.app.sandbox.PRootKernel.resolveSessionHostPath(
+                                activeSessionId, path, context
+                            )?.path
+                        },
+                    )
+                }.getOrElse { e -> "code_graph 执行失败: ${e.message}" },
+                success = true,
+                toolTitle = "code_graph",
+            )
+        }
+        else -> if (com.openminis.app.plugins.OnlineApiTool.isOnline(name)) {
+            com.openminis.app.plugins.OnlineApiTool.execute(name, argsJson, context)
+        } else {
+            ToolExecutionResult("Unknown tool: $name", false)
+        }
+    }
+    if (!result.success) {
+        com.openminis.app.evolution.EvolutionHooks.onToolFailure(
+            activeSessionId, canonical, argsJson, result.output,
+        )
+    }
+    return result
+}
