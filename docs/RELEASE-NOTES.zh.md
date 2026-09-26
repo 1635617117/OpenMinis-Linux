@@ -1,3 +1,17 @@
+# OpenMinis-Linux 2.0.8-linux
+
+- versionCode **208**
+- 模型温度默认不发送；推理模型和中转站自定义名只剥字段重发一次，不改成 1。大会话按绝对字节准入，不再用 400 条尾窗或设备内存百分比。数据库 18→19 只加列。详见 `docs/github-release-2.0.8-linux.md`。
+
+---
+
+# OpenMinis-Linux 2.0.7-linux
+
+- versionCode **207**
+- 压缩脱锚不再丢弃摘要；32K–64K 窗口恢复自动压缩；失败先降体积重试再截断。`summary_chunks` 为迁移 17→18。详见 `docs/github-release-2.0.7-linux.md`。
+
+---
+
 # OpenMinis-Linux 2.0.6-linux
 
 - versionCode **206**
