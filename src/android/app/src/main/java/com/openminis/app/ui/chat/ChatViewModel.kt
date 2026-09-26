@@ -2963,7 +2963,7 @@ class ChatViewModel(
      * for why the extra round-trip was removed. Both platforms must keep this
      * the same, or the summary a session carries differs by device.
      */
-    private suspend fun generateCompactSummaryWithSplitting(
+    internal suspend fun generateCompactSummaryWithSplitting(
         messages: List<LLMMessage>,
         previousSummary: String? = null,
         depth: Int = 0,
@@ -3105,7 +3105,7 @@ class ChatViewModel(
     }
 
     @Volatile
-    private var compactLeafAttempt: CompactAttempt? = null
+    internal var compactLeafAttempt: CompactAttempt? = null
 
     /** Two-shot compact: one leaf call per stage, no in-stage split fan-out. */
     @Volatile
@@ -3155,123 +3155,6 @@ class ChatViewModel(
         )
     }
 
-    internal suspend fun runTwoShotCompact(
-        messages: List<LLMMessage>,
-        previousSummary: String?,
-        stages: List<CompactAttempt>,
-        timeoutMs: Long,
-    ): String {
-        val existing = previousSummary
-        if (stages.isEmpty()) {
-            throw IllegalStateException("No LLM provider available for compaction")
-        }
-        var lastError: Exception? = null
-        for ((index, stage) in stages.withIndex()) {
-            val stageNo = index + 1
-            compactLeafAttempt = stage
-            _compactProgress.value = _compactProgress.value?.copy(
-                stage = stageNo,
-                stageBudget = stages.size,
-                stageKind = stage.kind,
-                modelLabel = stage.label,
-                nextHint = stage.nextHint,
-                callsIssued = stageNo,
-                callBudget = stages.size,
-            )
-            val headline = when (stage.kind) {
-                "fallback" -> "Compressing ($stageNo/${stages.size}) with fallback model ${stage.label}. If this fails, older context is truncated."
-                "session-retry" -> "Compressing ($stageNo/${stages.size}) retrying current model ${stage.label}. No fallback set. If this fails, older context is truncated."
-                else -> "Compressing ($stageNo/${stages.size}) with current model ${stage.label}." +
-                    if (stage.nextHint == "fallback") " If this fails, the fallback model is tried once."
-                    else " If this fails, the current model is tried once more."
-            }
-            withContext(Dispatchers.Main) {
-                appendSystemInfo(headline, "compact")
-            }
-            try {
-                val stageTimeout = minOf(timeoutMs, 120_000L)
-                val text = withTimeout(stageTimeout) {
-                    generateCompactSummaryWithSplitting(messages, existing, 0)
-                }.trim()
-                // [T-compact-summary-quality] A short or off-target summary
-                // silently poisons every later turn: the model then reasons
-                // from a summary that dropped the user's actual goal. Treat a
-                // failing check as a stage failure so the second shot (or the
-                // reduced retry) still gets a chance.
-                if (text.isNotEmpty() && isCompactSummaryAcceptable(text, messages)) {
-                    return text
-                }
-                lastError = IllegalStateException(
-                    if (text.isEmpty()) "empty compact summary from ${stage.label}"
-                    else "compact summary from ${stage.label} failed the quality check " +
-                        "(${text.length} chars)",
-                )
-            } catch (e: CancellationException) {
-                if (e is kotlinx.coroutines.TimeoutCancellationException) {
-                    lastError = e
-                    AppLogger.warning(TAG, "[Compact] stage ${stage.kind} timed out")
-                } else {
-                    throw e
-                }
-            } catch (e: Exception) {
-                lastError = e
-                AppLogger.warning(TAG, "[Compact] stage ${stage.kind} failed: ${e.message}")
-            } finally {
-                compactLeafAttempt = null
-            }
-        }
-        // [T-compact-reduced-retry] Both full-size stages failed. Truncation
-        // is the LAST resort because it discards history outright, so try one
-        // more shot on a reduced input first: the newest slice of the range
-        // plus the previous summary. A provider that refused for size or
-        // complexity reasons can often still answer a smaller request, and
-        // keeping the tail preserves the most recent turns either way.
-        val reduced = reducedCompactRetryInput(messages)
-        if (reduced != null) {
-            AppLogger.warning(
-                TAG,
-                "[Compact] both stages failed (${lastError?.message}); retrying on reduced " +
-                    "input ${reduced.size}/${messages.size} messages before truncating",
-            )
-            withContext(Dispatchers.Main) {
-                appendSystemInfo(
-                    "Both compact attempts failed (${lastError?.message ?: "no output"}). " +
-                        "Retrying on a smaller slice before dropping older context.",
-                    "compact",
-                )
-            }
-            try {
-                compactCallsIssued.set(0)
-                val stageTimeout = minOf(timeoutMs, 120_000L)
-                val text = withTimeout(stageTimeout) {
-                    generateCompactSummaryWithSplitting(reduced, existing, 0)
-                }.trim()
-                if (text.isNotEmpty() && isCompactSummaryAcceptable(text, reduced)) {
-                    AppLogger.info(TAG, "[Compact] reduced-input retry succeeded (${text.length} chars)")
-                    return text
-                }
-                lastError = IllegalStateException("reduced-input retry produced no usable summary")
-            } catch (e: CancellationException) {
-                if (e is kotlinx.coroutines.TimeoutCancellationException) {
-                    lastError = e
-                } else {
-                    throw e
-                }
-            } catch (e: Exception) {
-                lastError = e
-            }
-        }
-        AppLogger.warning(TAG, "[Compact] compaction exhausted, truncating older context: ${lastError?.message}")
-        withContext(Dispatchers.Main) {
-            appendSystemInfo(
-                "Compaction could not summarize (${lastError?.message ?: "no output"}). " +
-                    "Truncating older context to continue.",
-                "compact",
-            )
-        }
-        return existing?.takeIf { it.isNotBlank() }
-            ?: "Earlier conversation was truncated after compaction failed. Recent turns remain below."
-    }
 
     /**
      * Should a failed summary attempt be retried by splitting the input in half?
