@@ -214,7 +214,7 @@ internal fun currentMdColors(): MdColors {
     )
 }
 
-private val MdCodeLangColor = Color.White.copy(alpha = 0.5f)
+internal val MdCodeLangColor = Color.White.copy(alpha = 0.5f)
 
 val LocalMarkdownFontScale = compositionLocalOf { 1f }
 
@@ -251,10 +251,10 @@ val LocalMarkdownSessionId = compositionLocalOf<String?> { null }
 private val BaseFontSizeDefault = 16.sp
 private val BaseLineHeightDefault = 24.sp
 
-private val BaseFontSize: TextUnit
+internal val BaseFontSize: TextUnit
     @Composable get() = BaseFontSizeDefault * LocalMarkdownFontScale.current
 
-private val BaseLineHeight: TextUnit
+internal val BaseLineHeight: TextUnit
     @Composable get() = BaseLineHeightDefault * LocalMarkdownFontScale.current
 
 private val InlineCodeCornerRadius = 6.dp
@@ -1711,339 +1711,6 @@ private fun parseTable(lines: List<String>): Pair<List<String>, List<List<String
     return headers to rows
 }
 
-// ─── Block renderers ────────────────────────────────────────────────────────
-
-@Composable
-private fun RenderBlock(block: MdBlock) {
-    val colors = currentMdColors()
-    // [T-android-streaming-incremental-inline] The live streaming tail block
-    // re-parses its growing paragraph every throttle tick; route it through the
-    // incremental cache (frozen closed prefix + fresh suffix). Frozen/history
-    // blocks (false) keep the plain per-block cache — no behavior change there.
-    val liveIncremental = LocalLiveIncremental.current
-    when (block) {
-        is MdBlock.Paragraph -> {
-            MdText(
-                text = if (liveIncremental) MarkdownParseCaches.inlineIncremental(block.raw, colors)
-                       else MarkdownParseCaches.inline(block.raw, colors),
-                fontSize = BaseFontSize,
-                lineHeight = BaseLineHeight,
-                color = colors.text,
-                modifier = Modifier.padding(bottom = 4.dp),
-                inlineContent = rememberKatexInlineContent(
-                    BaseFontSize,
-                    if (liveIncremental) MarkdownParseCaches.mathLatexIncremental(block.raw)
-                    else MarkdownParseCaches.mathLatex(block.raw),
-                ),
-            )
-        }
-
-        is MdBlock.Heading -> {
-            val (size, weight) = when (block.level) {
-                1 -> (BaseFontSize * 1.5f) to FontWeight.Bold
-                2 -> (BaseFontSize * 1.3f) to FontWeight.Bold
-                3 -> (BaseFontSize * 1.15f) to FontWeight.SemiBold
-                4 -> BaseFontSize to FontWeight.SemiBold
-                5 -> (BaseFontSize * 0.875f) to FontWeight.SemiBold
-                else -> (BaseFontSize * 0.85f) to FontWeight.SemiBold
-            }
-            MdText(
-                text = MarkdownParseCaches.inline(block.text, colors),
-                fontSize = size,
-                fontWeight = weight,
-                lineHeight = size * 1.3f,
-                color = colors.text,
-                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
-                inlineContent = rememberKatexInlineContent(size, MarkdownParseCaches.mathLatex(block.text)),
-            )
-        }
-
-        is MdBlock.CodeBlock -> {
-            val clipboardManager = LocalClipboardManager.current
-            var copied by remember { mutableStateOf(false) }
-            if (copied) {
-                LaunchedEffect(Unit) {
-                    kotlinx.coroutines.delay(1500)
-                    copied = false
-                }
-            }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(colors.codeBg),
-            ) {
-                // Header row: language label + copy button
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(start = 12.dp, end = 8.dp, top = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = block.language.ifEmpty { "code" },
-                        fontSize = 11.sp,
-                        color = MdCodeLangColor,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Icon(
-                        imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                        contentDescription = if (copied) "Copied" else "Copy code",
-                        tint = if (copied) Color(0xFF34C759) else Color.White.copy(alpha = 0.4f),
-                        modifier = Modifier
-                            .size(16.dp)
-                            .clickable {
-                                clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(block.code))
-                                copied = true
-                            },
-                    )
-                }
-                // iOS parity (SelectableMarkdownView.swift L971): cap visual
-                // code-block height at ~400 pt and let an internal scroll
-                // view handle overflow vertically, so a 200-line dump
-                // doesn't push the rest of the message off the bottom of
-                // the chat. Nest scrolls: inner Row owns horizontal scroll
-                // (long lines), outer Box owns vertical scroll + height
-                // cap (long blocks). Compose disallows two scroll modifiers
-                // on the same node, hence the nesting.
-                val vScroll = rememberScrollState()
-                val hScroll = rememberScrollState()
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 400.dp)
-                        .verticalScroll(vScroll)
-                        .padding(bottom = 8.dp),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .horizontalScroll(hScroll)
-                            .padding(horizontal = 12.dp, vertical = 4.dp),
-                    ) {
-                        Text(
-                            text = block.code,
-                            fontSize = BaseFontSize * 0.85f,
-                            fontFamily = FontFamily.Monospace,
-                            color = colors.codeText,
-                            lineHeight = BaseLineHeight * 0.9f,
-                        )
-                    }
-                }
-            }
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.BlockQuote -> {
-            // T307: previous IntrinsicSize.Min approach crashes when inner
-            // blocks contain SubcomposeLayout (tables, images, etc.) — Compose
-            // refuses intrinsic measurement on those. Draw the orange rule
-            // directly behind a single Column so layout never queries
-            // intrinsics.
-            val barColor = Color(0xFFFF9500)
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp)
-                    .drawBehind {
-                        drawRect(
-                            color = barColor,
-                            topLeft = Offset.Zero,
-                            size = Size(3.dp.toPx(), size.height),
-                        )
-                    }
-                    .padding(start = 15.dp),
-            ) {
-                block.innerBlocks.forEach { inner -> RenderBlock(inner) }
-            }
-        }
-
-        is MdBlock.UnorderedList -> {
-            Column(modifier = Modifier.padding(bottom = 8.dp)) {
-                block.items.forEach { item ->
-                    Row(modifier = Modifier.padding(start = 8.dp, bottom = 2.dp)) {
-                        Text("•  ", fontSize = BaseFontSize * 1.3f, color = colors.text)
-                        MdText(
-                            text = MarkdownParseCaches.inline(item.text, colors),
-                            fontSize = BaseFontSize,
-                            lineHeight = BaseLineHeight,
-                            color = colors.text,
-                            modifier = Modifier.weight(1f),
-                            inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(item.text)),
-                        )
-                    }
-                }
-            }
-        }
-
-        is MdBlock.OrderedList -> {
-            Column(modifier = Modifier.padding(bottom = 8.dp)) {
-                block.items.forEachIndexed { index, item ->
-                    Row(modifier = Modifier.padding(start = 8.dp, bottom = 2.dp)) {
-                        Text(
-                            "${block.startNum + index}.  ",
-                            fontSize = BaseFontSize,
-                            color = colors.text,
-                        )
-                        MdText(
-                            text = MarkdownParseCaches.inline(item.text, colors),
-                            fontSize = BaseFontSize,
-                            lineHeight = BaseLineHeight,
-                            color = colors.text,
-                            modifier = Modifier.weight(1f),
-                            inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(item.text)),
-                        )
-                    }
-                }
-            }
-        }
-
-        is MdBlock.TaskList -> {
-            Column(modifier = Modifier.padding(bottom = 8.dp)) {
-                block.items.forEach { item ->
-                    Row(
-                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Checkbox(
-                            checked = item.checked,
-                            onCheckedChange = null,
-                            modifier = Modifier.size(20.dp),
-                            colors = CheckboxDefaults.colors(
-                                checkedColor = colors.link,
-                            ),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        MdText(
-                            text = MarkdownParseCaches.inline(item.text, colors),
-                            fontSize = BaseFontSize,
-                            lineHeight = BaseLineHeight,
-                            color = if (item.checked) colors.text.copy(alpha = 0.5f) else colors.text,
-                            modifier = Modifier.weight(1f),
-                            inlineContent = rememberKatexInlineContent(BaseFontSize, MarkdownParseCaches.mathLatex(item.text)),
-                        )
-                    }
-                }
-            }
-        }
-
-        is MdBlock.HorizontalRule -> {
-            HorizontalDivider(
-                color = colors.divider,
-                modifier = Modifier.padding(vertical = 8.dp),
-            )
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.Image -> {
-            // [T-android-markdown-image-gallery-cross-message] Prefer the
-            // image-specific handler when provided so the host can collect
-            // every sibling image across the conversation and open a paged
-            // gallery (mirrors iOS AIChatView.handleMarkdownImageTap). Fall
-            // back to the generic URL handler — which routes a single-item
-            // open via ChatLinkResolver — when the host hasn't supplied an
-            // image handler (keeps the previous behaviour intact).
-            val imageTapHandler = LocalMarkdownImageTapHandler.current
-            val urlTapHandler = LocalMarkdownUrlClickHandler.current
-            val ambientMessageId = LocalShardId.current?.messageId
-            val onTap: (() -> Unit)? = when {
-                imageTapHandler != null && ambientMessageId != null ->
-                    { -> imageTapHandler(ambientMessageId, block.url) }
-                urlTapHandler != null -> { -> urlTapHandler(block.url) }
-                else -> null
-            }
-            val context = LocalContext.current
-            val sessionId = LocalMarkdownSessionId.current
-            // Resolve to a host File via the session-scoped resolver before
-            // handing off to Coil. AsyncImage(model = "minis://...") routes
-            // through MinisImageFetcher → PRootKernel.resolveHostPath, which
-            // reads the *global* bindMounts map — last-writer-wins across
-            // sessions. When another session booted its shell more recently,
-            // that global lookup answers with the wrong session's path (or
-            // null) and the image quietly renders as a 0-height placeholder.
-            // The video/audio renderers already follow this pattern.
-            val file = remember(block.url, sessionId) { resolveMdMediaFile(context, block.url, sessionId) }
-            // T146: 1dp hairline + 2dp soft shadow so a white-bg PNG (matplotlib
-            // chart, screenshot…) reads as a discrete card against the chat
-            // surface. Same ChatColors.thumbnailBorder / inputShadow recipe as
-            // the attachment chip in T179 — keeps the visual rhythm consistent.
-            // shadow → clip → border so the elevation paints behind the rounded
-            // edge and the border stays crisp on top.
-            val imageShape = RoundedCornerShape(8.dp)
-            val imageBaseModifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp)
-                .shadow(
-                    elevation = 2.dp,
-                    shape = imageShape,
-                    clip = false,
-                    ambientColor = ChatColors.inputShadow,
-                    spotColor = ChatColors.inputShadow,
-                )
-                .clip(imageShape)
-                .border(1.dp, ChatColors.thumbnailBorder, imageShape)
-                .let { m -> if (onTap != null) m.clickable { onTap() } else m }
-            // T148: SubcomposeAsyncImage so we can render a broken-image
-            // placeholder when the underlying file is gone (deleted workspace
-            // PNG, broken URL). Without this slot, Coil paints nothing and
-            // the user sees a blank gap where a chart should be — easy to
-            // mistake for a render bug.
-            // [T-android-canvas-large-bitmap-crash] Cap the DECODE size.
-            // Without an explicit request size, Coil sizes from the layout
-            // constraints — but this column scrolls vertically, so the height
-            // constraint is unbounded and Coil falls back to the image's
-            // intrinsic size, decoding a very tall chart PNG at full
-            // resolution. The resulting bitmap (215MB in the vivo/Android 16
-            // report) exceeds RecordingCanvas's draw ceiling and crashes the
-            // process from ThreadedRenderer.draw. Capping here means the
-            // oversized bitmap is never allocated at all. FillWidth still
-            // scales the (now bounded) bitmap to the column width, so normal
-            // images render byte-identically to before.
-            // Remembered per (file, url): this renderer recomposes on every
-            // streaming token, and rebuilding the request each time would churn
-            // allocations in a hot path.
-            val imageRequest = remember(file, block.url) {
-                ImageRequest.Builder(context)
-                    .data(file ?: block.url)
-                    .limitDisplaySize()
-                    .build()
-            }
-            SubcomposeAsyncImage(
-                model = imageRequest,
-                contentDescription = block.alt,
-                modifier = imageBaseModifier,
-                contentScale = ContentScale.FillWidth,
-            ) {
-                when (painter.state) {
-                    is AsyncImagePainter.State.Error -> BrokenImagePlaceholder(alt = block.alt)
-                    else -> SubcomposeAsyncImageContent()
-                }
-            }
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.Video -> {
-            RenderMdVideo(block)
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.Audio -> {
-            RenderMdAudio(block)
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.Table -> {
-            RenderTable(block)
-            ReportTranslateInkBlocked()
-        }
-
-        is MdBlock.MathDisplay -> {
-            RenderMathDisplay(block.latex)
-            ReportTranslateInkBlocked()
-        }
-    }
-}
-
 // ─── Math (KaTeX) ───────────────────────────────────────────────────────────
 
 /**
@@ -2206,7 +1873,7 @@ private fun RenderInlineMath(latex: String, fontSize: TextUnit) {
  * or scrolling back-and-forth never re-renders the same formula twice.
  */
 @Composable
-private fun RenderMathDisplay(latex: String) {
+internal fun RenderMathDisplay(latex: String) {
     val context = LocalContext.current
     val isDark = ChatColors.isDark
     // T208-5: render at sp.value (CSS px = dp) so glyph height matches the
@@ -2276,7 +1943,7 @@ private fun RenderMathDisplay(latex: String) {
  * with a subtle tool-bg, a broken-image glyph, and the alt text.
  */
 @Composable
-private fun BrokenImagePlaceholder(alt: String?) {
+internal fun BrokenImagePlaceholder(alt: String?) {
     val palette = com.openminis.app.ui.theme.LocalChatPalette.current
     Box(
         modifier = Modifier
@@ -2410,7 +2077,7 @@ private fun formatMdMediaMs(ms: Int): String {
 }
 
 @Composable
-private fun RenderMdVideo(block: MdBlock.Video) {
+internal fun RenderMdVideo(block: MdBlock.Video) {
     val context = LocalContext.current
     val colors = currentMdColors()
     val sessionId = LocalMarkdownSessionId.current
@@ -2508,7 +2175,7 @@ private fun RenderMdVideo(block: MdBlock.Video) {
 }
 
 @Composable
-private fun RenderMdAudio(block: MdBlock.Audio) {
+internal fun RenderMdAudio(block: MdBlock.Audio) {
     val context = LocalContext.current
     val colors = currentMdColors()
     val sessionId = LocalMarkdownSessionId.current
