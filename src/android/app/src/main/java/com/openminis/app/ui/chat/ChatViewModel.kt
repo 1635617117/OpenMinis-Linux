@@ -800,14 +800,14 @@ class ChatViewModel(
     //
     // Reset on session load (different sessionId) is wired in loadSession.
 
-    private val _visibleMessageCap = MutableStateFlow(INITIAL_VISIBLE_MESSAGE_CAP)
+    internal val _visibleMessageCap = MutableStateFlow(INITIAL_VISIBLE_MESSAGE_CAP)
 
     // Database window state. The canonical UI list contains only this loaded
     // window; older rows are fetched on demand instead of retaining the whole
     // session and its parsed LLM representation in memory.
-    private var loadedMessageOffset = 0
-    private var loadedMessageTotal = 0
-    private var loadingOlderMessages = false
+    internal var loadedMessageOffset = 0
+    internal var loadedMessageTotal = 0
+    internal var loadingOlderMessages = false
 
     /**
      * Index (in DB order from the session start) of the first row that
@@ -815,7 +815,7 @@ class ChatViewModel(
      * Rows before it exist in `_messages` only when the user loaded older
      * UI history; their LLM forms are parsed on demand before send.
      */
-    private var llmHistoryStartOffset = 0
+    internal var llmHistoryStartOffset = 0
     /**
      * Current tail cap. Reflective via [uiMessages]; bump with
      * [loadOlderMessages] when the user scrolls past the windowed top.
@@ -898,7 +898,7 @@ class ChatViewModel(
     private val _hasOlderMessages = MutableStateFlow(false)
     val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages.asStateFlow()
 
-    private fun refreshHasOlderMessages() {
+    internal fun refreshHasOlderMessages() {
         val loadedVisible = _messages.value.count { !it.isInternalBridge }
         _hasOlderMessages.value = loadedMessageOffset > 0 || loadedVisible > _visibleMessageCap.value
     }
@@ -1071,7 +1071,7 @@ class ChatViewModel(
         _inputText.value = joined
     }
 
-    private val _isStreaming = MutableStateFlow(false)
+    internal val _isStreaming = MutableStateFlow(false)
     override val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
 
     /**
@@ -1137,7 +1137,7 @@ class ChatViewModel(
      * Mirrors iOS `isRedetectingInterruptedTail = true` at the +Persistence
      * detection site.
      */
-    private fun markRedetectingInterruptedTail() {
+    internal fun markRedetectingInterruptedTail() {
         redetectingInterruptedTailGen += 1
     }
 
@@ -1173,7 +1173,7 @@ class ChatViewModel(
      *  replay cache can't beat [loadSession] to setting `_modelName`. Without
      *  this, opening a session that previously fell back mid-run flashes the
      *  default model name for one frame before the persisted binding settles. */
-    private val sessionLoaded = MutableStateFlow(false)
+    internal val sessionLoaded = MutableStateFlow(false)
 
     internal val _sessionTitle = MutableStateFlow("New Chat")
     val sessionTitle: StateFlow<String> = _sessionTitle.asStateFlow()
@@ -1331,7 +1331,7 @@ class ChatViewModel(
     internal val _stopStaleReadAloud = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val stopStaleReadAloud: SharedFlow<Unit> = _stopStaleReadAloud.asSharedFlow()
 
-    private val _availableGroups = MutableStateFlow<List<ModelGroup>>(emptyList())
+    internal val _availableGroups = MutableStateFlow<List<ModelGroup>>(emptyList())
     val availableGroups: StateFlow<List<ModelGroup>> = _availableGroups.asStateFlow()
 
     internal val _selectedGroupId = MutableStateFlow<String?>(null)
@@ -1410,7 +1410,7 @@ class ChatViewModel(
      * Phase-B compact semantics (summary synthesized at inference time, never
      * baked back into agentHistory).
      */
-    private val _compactSummary = MutableStateFlow<String?>(null)
+    internal val _compactSummary = MutableStateFlow<String?>(null)
     override val compactSummary: StateFlow<String?> = _compactSummary.asStateFlow()
 
     /**
@@ -1905,7 +1905,7 @@ class ChatViewModel(
         }
     }
 
-    private fun applyGateMode(mode: com.openminis.app.security.PermissionMode) {
+    internal fun applyGateMode(mode: com.openminis.app.security.PermissionMode) {
         SecurityGateHolder.setActiveSessionMode(mode)
         ApprovalGate.bindSession(realSessionId.ifEmpty { sessionId })
         if (mode.isYoyo()) ApprovalGate.enableSessionAllowAll()
@@ -3524,7 +3524,7 @@ class ChatViewModel(
      * resolve boundaries the same way iOS `cachedLatestMarker` does. Refreshed
      * on every compactAll write and on session reload. */
     @Volatile
-    private var _cachedLatestMarker: com.openminis.app.data.db.CompactMarkerEntity? = null
+    internal var _cachedLatestMarker: com.openminis.app.data.db.CompactMarkerEntity? = null
 
     /**
      * [T-compact-detached-anchor] True when the latest v2 marker's anchor
@@ -4347,7 +4347,7 @@ class ChatViewModel(
 
     /** Model group ID from long-press FAB, encoded in the draft session ID.
      *  substringBefore strips the folder marker in case both are present. */
-    private val initialGroupId: String? =
+    internal val initialGroupId: String? =
         sessionId.substringAfter("__grp__", "").substringBefore("__fld__")
             .takeIf { it.isNotEmpty() }
 
@@ -4728,462 +4728,6 @@ class ChatViewModel(
         }
     }.getOrDefault(false)
 
-    private fun loadSession() {
-        // T-android-crash-detected-halt: when CrashFrequencyDetector
-        // tripped (#459, ≥3 crashes in last hour), skip the heavy
-        // session-restore path entirely. Re-running the same persisted
-        // state is exactly what produced the burst, so we'd just feed
-        // a re-crash loop while the user is staring at the share dialog.
-        // The flag clears the moment the dialog closes (share / dismiss /
-        // cancel) — see CrashFrequencyDetector.maybeShowOnActivity.
-        if (com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()) {
-            android.util.Log.w(TAG, "loadSession: safe-mode active, skipping session restore")
-            // [T-android-perf-logging] Surface the skip on the Perf timeline
-            // too — when a crash_or_stall recovery loop is suspected, this
-            // distinguishes "loadSession ran and was slow" from "loadSession
-            // was skipped (safe-mode), so the stall is elsewhere".
-            com.openminis.app.diagnostics.PerfLongCtx.step(
-                sessionId,
-                "loadSession.skipped",
-                "reason=safeMode",
-            )
-            return
-        }
-        viewModelScope.launch {
-            // [T-HANG-DIAG] timing markers to localise where session entry
-            // stalls. Sentinel-tagged so a single grep -v can strip them
-            // when this diagnostic is removed. Declared OUTSIDE the try
-            // block so the EXIT log in `finally` can still read it after
-            // an early-return / exception path.
-            val tHangDiagStart = System.currentTimeMillis()
-            println("[T-HANG-DIAG] loadSession ENTER session=$sessionId isDraft=$isDraft")
-            com.openminis.app.diagnostics.PerfLongCtx.step(sessionId, "loadSession.enter", "isDraft=$isDraft")
-            try {
-            val config = providerRepository.config.value
-            _availableGroups.value = config.modelGroups
-
-            if (isDraft) {
-                applyGateMode(_permissionMode.value)
-                // Draft session: just set up provider using default group or first entry
-                _sessionTitle.value = "New Chat"
-                _sessionCategory.value = null
-                if (!applyDefaultPrimarySlot(initialGroupId, applyGroupDefaults = true)) {
-                    // [T-newchat-default-model-fallback-android] No default
-                    // group (or it had no usable model) → last-used model, then
-                    // newest-provider/newest-text-model. Was firstOrNull().
-                    applyNewChatDefaultModel()
-                }
-                return@launch
-            }
-
-            // Existing session: load from DB
-            val session = chatRepository.getSession(sessionId) ?: return@launch
-            _sessionTitle.value = session.title ?: "New Chat"
-            _sessionCategory.value = session.category
-            _memoryEnabled.value = session.memoryEnabled != 0
-            _permissionMode.value = com.openminis.app.security.PermissionMode.sessionDefault(
-                session.permissionMode,
-            )
-            applyGateMode(_permissionMode.value)
-            // T239: hydrate persisted thinking-mode override. null = unset
-            // (use OFF as the legacy default); non-null = explicit user
-            // choice persisted across cold-start. runCatching guards against
-            // a stale enum name from a future rename — fall back silently
-            // rather than crashing the session load.
-            _thinkingLevel.value = session.thinkingOverride
-                ?.let { runCatching { ThinkingLevel.valueOf(it) }.getOrNull() }
-                ?: ThinkingLevel.OFF
-
-            // Priority 1: restore from persisted model_binding (group or entry)
-            var resolved = restoreFromBinding(session.modelBinding)
-
-            // Priority 2: fall back to stored model_id
-            if (!resolved) {
-                val entry = findModelEntry(session.modelId)
-                if (entry != null) {
-                    currentModel = entry.model
-                    _modelName.value = entry.model.displayName
-                    _activeEntryId.value = entry.id
-                    val instance = providerRepository.instance(entry.providerInstanceId)
-                    if (instance != null) {
-                        // [T-android-group-resolve-skip-uncredentialed] Gate on
-                        // hasAnyCredential — keying off the API key alone left a
-                        // session whose model lives on an OAuth provider unable
-                        // to restore, despite being signed in.
-                        val apiKey = providerRepository.usableApiKey(instance) ?: ""
-                        if (providerRepository.hasAnyCredential(instance)) {
-                            currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
-                            _providerName.value = instance.label.ifEmpty { entry.model.provider }
-                            resolved = true
-                            // Pin as a single provider model. Do NOT adopt a
-                            // Settings model group just because this entry also
-                            // appears in one — that would auto-switch models
-                            // (and billing) the user never selected as a group.
-                        }
-                    }
-                }
-            }
-
-            // Priority 3: fall back to default group
-            if (!resolved) {
-                val defaultGroupId = providerRepository.defaultPrimaryGroupId
-                if (defaultGroupId != null) {
-                    resolved = resolveProviderFromGroup(defaultGroupId)
-                    if (resolved) _selectedGroupId.value = defaultGroupId
-                }
-            }
-
-            // [T-HANG-DIAG] measure DB load + transform separately so a long
-            // load on one stage is obvious in the trace.
-            //
-            // T-android-gc-storm-hang-crash (P0, issue #17): on a 405-message
-            // session with one 397KB user row, loadMessages + toChatMessages
-            // + the agentHistory rebuild below ran on Main and triggered a
-            // GC storm (34MB freed, repeated) that blocked the frame loop for
-            // 58s → crash_or_stall restart. Hoist the heavy DB + JSON-parse
-            // work off Main so the UI thread stays responsive even when one
-            // row is large. Stays inside the existing safe-mode guard above
-            // (#466/#470) — we only move work, not gating.
-            val tHangDiagBeforeLoad = System.currentTimeMillis()
-            data class LoadedSessionData(
-                val messages: List<com.openminis.app.data.db.MessageEntity>,
-                val ordered: List<ChatMessage>,
-                val llmHistory: List<LLMMessage>,
-                val totalMessages: Int,
-                val firstMessageOffset: Int,
-                val loadMs: Long,
-                val transformMs: Long,
-            )
-            com.openminis.app.diagnostics.PerfLongCtx.step(sessionId, "db.query.begin")
-            val loaded = withContext(Dispatchers.IO) {
-                val tIoBeforeLoad = System.currentTimeMillis()
-                val tail = chatRepository.loadSessionTail(sessionId)
-                val totalMessages = tail.totalMessages
-                val rows = tail.messages
-                val firstMessageOffset = (totalMessages - rows.size).coerceAtLeast(0)
-                val tIoAfterLoad = System.currentTimeMillis()
-                com.openminis.app.diagnostics.PerfLongCtx.step(
-                    sessionId,
-                    "db.query.end",
-                    "count=${rows.size} total=$totalMessages offset=$firstMessageOffset",
-                )
-                val chatUi = rows.toChatMessages()
-                val tIoAfterTransform = System.currentTimeMillis()
-                com.openminis.app.diagnostics.PerfLongCtx.step(
-                    sessionId,
-                    "toChatMessages.end",
-                    "count=${chatUi.size}",
-                )
-                // Pre-build the LLM history list off-Main too — toLLMMessage
-                // re-parses partsJson for every row, which is the second
-                // contributor to the GC storm. Build into a local list and
-                // bulk-append to `agentHistory` on Main below; loadSession
-                // runs once at init before any other writer touches
-                // agentHistory, so a bulk addAll is race-free.
-                //
-                // [T-android-coldopen-window-parse] Only parse the rows the
-                // first paint actually shows. toChatMessages + toLLMMessage on
-                // all ~400 tail rows made every session (re)entry re-parse the
-                // full tail even though uiMessages caps rendering at
-                // INITIAL_VISIBLE_MESSAGE_CAP. Rows beyond the cap are parsed
-                // lazily by loadOlderMessages; for the LLM history the tail
-                // beyond the cap is also what providers need first, so
-                // restricting here keeps first-paint O(window) without
-                // changing send-path behavior.
-                val windowRows = if (rows.size > INITIAL_VISIBLE_MESSAGE_CAP) {
-                    rows.subList(rows.size - INITIAL_VISIBLE_MESSAGE_CAP, rows.size)
-                } else {
-                    rows
-                }
-                val llm = ArrayList<LLMMessage>(windowRows.size)
-                var totalPartsChars = 0L
-                for (entity in windowRows) {
-                    totalPartsChars += entity.partsJson.length
-                    llm.add(entity.toLLMMessage())
-                }
-                com.openminis.app.diagnostics.PerfLongCtx.step(
-                    sessionId,
-                    "toLLMMessage.end",
-                    "count=${llm.size} totalPartsChars=$totalPartsChars",
-                )
-                LoadedSessionData(
-                    messages = rows,
-                    ordered = chatUi,
-                    llmHistory = llm,
-                    totalMessages = totalMessages,
-                    firstMessageOffset = firstMessageOffset,
-                    loadMs = tIoAfterLoad - tIoBeforeLoad,
-                    transformMs = tIoAfterTransform - tIoAfterLoad,
-                )
-            }
-            val messages = loaded.messages
-            val ordered = loaded.ordered
-            loadedMessageTotal = loaded.totalMessages
-            loadedMessageOffset = loaded.firstMessageOffset
-            // [T-android-coldopen-window-parse] agentHistory covers only the
-            // newest INITIAL_VISIBLE_MESSAGE_CAP DB rows; the skipped prefix
-            // of the tail (if any) is parsed lazily by loadOlderMessages.
-            // Counted in DB rows, not UI messages — toChatMessages merges
-            // tool-result rows, so the UI list is shorter than the tail.
-            val windowedRows = minOf(messages.size, INITIAL_VISIBLE_MESSAGE_CAP)
-            llmHistoryStartOffset = loaded.firstMessageOffset + (messages.size - windowedRows)
-            refreshHasOlderMessages()
-            loadingOlderMessages = false
-            val tHangDiagAfterLoad = tHangDiagBeforeLoad + loaded.loadMs
-            val tHangDiagAfterTransform = tHangDiagAfterLoad + loaded.transformMs
-            println(
-                "[T-HANG-DIAG] loadMessages session=$sessionId count=${messages.size} " +
-                    "tookMs=${loaded.loadMs}",
-            )
-            println(
-                "[T-HANG-DIAG] toChatMessages session=$sessionId tookMs=${loaded.transformMs}",
-            )
-            // Per-message size sketch + oversize-row scan. Pure diagnostics —
-            // does a full second pass over partsJson with several substring
-            // searches per row, so on a 405-row session with 1MB total it
-            // adds material main-thread time. Fire-and-forget on the IO
-            // dispatcher so it can't contribute to the GC-storm hang the
-            // rest of this task is trying to fix.
-            viewModelScope.launch(Dispatchers.IO) {
-                var totalChars = 0L
-                var maxChars = 0
-                var withTools = 0
-                var withAttachments = 0
-                for (m in messages) {
-                    val len = m.partsJson.length
-                    totalChars += len
-                    if (len > maxChars) maxChars = len
-                    // ContentPart serialises its discriminator in camelCase
-                    // ("toolUse" / "toolResult" — see ContentPart.PartType), so
-                    // the snake_case probe this used to run matched NOTHING and
-                    // reported toolMessages=0 on every session, including ones
-                    // whose history is almost entirely tool traffic. That is
-                    // the opposite of the signal this diagnostic exists to give
-                    // — it is here to finger oversized tool_result inlines as
-                    // the GC-storm culprit, and it was reporting them absent.
-                    if (m.partsJson.contains("\"toolUse\"") || m.partsJson.contains("\"toolResult\"")) {
-                        withTools++
-                    }
-                    // Same casing trap: attachments serialise as "mediaRef",
-                    // never as "image"/"attachment".
-                    if (m.partsJson.contains("\"mediaRef\"")) {
-                        withAttachments++
-                    }
-                }
-                println(
-                    "[T-HANG-DIAG] messages-shape session=$sessionId total=${messages.size} " +
-                        "totalChars=$totalChars maxChars=$maxChars toolMessages=$withTools " +
-                        "attachmentMessages=$withAttachments",
-                )
-
-                // [T-HANG-DIAG] for any message ≥ 50_000 chars, log size /
-                // role / createdAt / structural type markers only — NEVER
-                // the partsJson content (or any prefix/suffix of it). Earlier
-                // versions echoed head500/tail500 to localise the culprit;
-                // now that the cause is known (oversized tool_result inlines)
-                // and FileReadTool / AIChatViewModel.executeFileRead enforce
-                // an 80 KB hard cap upstream, only metadata is needed for
-                // future audits.
-                val OVERSIZE_THRESHOLD = 50_000
-                val oversized = messages.filter { it.partsJson.length >= OVERSIZE_THRESHOLD }
-                if (oversized.isNotEmpty()) {
-                    println(
-                        "[T-HANG-DIAG] oversized-messages session=$sessionId " +
-                            "count=${oversized.size} threshold=${OVERSIZE_THRESHOLD}",
-                    )
-                    for (m in oversized) {
-                        val raw = m.partsJson
-                        val len = raw.length
-                        val hasToolUse = raw.contains("\"toolUse\"")
-                        val hasToolResult = raw.contains("\"toolResult\"")
-                        val hasImage = raw.contains("\"image\"") || raw.contains("\"image_url\"")
-                        val hasBase64 = raw.contains("data:image") || raw.contains(";base64,")
-                        println(
-                            "[T-HANG-DIAG] oversized id=${m.id} role=${m.role} " +
-                                "createdAt=${m.createdAt} len=$len " +
-                                "hasToolUse=$hasToolUse hasToolResult=$hasToolResult " +
-                                "hasImage=$hasImage hasBase64=$hasBase64 " +
-                                "streamInterrupts=${m.streamInterruptCount}",
-                        )
-                    }
-                }
-            }
-
-            // Rebuild agentHistory from persisted messages.
-            // Pre-built off-Main inside the withContext(Dispatchers.IO) block
-            // above to avoid re-parsing partsJson on the UI thread. Safe to
-            // bulk-addAll here because loadSession runs once at init before
-            // any sender writes into agentHistory.
-            appendBoundedHistoryAll(loaded.llmHistory)
-            val tHangDiagAfterAgentHistory = System.currentTimeMillis()
-            println(
-                "[T-HANG-DIAG] agentHistory rebuilt session=$sessionId tookMs=${tHangDiagAfterAgentHistory - tHangDiagAfterTransform}",
-            )
-
-            // Restore the most-recent compact summary, if any, so the first
-            // outgoing turn after reopening a compacted session still sees
-            // the folded-away context via [effectiveAgentHistory]. Also gray
-            // out every UI message that falls before the marker's boundary —
-            // mirrors iOS Phase 2.5 restore (AIChatViewModel.swift:3360+).
-            val marker = runCatching { chatRepository.dao.latestCompactMarker(sessionId) }
-                .onFailure { Log.w(TAG, "latestCompactMarker failed: ${it.message}") }
-                .getOrNull()
-            _compactSummary.value = marker?.summary
-            _cachedLatestMarker = marker
-
-            com.openminis.app.diagnostics.PerfLongCtx.step(
-                sessionId,
-                "stateflow.emit.begin",
-                "count=${ordered.size}",
-            )
-            // [T-android-larky-longsession-followup] Reset the tail
-            // window to its initial cap on every session (re)load. Without
-            // this a freshly opened session would inherit the previous
-            // session's enlarged cap (set via loadOlderMessages), defeating
-            // the windowing intent on the first paint of every new session.
-            _visibleMessageCap.value = INITIAL_VISIBLE_MESSAGE_CAP
-            _messages.value = if (marker == null) {
-                ordered
-            } else {
-                // Phase 2.5: build the historyDbIds set used by the
-                // createdAt self-heal to filter to anchors that are
-                // actually represented in agentHistory. Mirrors iOS
-                // AIChatViewModel+Persistence.swift:406-408.
-                val historyDbIds: Set<String> = buildSet {
-                    for (m in loaded.llmHistory) {
-                        m.dbMessageId?.takeIf { it.isNotEmpty() }?.let { add(it) }
-                    }
-                }
-                applyCompactMarkerGraying(ordered, marker, loaded.messages, historyDbIds)
-            }
-
-            // Cold-start interrupt detection: an agent loop that was killed by
-            // the OS (or app force-quit) leaves agentHistory in one of four
-            // tell-tale shapes. Detecting any of them lets the user tap
-            // Resume to pick up where the model left off — the in-memory
-            // [_canResume] flag set by [handleUserCancelledCleanup] is lost
-            // across cold starts so we have to re-derive it from the DB.
-            // Mirrors iOS AIChatViewModel.loadSession lines 3546-3581.
-            //   Case A: last entry is user with all-toolResult parts —
-            //           tools completed but the next model call never fired.
-            //   Case B: last entry is assistant with any tool_use parts —
-            //           the model requested tools that never executed.
-            //   Case C: last entry is user with the synthetic "Continue"
-            //           reminder text — text-cancel handler committed it
-            //           but [resume] never re-entered the agent loop.
-            //   Case D: last entry is a PLAIN-TEXT user turn that never got a
-            //           reply at all — see below (GH#262/#263).
-            val lastEntry = agentHistory.lastOrNull()
-            // [T-android-orphan-user-tail GH#262/#263] `isActive` covers the
-            // case this VM cannot see: another VM (or the foreground service)
-            // is driving this very session, so `_isStreaming` is false HERE
-            // while a request is genuinely in flight THERE. Without it, Case D
-            // would light Resume on a turn that is merely still waiting.
-            val trackerActive = SessionActivityTracker.isActive(activeSessionId)
-            if (lastEntry != null && !_isStreaming.value && !trackerActive) {
-                val isInterrupted = when (lastEntry.role) {
-                    LLMMessage.Role.USER -> {
-                        val parts = lastEntry.contentParts
-                        val allToolResults = parts.isNotEmpty() &&
-                            parts.all { it is AgentContentPart.ToolResult }
-                        val isContinueReminder = parts.size == 1 &&
-                            (parts.first() as? AgentContentPart.Text)?.text
-                                ?.contains("The user stopped the previous response") == true
-                        // Case D — a user turn with NO reply after it at all.
-                        //
-                        // How it is produced: send() persists the user row
-                        // (~5605) BEFORE the reply lands. If the process dies
-                        // in between — Android reclaiming a backgrounded app is
-                        // the reported case — the assistant side never reaches
-                        // the store, and it cannot be reconstructed later
-                        // because persistAssistantTurn() drops any row with no
-                        // parts (~9112, the guard that stops us POSTing a
-                        // content-less assistant message back to the API).
-                        // An in-app first-turn network failure lands here too:
-                        // setInlineError() attaches the error to the last
-                        // ASSISTANT row and is a no-op when none exists (~5789),
-                        // so that tail is equally reply-less and equally stuck.
-                        //
-                        // Before this case, such a tail reported canResume=false
-                        // — no PAUSED badge, no Resume banner, and retryLast()
-                        // bailing at its own `lastAssistantIdx < 0` guard
-                        // (~5906). The session had NO recovery affordance and
-                        // the user could only start a new chat.
-                        //
-                        // Deliberately LAST: A and C describe a turn that was
-                        // mid-flight; D describes one that never started. Order
-                        // keeps their more specific semantics (and logging)
-                        // intact for tails that match both.
-                        //
-                        // False-positive safety — this must never fire on a turn
-                        // that is simply still waiting. Three gates hold:
-                        //   1. `!_isStreaming` (above) — send() sets it true at
-                        //      ~5564, BEFORE persisting the user row at ~5605,
-                        //      and clears it only in the stream epilogue, so the
-                        //      whole in-flight window is excluded in-process.
-                        //   2. `!trackerActive` (above) — the cross-VM case.
-                        //   3. This block runs only from loadSession(), never
-                        //      mid-stream.
-                        // A cold start after a kill satisfies all three exactly
-                        // because the process that was streaming no longer
-                        // exists.
-                        val isUnansweredUserTurn = !allToolResults && !isContinueReminder
-                        allToolResults || isContinueReminder || isUnansweredUserTurn
-                    }
-                    LLMMessage.Role.ASSISTANT -> {
-                        lastEntry.contentParts.any { it is AgentContentPart.ToolUse }
-                    }
-                    else -> false
-                }
-                if (isInterrupted) {
-                    // [T-android-group-pause-badge-restamp] This is a
-                    // RE-DETECTION of an interruption that already happened
-                    // (possibly days ago) — the persisted tail still looks
-                    // unfinished. It is NOT a new entry into the paused state,
-                    // so the badge must keep its original entry timestamp;
-                    // otherwise merely opening or cold-start scanning an old
-                    // chat resets the group card's 24h freshness window and a
-                    // long-stale pause flags its group forever. Raised BEFORE
-                    // the assignment (the collector runs asynchronously — see
-                    // the field's doc) and consumed by the collector, not here.
-                    markRedetectingInterruptedTail()
-                    _canResume.value = true
-                    // Name the shape, not just the role: Case D (reply-less
-                    // user tail) is the one that used to be invisible, so a
-                    // field log has to be able to tell it from A/C.
-                    val shape = when {
-                        lastEntry.role == LLMMessage.Role.ASSISTANT -> "B/assistant-toolUse"
-                        lastEntry.contentParts.isNotEmpty() &&
-                            lastEntry.contentParts.all { it is AgentContentPart.ToolResult } -> "A/toolResult-tail"
-                        lastEntry.contentParts.size == 1 &&
-                            (lastEntry.contentParts.first() as? AgentContentPart.Text)?.text
-                                ?.contains("The user stopped the previous response") == true -> "C/continue-reminder"
-                        else -> "D/unanswered-user-turn"
-                    }
-                    Log.i(TAG, "loadSession: detected interrupted agent loop, canResume=true (lastRole=${lastEntry.role} shape=$shape)")
-                }
-            }
-            } finally {
-                // T201: open the gate even on early `return@launch` (draft path,
-                // missing-session path) and on exception, so the init-time
-                // config.collect can never deadlock waiting for us.
-                sessionLoaded.value = true
-                // [T-HANG-DIAG] total time spent in loadSession from ENTER to
-                // either successful completion or early return. tHangDiagStart
-                // was captured just inside `try` so this covers the whole
-                // body the user perceives as "loading".
-                println(
-                    "[T-HANG-DIAG] loadSession EXIT session=$sessionId " +
-                        "totalMs=${System.currentTimeMillis() - tHangDiagStart}",
-                )
-                com.openminis.app.diagnostics.PerfLongCtx.step(
-                    sessionId,
-                    "loadSession.exit",
-                    "totalMs=${System.currentTimeMillis() - tHangDiagStart}",
-                )
-            }
-        }
-    }
 
     /**
      * Mark every non-system UI message that falls before [marker]'s boundary
@@ -5227,7 +4771,7 @@ class ChatViewModel(
      * Suspending because the self-heal path writes back through
      * the DAO. Caller (loadSession) is already on a coroutine.
      */
-    private suspend fun applyCompactMarkerGraying(
+    internal suspend fun applyCompactMarkerGraying(
         messages: List<ChatMessage>,
         marker: com.openminis.app.data.db.CompactMarkerEntity,
         rawMessages: List<com.openminis.app.data.db.MessageEntity>,
@@ -5458,7 +5002,7 @@ class ChatViewModel(
      * New-chat model: an `entry:` default pin, otherwise the selected or default group.
      * Group ids that are entry pins are not passed to group lookup.
      */
-    private fun applyDefaultPrimarySlot(initialGroupId: String?, applyGroupDefaults: Boolean): Boolean {
+    internal fun applyDefaultPrimarySlot(initialGroupId: String?, applyGroupDefaults: Boolean): Boolean {
         if (initialGroupId == null) {
             val pinned = com.openminis.app.data.model.ModelSlotRef.entryId(providerRepository.defaultPrimaryGroupId)
             if (pinned != null) return applyPinnedModelEntry(pinned)
@@ -5476,7 +5020,7 @@ class ChatViewModel(
     }
 
     /** Restore provider state from a JSON binding string. Returns true if successfully resolved. */
-    private fun restoreFromBinding(bindingJson: String?): Boolean {
+    internal fun restoreFromBinding(bindingJson: String?): Boolean {
         bindingJson ?: return false
         return try {
             val obj = org.json.JSONObject(bindingJson)
@@ -5499,7 +5043,7 @@ class ChatViewModel(
         }
     }
 
-    private fun resolveProviderFromGroup(
+    internal fun resolveProviderFromGroup(
         groupId: String,
         preferredEntryId: String? = null,
         needed: Set<ModelCapability> = emptySet(),
@@ -5641,7 +5185,7 @@ class ChatViewModel(
      * behaviour here was `allVisibleEntries().firstOrNull()` (the FIRST entry),
      * which ignored both last-used and add-order — replaced by this chain.
      */
-    private fun applyNewChatDefaultModel(): Boolean {
+    internal fun applyNewChatDefaultModel(): Boolean {
         val entry = providerRepository.lastUsedVisibleEntry()
             ?: providerRepository.newestProviderNewestTextEntry()
             ?: return false
@@ -5694,7 +5238,7 @@ class ChatViewModel(
         }
     }
 
-    private fun findModelEntry(modelId: String) =
+    internal fun findModelEntry(modelId: String) =
         providerRepository.allVisibleEntries().find { it.model.id == modelId }
 
     /**
@@ -9371,7 +8915,7 @@ class ChatViewModel(
         }
     }
 
-    private fun List<MessageEntity>.toChatMessages(): List<ChatMessage> {
+    internal fun List<MessageEntity>.toChatMessages(): List<ChatMessage> {
         // First pass: extract all toolResult data keyed by toolUseId
         val toolResultMap = mutableMapOf<String, ToolResultData>()
         for (entity in this) {
@@ -9640,7 +9184,7 @@ class ChatViewModel(
         trimAgentHistory()
     }
 
-    private fun appendBoundedHistoryAll(messages: Collection<LLMMessage>) {
+    internal fun appendBoundedHistoryAll(messages: Collection<LLMMessage>) {
         agentHistory.addAll(messages)
         trimAgentHistory()
     }
@@ -9726,7 +9270,7 @@ class ChatViewModel(
 
     private data class ToolResultData(val output: String, val success: Boolean)
 
-    private fun MessageEntity.toLLMMessage(): LLMMessage {
+    internal fun MessageEntity.toLLMMessage(): LLMMessage {
         val r = if (role == "user") LLMMessage.Role.USER else LLMMessage.Role.ASSISTANT
         val contentParts = mutableListOf<AgentContentPart>()
         val imageParts = mutableListOf<LLMMessage.ImagePart>()
