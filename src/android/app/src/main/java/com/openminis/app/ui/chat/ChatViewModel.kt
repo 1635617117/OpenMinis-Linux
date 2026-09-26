@@ -1009,7 +1009,7 @@ class ChatViewModel(
      * pushes, but `remember { … }` inside `ChatScreen` does not. Mirrors iOS
      * `AIChatView` which binds against `vm.inputText`.
      */
-    private val _inputText = MutableStateFlow("")
+    internal val _inputText = MutableStateFlow("")
     val inputText: StateFlow<String> = _inputText.asStateFlow()
 
     /**
@@ -1160,10 +1160,10 @@ class ChatViewModel(
      * before persisting the new content as a fresh user turn.
      * Mirrors iOS AIChatViewModel.editingMessageIndex.
      */
-    private val _editingMessageId = MutableStateFlow<String?>(null)
+    internal val _editingMessageId = MutableStateFlow<String?>(null)
     val editingMessageId: StateFlow<String?> = _editingMessageId.asStateFlow()
 
-    private val _error = MutableStateFlow<String?>(null)
+    internal val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
     internal val _modelName = MutableStateFlow("")
@@ -1498,7 +1498,7 @@ class ChatViewModel(
     // the cancelled resume's finally fired ~2s after the new retry was already
     // streaming, hiding the Stop button while the new turn was live).
     @Volatile
-    private var streamJob: Job? = null
+    internal var streamJob: Job? = null
     internal var currentProvider: LLMProvider? = null
     internal var currentModel: LLMModel? = null
 
@@ -3691,7 +3691,7 @@ class ChatViewModel(
      * `exhausted` boundaries and still allow the send. That gives the user
      * a signal to invoke `/compact` explicitly without blocking their turn.
      */
-    private fun checkContextBeforeSend(): PreSendContextAction {
+    internal fun checkContextBeforeSend(): PreSendContextAction {
         val tokens = contextTokensForPolicy()
         if (tokens <= 0) return PreSendContextAction.PROCEED
         // [T-context-window-live-read] Live window (entry re-resolved + group
@@ -3736,7 +3736,7 @@ class ChatViewModel(
     }
 
     /** What the pre-send context check decided. Mirrors iOS's send() branch. */
-    private enum class PreSendContextAction {
+    internal enum class PreSendContextAction {
         /** Under threshold (or nothing useful to do) — send as normal. */
         PROCEED,
 
@@ -3751,9 +3751,9 @@ class ChatViewModel(
      * Text + attachments held back while the "Context Near Capacity" dialog is
      * up. Mirrors iOS `pendingSendText` / `pendingSendAttachments`.
      */
-    private var pendingSendText: String? = null
+    internal var pendingSendText: String? = null
 
-    private val _showCompactBeforeSendPrompt = MutableStateFlow(false)
+    internal val _showCompactBeforeSendPrompt = MutableStateFlow(false)
     val showCompactBeforeSendPrompt: StateFlow<Boolean> = _showCompactBeforeSendPrompt.asStateFlow()
 
     /**
@@ -4197,7 +4197,7 @@ class ChatViewModel(
     }
 
     /** Ensure the session exists in the database. Called before first message. */
-    private suspend fun ensureSession(): String {
+    internal suspend fun ensureSession(): String {
         if (realSessionId.isNotEmpty()) return realSessionId
         val modelId = currentModel?.id ?: providerRepository.allVisibleEntries().firstOrNull()?.model?.id ?: "unknown"
         // [T-memory-global-toggle-settings-ui-android] Snapshot the
@@ -4867,7 +4867,7 @@ class ChatViewModel(
         val entryId: String,
     )
 
-    private fun buildFallbackProviders(primaryProvider: LLMProvider): List<FallbackCandidate> {
+    internal fun buildFallbackProviders(primaryProvider: LLMProvider): List<FallbackCandidate> {
         // Settings → Model Groups only. A model picked under a provider
         // section never sets _selectedGroupId, so this returns empty and
         // the turn stays on that one model.
@@ -5038,7 +5038,7 @@ class ChatViewModel(
      * the user starts a new turn or moves the share elsewhere we flip it
      * back to false. Mirrors iOS AIChatView.hasInjectedShareContent.
      */
-    private val _hasInjectedShareContent = kotlinx.coroutines.flow.MutableStateFlow(false)
+    internal val _hasInjectedShareContent = kotlinx.coroutines.flow.MutableStateFlow(false)
     val hasInjectedShareContent: kotlinx.coroutines.flow.StateFlow<Boolean> =
         _hasInjectedShareContent.asStateFlow()
 
@@ -5793,7 +5793,7 @@ class ChatViewModel(
      * from retryFromMessage but offsets by `entity.sortOrder` (not
      * +1) — retry preserves the original turn, edit replaces it.
      */
-    private suspend fun truncateBeforeEdit(messageId: String) {
+    internal suspend fun truncateBeforeEdit(messageId: String) {
         val messages = _messages.value
         val index = messages.indexOfFirst { it.id == messageId }
         if (index < 0) return
@@ -6081,7 +6081,7 @@ class ChatViewModel(
      * appended to agentHistory, persisted, and re-runs the agent loop.
      * Mirrors iOS AIChatViewModel.drainQueuedPrompts().
      */
-    private suspend fun drainQueuedPrompts(
+    internal suspend fun drainQueuedPrompts(
         provider: LLMProvider,
         systemPrompt: String?,
         fallbackProviders: List<FallbackCandidate>,
@@ -6180,361 +6180,6 @@ class ChatViewModel(
 
     override fun sendMessage(text: String) = sendMessage(text, skipContextCheck = false)
 
-    /**
-     * @param skipContextCheck set by the pre-send context dialog's own actions,
-     *   which have already made the compact decision. Without it the re-entrant
-     *   send would re-evaluate the same (still stale until the next usage
-     *   chunk) token count and pop the dialog again — iOS guards the identical
-     *   re-entry with `skipCompactCheck`.
-     */
-    private fun sendMessage(text: String, skipContextCheck: Boolean) {
-        // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
-        // any more.
-        //
-        // They used to be: this funnel substituted the full text inline, so the
-        // persisted message held one enormous `text` part. That is the same
-        // shape that made huge tool results freeze the app — every time the
-        // bubble scrolled into view, TextKit had to lay out the whole block on
-        // the main thread. The markers now survive down to the parts-building
-        // step below, where each becomes its own `text/plain` mediaRef; the full
-        // content is re-attached to the REQUEST from disk (see toLLMMessage and
-        // the fresh-send contentParts), so the model still sees everything while
-        // the bubble stays small.
-        //
-        // The buffer is cleared where the mediaRefs are actually written, not
-        // here — clearing at this point would strip the content out from under
-        // a send that then bails on the context-check paths below.
-        val trimmed = text.trim()
-        // While streaming, enqueue instead of silently dropping (iOS: send vs enqueuePrompt).
-        if (_isStreaming.value) {
-            enqueuePrompt(text)
-            return
-        }
-        // T180: allow attachments-only sends (no caption). Mirrors iOS, where
-        // an empty text + non-empty attachments still produces a valid user
-        // message. Without this an image-only "look at this" send dropped.
-        if (trimmed.isBlank() && _attachments.value.isEmpty()) return
-        if (_isCompacting.value) {
-            appendSystemInfo(
-                text = "Wait for the current compact to finish before sending.",
-                iconKind = "compact",
-            )
-            return
-        }
-        // Context pressure check. Unlike before, needsCompact now HOLDS the
-        // send: either compact silently (auto-compact on) or ask first. The
-        // whole point is that the request which tripped the threshold must not
-        // be the one that goes out over-length.
-        if (!skipContextCheck) {
-            when (checkContextBeforeSend()) {
-                PreSendContextAction.PROCEED -> {}
-                PreSendContextAction.COMPACT_THEN_SEND -> {
-                    pendingSendText = text
-                    _inputText.value = ""
-                    compactAndSendPending()
-                    return
-                }
-                PreSendContextAction.ASK_USER -> {
-                    // Park the text on the VM (not the composer) so the dialog
-                    // owns it; cancelCompactBeforeSend puts it back.
-                    pendingSendText = text
-                    _inputText.value = ""
-                    _showCompactBeforeSendPrompt.value = true
-                    return
-                }
-            }
-        }
-        // A fresh send supersedes any pending resume — mirror iOS which clears
-        // canResume at the top of send().
-        _canResume.value = false
-        // T185: clear the share-injected flag the moment the user actually
-        // sends. Without this, the "Move to…" capsule (gated on
-        // hasInjectedShareContent) keeps floating over the user-message row
-        // after the share content has been committed — it then visually
-        // collides with the user-attachment chips, which renders as the
-        // "image attachment shows up as Move to" symptom in T185. Mirrors
-        // iOS AIChatView.swift:2255 (`hasInjectedShareContent = false`
-        // inside the send button's tap closure).
-        if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
-
-        val initialProvider = currentProvider
-        if (initialProvider == null) {
-            _error.value = "No provider configured"
-            return
-        }
-        var provider: LLMProvider = initialProvider
-
-        _error.value = null
-
-        val currentAttachments = _attachments.value
-        val groupIdForCaps = _selectedGroupId.value
-        if (!groupIdForCaps.isNullOrBlank()) {
-            val neededCaps = CapabilityRouter.neededForTask(
-                trimmed,
-                currentAttachments.any { it.isImage },
-            )
-            resolveProviderFromGroup(
-                groupIdForCaps,
-                _activeEntryId.value,
-                neededCaps,
-                pinActiveEntry = neededCaps.isEmpty(),
-            )
-            currentProvider?.let { provider = it }
-        }
-        clearAttachments()
-
-        // T145: claim _isStreaming synchronously so a rapid second tap can't
-        // slip past the entry guard during DB/OAuth setup. See retryFromMessage.
-        AppLogger.info(TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
-        _isStreaming.value = true
-
-        // [T-android-thinking-indicator-linger] Invariant sweep: a fresh send
-        // only reaches here when no turn is streaming (the _isStreaming guard
-        // at the top routes mid-stream sends to enqueuePrompt). So any residual
-        // _streamingById entry is an orphan stranded by a prior turn that
-        // exited without draining it (e.g. a late delta re-added the entry
-        // after finalizeAtTurnLimit / cancel cleared it). mergeStreamingOverlay
-        // forces isStreaming=true on any message holding such an entry, so an
-        // orphan would render a second "thinking" row alongside the new turn's.
-        // Flush them into the canonical messages (isStreaming=false) before the
-        // new streaming message is created — no two messages ever stream at once.
-        if (_streamingById.value.isNotEmpty()) {
-            AppLogger.warning(TAG_STREAM, "send: sweeping ${_streamingById.value.size} orphan streaming delta(s) before new turn")
-            flushAllStreamingDeltas()
-        }
-
-        // T187: when the user is editing a previous message, truncate the
-        // conversation from that message (inclusive) before persisting the
-        // edited text as a fresh user turn. Snapshot + clear the id here so
-        // any error in the truncate path doesn't leave the composer stuck
-        // in edit mode.
-        val editingId = _editingMessageId.value
-        if (editingId != null) _editingMessageId.value = null
-
-        viewModelScope.launch {
-            var streamLaunched = false
-            try {
-            // Ensure session exists in DB (creates on first message for draft sessions)
-            val activeSessionId = ensureSession()
-
-            if (editingId != null) {
-                truncateBeforeEdit(editingId)
-            }
-
-            val prepared = prepareUserAttachments(currentAttachments, activeSessionId)
-
-            // [T-android-paste-mediaref] Fold `[Pasted#N]` markers out to disk
-            // BEFORE persisting, so the stored message carries a mediaRef per
-            // paste instead of one huge text part.
-            val pasted = buildPastedParts(trimmed, activeSessionId)
-            if (pasted != null) {
-                // Safe to clear now: the content is on disk and the parts JSON
-                // below references it, so nothing depends on the buffer any more.
-                _pastedTexts.value = _pastedTexts.value.filterNot { it.id in pasted.consumedIds }
-            }
-
-            // Save user message — text + persisted mediaRef parts so images survive
-            // a session reload (T128). Non-image attachments still only contribute
-            // their name (rendered as a file tile) and are not persisted.
-            val userPartsJson = buildUserPartsJson(
-                trimmed,
-                prepared.mediaRefPartsJson,
-                prepared.attachedFilesXml,
-                bodyPartsJson = pasted?.partsJson,
-            )
-            val persistedUser = chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
-
-            val userMsg = ChatMessage(
-                id = persistedUser.id,
-                role = "user",
-                // The bubble shows the SHORT body with markers removed; the
-                // pasted blocks appear beside it as file cards (below).
-                // Strip the consumed markers from the visible caption — the
-                // file cards now stand for them. Only ids that actually
-                // resolved are removed, so a literal the user typed for an
-                // unknown id survives as text, matching how it is persisted.
-                content = pasted?.let { p ->
-                    p.consumedIds.fold(trimmed) { acc, id ->
-                        acc.replace(PastedText.placeholderFor(id), "")
-                    }.trim()
-                } ?: trimmed,
-                imageUris = prepared.imageUris,
-                // Pasted blocks render exactly like attached documents: append
-                // them to the non-image suffix, preserving the
-                // images-first/files-after ordering that
-                // ChatMessage.attachmentNames depends on.
-                attachmentNames = prepared.attachmentNames + (pasted?.uiNames ?: emptyList()),
-                attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
-            )
-            _messages.value = trimLoadedWindow(_messages.value + userMsg)
-            val imageParts = prepared.imageParts
-
-            // T132: build the user contentParts in iOS order — caption first
-            // (only if non-empty), then per image emit
-            //   text("[attached image: /var/minis/attachments/uploads/<f>]")
-            //   ImageData(<bytes>, <mime>)
-            // so the caption sits adjacent to the image in the wire payload,
-            // and the agent's read_image tool can resolve the same path back
-            // to bytes. Trailing <user-attached-files> XML block lets the
-            // model see filenames/sizes without needing tool calls.
-            // [T-android-paste-mediaref] The MODEL gets the fully expanded body
-            // even though the bubble and the DB row do not. This is the whole
-            // point of the split: local rendering stays cheap, the prompt is
-            // unchanged from what it used to be.
-            //
-            // On later turns the same expansion is rebuilt from disk by
-            // toLLMMessage's mediaRef branch, so history replay (retry, rerun,
-            // session reload, compaction) sees the identical text.
-            val modelBody = pasted?.modelText ?: trimmed
-
-            val userContentParts = mutableListOf<AgentContentPart>()
-            if (modelBody.isNotEmpty()) userContentParts.add(AgentContentPart.Text(modelBody))
-            imageParts.forEachIndexed { idx, part ->
-                val path = prepared.imageUploadPaths.getOrNull(idx)
-                if (path != null) userContentParts.add(AgentContentPart.Text("[attached image: $path]"))
-                userContentParts.add(AgentContentPart.ImageData(part.data, part.mimeType, linuxPath = path, noVisionPlaceholder = visionPlaceholderFor(path)))
-            }
-            prepared.attachedFilesXml?.let { userContentParts.add(AgentContentPart.Text(it)) }
-
-            appendBoundedHistory(LLMMessage(
-                role = LLMMessage.Role.USER,
-                content = modelBody,
-                imageParts = imageParts,
-                contentParts = userContentParts,
-                dbMessageId = persistedUser.id,
-            ))
-            // [T-context-ring] Refresh after user appends.
-            refreshContextUsage()
-
-            // Refresh OAuth token if needed before sending (mirrors iOS validAccessToken)
-            if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                try {
-                    val activeEntryId = _activeEntryId.value
-                    val entry = activeEntryId?.let { id -> providerRepository.config.value.modelEntries.find { it.id == id } }
-                    val instance = entry?.let { e -> providerRepository.config.value.instances.find { it.id == e.providerInstanceId } }
-                    if (instance != null) {
-                        val manager = com.openminis.app.auth.OAuthManager.forInstance(context, instance)
-                        val freshToken = manager?.validAccessToken()
-                        if (freshToken != null) {
-                            val storedKey = providerRepository.loadApiKey(instance.id)
-                            if (freshToken != storedKey) {
-                                providerRepository.saveApiKey(instance.id, freshToken)
-                                // Recreate provider with fresh token
-                                provider = com.openminis.app.provider.ProviderFactory.create(
-                                    instance, freshToken, currentModel ?: provider.model, context
-                                )
-                                currentProvider = provider
-                                android.util.Log.i(TAG, "OAuth token refreshed before send")
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.w(TAG, "OAuth token refresh failed: ${e.message}")
-                }
-            }
-
-            // Build system prompt
-            // Anthropic OAuth requires the Claude Code prefix in the system prompt
-            val baseSystemPrompt = buildSystemPrompt()
-            val systemPrompt = if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
-                val prefix = com.openminis.app.auth.ClaudeOAuthManager.ANTHROPIC_OAUTH_IDENTIFIER_PROMPT
-                if (baseSystemPrompt?.startsWith(prefix) == true) baseSystemPrompt
-                else "$prefix\n\n${baseSystemPrompt ?: ""}"
-            } else baseSystemPrompt
-
-            // Start agent loop with fallback. _isStreaming was set synchronously at top.
-            streamLaunched = true
-            streamJob = launch(Dispatchers.IO) {
-                AppLogger.info(TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
-                try {
-                    // [T-STALL-DIAG] Snapshot BEFORE the (possibly blocking)
-                    // acquire. If the log shows this line and then no "slot
-                    // acquired", the turn is parked in acquireSlot — and this
-                    // line already records who was holding the slots, so the
-                    // leak is diagnosable from a single log.
-                    println(
-                        "[T-STALL-DIAG] send PRE-ACQUIRE sid=$activeSessionId " +
-                            SessionConcurrencyManager.diagSnapshot(),
-                    )
-                    // Acquire concurrency slot (suspends if at max)
-                    SessionConcurrencyManager.acquireSlot(activeSessionId)
-                    AppLogger.debug(TAG_STREAM, "send streamJob slot acquired")
-                    SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
-
-                    // Resolve the active group's fallback strategy
-                    val activeFallbackStrategy = run {
-                        val groupId = _selectedGroupId.value
-                        groupId?.let { providerRepository.config.value.modelGroups.find { g -> g.id == it }?.fallbackStrategy }
-                            ?: com.openminis.app.data.model.FallbackStrategy.default
-                    }
-
-                    // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
-                    val fallbackProviders = buildFallbackProviders(provider)
-
-                    try {
-                        if (provider.model.isPureVideoGenerator) {
-                            AppLogger.info(TAG_STREAM, "send runVideoGenerationTurn CALL")
-                            runVideoGenerationTurn(provider, modelBody, activeSessionId)
-                            AppLogger.info(TAG_STREAM, "send runVideoGenerationTurn RETURN")
-                        } else {
-                            AppLogger.info(TAG_STREAM, "send runAgentLoop CALL")
-                            runAgentLoop(
-                                provider = provider,
-                                systemPrompt = systemPrompt,
-                                fallbackProviders = fallbackProviders,
-                                fallbackStrategy = activeFallbackStrategy,
-                            )
-                            AppLogger.info(TAG_STREAM, "send runAgentLoop RETURN normal")
-                            // Drain any prompts the user queued while this loop was running.
-                            // Skipped on cancel: cancelled job won't reach here.
-                            drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                            AppLogger.info(TAG_STREAM, "send drainQueuedPrompts RETURN")
-                        }
-                    } catch (e: CancellationException) {
-                        AppLogger.info(TAG_STREAM, "send runAgentLoop CANCELLED")
-                        Log.d(TAG, "Agent loop cancelled")
-                    } catch (e: Exception) {
-                        AppLogger.error(TAG_STREAM, "send runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
-                        Log.e(TAG, "Agent loop error (all fallbacks exhausted)", e)
-                        setInlineError(e.message ?: "Unknown error")
-                        // T298: completion notifier should show the ❌ variant.
-                        SessionActivityTracker.markStreamError(activeSessionId)
-                    } finally {
-                        AppLogger.info(TAG_STREAM, "send streamJob FINALLY enter")
-                        // [T-android-overlay-reply-status-34599] Surface
-                        // the assistant's most recent reply text to the
-                        // overlay BEFORE setInactive so the post-completion
-                        // overlay state (no-running, has-outcome) carries a
-                        // non-null excerpt. Reading _messages here is safe:
-                        // we're in the finally block of the agent loop and
-                        // the stream has already flushed its last delta.
-                        publishOverlayReplyExcerpt(activeSessionId)
-                        SessionActivityTracker.setInactive(activeSessionId)
-                        SessionConcurrencyManager.releaseSlot(activeSessionId)
-                        AppLogger.info(TAG_STREAM, "send streamJob FINALLY exit")
-                    }
-                } catch (e: CancellationException) {
-                    AppLogger.info(TAG_STREAM, "send streamJob CANCELLED waiting for slot")
-                    Log.d(TAG, "Cancelled while waiting for concurrency slot")
-                }
-                // [T-android-stale-streamjob-clears-isstreaming] guard — see
-                // `var streamJob` KDoc; identical pattern as runRerunStreamTail.
-                if (streamJob === coroutineContext[Job]) {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming=false (about to set)")
-                    _isStreaming.value = false
-                } else {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming SKIPPED (stale job)")
-                }
-                AppLogger.info(TAG_STREAM, "send streamJob EXIT")
-            }
-            } finally {
-                if (!streamLaunched) {
-                    AppLogger.info(TAG_STREAM, "send _isStreaming=false (setup aborted)")
-                    _isStreaming.value = false
-                }
-            }
-        }
-    }
 
     /** Set error inline on the last assistant message (iOS: message.error).
      *
@@ -7525,7 +7170,7 @@ class ChatViewModel(
      * Vision Group IS configured, returns a hint naming [path] and steering the
      * model to call read_image — closing the loop with executeReadImageTool.
      */
-    private fun visionPlaceholderFor(path: String?): String? {
+    internal fun visionPlaceholderFor(path: String?): String? {
         if (currentModelHasNativeVision) return null
         if (!com.openminis.app.tools.VisionGroupResolver.isConfigured(providerRepository, context)) return null
         return com.openminis.app.tools.VisionGroupResolver.noVisionImagePlaceholder(path)
@@ -7626,7 +7271,7 @@ class ChatViewModel(
 
     private fun flushStreamingDelta(id: String) = streamSession.flushStreamingDelta(id)
 
-    private fun flushAllStreamingDeltas() = streamSession.flushAllStreamingDeltas()
+    internal fun flushAllStreamingDeltas() = streamSession.flushAllStreamingDeltas()
 
     /**
      * Build the ordered AgentContentPart list for this turn by walking the slice of
@@ -7884,7 +7529,7 @@ class ChatViewModel(
      * after the stream completes. No-op when no assistant message has
      * content yet (e.g. fail during the very first turn).
      */
-    private fun publishOverlayReplyExcerpt(sessionId: String) {
+    internal fun publishOverlayReplyExcerpt(sessionId: String) {
         val snapshot = _messages.value
         val text = snapshot.asReversed().firstOrNull { msg ->
             msg.role == "assistant" && msg.content.isNotBlank()
