@@ -1309,14 +1309,14 @@ internal fun resolveMdMediaFile(context: Context, url: String, sessionId: String
     return null
 }
 
-private fun filenameFromMdUrl(url: String): String {
+internal fun filenameFromMdUrl(url: String): String {
     // Keep '#' — it's a legitimate character in attachment filenames.
     val stripped = url.substringBefore('?')
     val last = stripped.substringAfterLast('/')
     return try { java.net.URLDecoder.decode(last, "UTF-8") } catch (_: Throwable) { last }
 }
 
-private fun openMdMediaExternally(context: Context, file: File, mime: String) {
+internal fun openMdMediaExternally(context: Context, file: File, mime: String) {
     val authority = context.packageName + ".fileprovider"
     val uri = try {
         androidx.core.content.FileProvider.getUriForFile(context, authority, file)
@@ -1341,7 +1341,7 @@ private fun openMdMediaExternally(context: Context, file: File, mime: String) {
     }
 }
 
-private fun formatMdMediaMs(ms: Int): String {
+internal fun formatMdMediaMs(ms: Int): String {
     if (ms <= 0) return "0:00"
     val totalSec = ms / 1000
     return "%d:%02d".format(totalSec / 60, totalSec % 60)
@@ -1442,108 +1442,6 @@ internal fun RenderMdVideo(block: MdBlock.Video) {
                 maxLines = 1,
             )
         }
-    }
-}
-
-@Composable
-internal fun RenderMdAudio(block: MdBlock.Audio) {
-    val context = LocalContext.current
-    val colors = currentMdColors()
-    val sessionId = LocalMarkdownSessionId.current
-    val file = remember(block.url, sessionId) { resolveMdMediaFile(context, block.url, sessionId) }
-    val filename = remember(block.url) { filenameFromMdUrl(block.url) }
-
-    val player = remember(file?.absolutePath) {
-        if (file == null) null else try {
-            MediaPlayer().apply { setDataSource(file.absolutePath); prepare() }
-        } catch (t: Throwable) {
-            android.util.Log.w("MdStream", "audio prepare failed: ${t.message}")
-            null
-        }
-    }
-    DisposableEffect(player) {
-        onDispose { try { player?.release() } catch (_: Throwable) {} }
-    }
-    var isPlaying by remember { mutableStateOf(false) }
-    var positionMs by remember { mutableStateOf(0) }
-    val durationMs = player?.duration ?: 0
-
-    LaunchedEffect(isPlaying) {
-        while (isPlaying && player != null) {
-            positionMs = try { player.currentPosition } catch (_: Throwable) { 0 }
-            if (!player.isPlaying) { isPlaying = false; break }
-            delay(200)
-        }
-    }
-    DisposableEffect(player) {
-        player?.setOnCompletionListener {
-            isPlaying = false
-            positionMs = 0
-            try { player.seekTo(0) } catch (_: Throwable) {}
-        }
-        onDispose { try { player?.setOnCompletionListener(null) } catch (_: Throwable) {} }
-    }
-
-    val tint = colors.link
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(colors.inlineCodeBg)
-            .border(0.5.dp, colors.tableBorder, RoundedCornerShape(10.dp))
-            .clickable(enabled = file != null) {
-                if (player == null) {
-                    file?.let { openMdMediaExternally(context, it, "audio/*") }
-                } else {
-                    if (isPlaying) { try { player.pause() } catch (_: Throwable) {} ; isPlaying = false }
-                    else { try { player.start(); isPlaying = true } catch (_: Throwable) {} }
-                }
-            }
-            .padding(horizontal = 10.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = Icons.Filled.Audiotrack,
-            contentDescription = null,
-            tint = colors.blockquote,
-            modifier = Modifier.size(18.dp),
-        )
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 10.dp),
-        ) {
-            MdText(
-                text = AnnotatedString(block.alt.ifEmpty { filename }),
-                fontSize = 13.sp,
-                color = colors.text,
-                maxLines = 1,
-            )
-            val progress = if (durationMs > 0) positionMs.toFloat() / durationMs else 0f
-            LinearProgressIndicator(
-                progress = { progress.coerceIn(0f, 1f) },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 4.dp)
-                    .height(3.dp),
-                color = tint,
-                trackColor = tint.copy(alpha = 0.2f),
-            )
-            if (durationMs > 0) {
-                MdText(
-                    text = AnnotatedString("${formatMdMediaMs(positionMs)} / ${formatMdMediaMs(durationMs)}"),
-                    fontSize = 11.sp,
-                    color = colors.blockquote,
-                )
-            }
-        }
-        Icon(
-            imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-            contentDescription = if (isPlaying) "Pause" else "Play",
-            tint = tint,
-            modifier = Modifier.size(28.dp),
-        )
     }
 }
 
