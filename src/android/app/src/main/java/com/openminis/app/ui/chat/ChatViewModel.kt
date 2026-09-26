@@ -1000,7 +1000,7 @@ class ChatViewModel(
 
     internal fun clearStreamFlushState(id: String) = streamSession.clearStreamFlushState(id)
     private fun clearAllStreamFlushStates() = streamSession.clearAllStreamFlushStates()
-    private fun retainStreamFlushStates(keptIds: Set<String>) =
+    internal fun retainStreamFlushStates(keptIds: Set<String>) =
         streamSession.retainStreamFlushStates(keptIds)
 
     /**
@@ -1707,7 +1707,7 @@ class ChatViewModel(
      * each call, so subsequent records may end up NotFound on disk but
      * still get pulled from the in-memory record list.
      */
-    private fun revokeMemoryWritesInDeletedMessages(deletedMessages: List<ChatMessage>) {
+    internal fun revokeMemoryWritesInDeletedMessages(deletedMessages: List<ChatMessage>) {
         val deletedContents = mutableListOf<String>()
         for (msg in deletedMessages) {
             for (block in msg.toolBlocks) {
@@ -4689,87 +4689,6 @@ class ChatViewModel(
         }
     }
 
-    /**
-     * [T-android-delete-from-here] Delete [messageId] and every message after
-     * it, leaving the conversation as it stood immediately before that turn.
-     * Mirrors iOS `6717c0ab0`.
-     *
-     * Deliberately close to — but not the same as — [retryFromMessage]. Both
-     * rewind the conversation to a point, so this reuses that method's DB
-     * anchoring: walk the persisted rows counting only user messages that have
-     * VISIBLE text, because the agent loop also persists synthetic
-     * `<system-reminder>` user rows that never rendered a bubble. Counting
-     * those would anchor the cut one turn too early and silently take an extra
-     * exchange with it (the iOS retry-anchor fix, ported here already).
-     *
-     * The one deliberate difference is the cut point: retry keeps the target
-     * user message and re-sends it, so it cuts at `sortOrder + 1`. Delete From
-     * Here removes the target too, so it cuts at `sortOrder`. Off-by-one in
-     * either direction is silent and destructive — one strands the message the
-     * user asked to delete, the other eats the preceding turn.
-     *
-     * No stream is started and `_isStreaming` is never claimed: this is a pure
-     * truncation. It is still refused while a turn is in flight, because
-     * deleting rows out from under a live agent loop would leave
-     * [agentHistory] describing messages that no longer exist.
-     */
-    fun deleteFromMessage(messageId: String) {
-        if (_isStreaming.value) return
-        _canResume.value = false
-        val messages = _messages.value
-        val index = messages.indexOfFirst { it.id == messageId }
-        if (index < 0) return
-
-        // Snapshot what's about to go so any memory_write tool blocks inside
-        // can be revoked — otherwise the on-disk daily log keeps entries from
-        // messages the user just deleted.
-        val deletedMessages = messages.subList(index, messages.size).toList()
-
-        // Truncate the UI to everything BEFORE the target message, and drop
-        // any queued prompts that belonged to the deleted range so a later
-        // auto-drain can't resurrect them.
-        val retainedHead = messages.subList(0, index)
-        for (m in deletedMessages) {
-            m.queuedPromptId?.let { pid ->
-                _promptQueue.value = _promptQueue.value.filterNot { it.id == pid }
-            }
-        }
-        _messages.value = retainedHead
-
-        // Scrub stream deltas pointing at truncated messages so they can't
-        // resurface into a row that no longer exists.
-        val keptIds = retainedHead.mapTo(mutableSetOf()) { it.id }
-        retainStreamFlushStates(keptIds)
-        if (_streamingById.value.isNotEmpty()) {
-            _streamingById.value = _streamingById.value.filterKeys { it in keptIds }
-        }
-
-        revokeMemoryWritesInDeletedMessages(deletedMessages)
-
-        val sid = activeSessionId ?: return
-        viewModelScope.launch {
-            val target = messages[index]
-            val cutoffSortOrder = resolveDeleteCutoffSortOrder(sid, messages, index, target)
-            if (cutoffSortOrder >= 0) {
-                chatRepository.deleteMessagesAfter(sid, cutoffSortOrder)
-            }
-
-            // Rebuild agentHistory from what survived, so the next turn is
-            // built on the truncated conversation rather than a stale list.
-            val tail = awaitBoundedHistoryRebuild(sid)
-            // Refresh the session's last-message preview; otherwise the
-            // session list keeps quoting a message that no longer exists.
-            // An empty remainder clears it rather than leaving the stale text.
-            runCatching {
-                chatRepository.updateSessionPreview(sid, tail.lastOrNull()?.partsJson ?: "[]")
-            }
-            AppLogger.info(
-                TAG,
-                "deleteFromMessage: cut at sortOrder=$cutoffSortOrder, " +
-                    "${deletedMessages.size} message(s) removed, ${tail.size} remain",
-            )
-        }
-    }
 
     /**
      * [T-android-delete-from-here] Resolve the DB `sort_order` to cut at so
@@ -4785,7 +4704,7 @@ class ChatViewModel(
      * everything following. Returns -1 when no anchor can be resolved, which
      * the caller treats as "leave the DB alone".
      */
-    private suspend fun resolveDeleteCutoffSortOrder(
+    internal suspend fun resolveDeleteCutoffSortOrder(
         sid: String,
         messages: List<ChatMessage>,
         index: Int,
@@ -6239,7 +6158,7 @@ class ChatViewModel(
         llmHistoryStartOffset += keep
     }
 
-    private suspend fun awaitBoundedHistoryRebuild(
+    internal suspend fun awaitBoundedHistoryRebuild(
         sid: String,
     ): List<com.openminis.app.data.db.MessageEntity> {
         val tail = chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES)
