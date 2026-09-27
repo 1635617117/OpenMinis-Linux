@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.10-linux
+
+- versionCode **210**
+- 沙箱内核：一张预算表（INTERACTIVE / NORMAL / BATCH / SERVICE / SETUP）决定挂钟、CPU、地址空间、进程数与输出速率，调用方超时被忽略。一次性命令用进程组看门狗；持久 shell 不再套子 shell、不再设第二次 `ulimit`、不再挂 EXIT trap。输出经 `StreamSink`、行回调令牌桶和 `UIBus` 三处限流。排队默认 120 秒，超时抛 `SlotQueueTimeout` 并让位。卡顿始终计数，补救只杀非 `terminal:` 根，不杀用户终端。驻留窗口 8MiB，溢出仍走 `ContextOffload`。计划讨论换成有界角色图，最多修订一次，讨论只读。数据库仍是 19。详见 `docs/github-release-2.0.10-linux.md`。
+
+---
+
 # OpenMinis-Linux 2.0.9-linux
 
 - versionCode **209**
