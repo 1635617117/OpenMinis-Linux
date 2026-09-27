@@ -1917,7 +1917,7 @@ class ChatViewModel(
         return providerRepository.config.value.modelEntries.find { it.id == id }?.overrides
     }
 
-    private fun effectiveAutoCompact(): Boolean =
+    internal fun effectiveAutoCompact(): Boolean =
         activeOverrides()?.autoCompactEnabled
             ?: com.openminis.app.data.AutoCompactPrefs.isEnabled()
 
@@ -3005,56 +3005,6 @@ class ChatViewModel(
             desc.contains("context window")
     }
 
-    /**
-     * Consult [ContextPolicy] before sending. Returns true to proceed. The
-     * Android MVP doesn't surface a "Compact before send" dialog (iOS does),
-     * so we only warn via [appendSystemInfo] at the `needsCompact` /
-     * `exhausted` boundaries and still allow the send. That gives the user
-     * a signal to invoke `/compact` explicitly without blocking their turn.
-     */
-    internal fun checkContextBeforeSend(): PreSendContextAction {
-        val tokens = contextTokensForPolicy()
-        if (tokens <= 0) return PreSendContextAction.PROCEED
-        // [T-context-window-live-read] Live window (entry re-resolved + group
-        // contextLimitTokens folded in) — not the currentModel snapshot.
-        val window = effectiveContextWindowTokens() ?: return PreSendContextAction.PROCEED
-        val policy = ContextPolicy.forContextWindow(window, effectiveCompactPercent())
-        return when (policy.check(tokens, window)) {
-            ContextPolicy.CheckResult.OK -> PreSendContextAction.PROCEED
-
-            // Mirrors iOS AIChatViewModel.swift:2224. Previously Android only
-            // appended a notice here and sent anyway, which meant the very
-            // request that tripped the threshold still went out over-length —
-            // the warning arrived alongside the failure it was meant to avoid.
-            ContextPolicy.CheckResult.NEEDS_COMPACT -> {
-                if (effectiveAutoCompact()) {
-                    AppLogger.info(
-                        TAG,
-                        "[Context] pre-send near capacity ($tokens / $window) — auto-compacting (pref on)",
-                    )
-                    PreSendContextAction.COMPACT_THEN_SEND
-                } else {
-                    AppLogger.info(
-                        TAG,
-                        "[Context] pre-send near capacity ($tokens / $window) — prompting user",
-                    )
-                    PreSendContextAction.ASK_USER
-                }
-            }
-
-            // Exhausted tiers have compactThreshold = 0 by policy: the window is
-            // too small for a summary to pay for itself, so compacting is not
-            // on offer. Keep the existing advisory-and-proceed behaviour rather
-            // than blocking the user out of their own chat.
-            ContextPolicy.CheckResult.EXHAUSTED -> {
-                appendSystemInfo(
-                    text = "Context is near the model's limit ($tokens / $window tokens). Start a new chat or /compact to continue reliably.",
-                    iconKind = "compact",
-                )
-                PreSendContextAction.PROCEED
-            }
-        }
-    }
 
     /** What the pre-send context check decided. Mirrors iOS's send() branch. */
     internal enum class PreSendContextAction {
