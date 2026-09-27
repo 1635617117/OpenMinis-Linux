@@ -2,65 +2,86 @@
 
 versionCode **210**，包名 `com.openminis.linux`。可覆盖升级已安装的 2.0.9（versionCode 209）。数据库仍是 19，不新增迁移，不改写 18 或 19。
 
-这一版是行为改动，不是拆分。核心是沙箱内核：guest 里跑的命令现在按一张预算表上膛，调用方传入的超时不再决定上限。计划讨论换成有界的角色图。
+这一版是行为改动。核心是沙箱内核：guest 里跑的命令按一张预算表上膛，调用方传入的超时不再决定上限。计划讨论换成有界的角色图。
 
-## 沙箱预算表
+**注意**：这个标签曾指向一版有严重缺陷的构建（会话记录在发送后被抹掉、宿主扣了地址空间帽子后 shell 直接 EPERM 死掉）。那一版的发行版已删除，本标签现在指向修好的提交。同一 versionCode 的两个不同构建，装过缺陷版的人需要覆盖安装本版才能拿到修复。
 
-一张表定死五档，`ShellTimeoutPolicy` 只从 `BudgetClassifier` 取数，调用方的 `resourceClass` 只能往上抬、不能往下压，传入的超时被忽略：
+## 地址空间上限交给宿主
 
-| 档 | 挂钟 | CPU | 地址空间 | 进程数 | 输出速率 |
+宿主（HyperOS 与内存压力策略）会在新进程上压低 hard `RLIMIT_AS`，而且这个帽子跨 App 重启存活。App 侧的 `ulimit -H -v` 因此只有两种结果：多余，或者要抬高一个自己无权抬高的 hard limit 而拿到 EPERM。
+
+2.0.10 第一版在 `GuardianScript` 里无条件下发 `ulimit -H -v ${budget} || exit 1`。宿主把 hard 压到 2 GiB 以下后，SETUP/BATCH 档的 2 GiB 抬高需要特权，EPERM 加上 `|| exit 1` 就是一条死掉的 shell。assets 里两处 `ulimit -v 262144 || exit 1`（`profile.d/minis-limits.sh`、`profile.d/minis.sh`）是同样的形态。
+
+现在：
+
+- shell 前缀不再下发任何 `ulimit -v`。地址空间完全由宿主决定。
+- CPU、进程数、文件大小、core dump 一律 `|| true`。设限失败只记录，不再杀 shell。
+- assets 两处硬编码的地址上限删除。
+- `ProcessBudget` 删掉 `addressBytes` 字段，`ResourceLimits.GUEST_ADDRESS_BYTES` 与 `GuestLimits.addressLimitKiB` 一并删除。留下这个字段会让人以为 App 还在管地址空间。
+
+## 聊天界面不再被改写
+
+会话记录消失的原因是 `spillResident` 挂错了地方。它被 `trimLoadedWindow` 调用，而 `trimLoadedWindow` 在**每一次发送**时都跑（`ChatViewModelSendExt.kt:205`）。凡是工具输出超过 64 KiB 的块，内容被永久替换成 `[CONTEXT OFFLOADED] N chars at ...`，而渲染层没有任何地方还原这个前缀——只有 agent 循环认它。
+
+同时 `trimLoadedWindow` 里新加的字节级丢弃循环会在普通发送路径上 `drop(1)` 丢整条消息，并递减 `loadedMessageOffset`，导致「加载更早」翻不回去。
+
+现在：
+
+- 界面永不重写。工具输出的冷存只作用在 `agentHistory`，那才是送进模型上下文的部分，也是 OOM 报告里 4562 条会话的实际持有者。
+- `trimLoadedWindow` 恢复成只有 400 条上限的语义。
+- 裁剪规则抽到 `ResidentWindow`，行为不变但可测。
+
+## 字节上限之前是空转的
+
+这一条是测试发现的，不是复盘发现的。
+
+边界规则原本要求「保留的第一条完全不含 ToolResult」，理由是供应商会拒绝 `tool_use` 已被裁掉的 `tool_result`。但工具密集的会话里**每一条都含 ToolResult**，于是没有任何索引能当切点，`byteCut` 恒返回 0，字节上限从未生效。400 条上限同样受影响。
+
+正确规则是：保留的第一条只要**自带对应的 tool_use** 就不算孤儿——agent loop 把一次调用的 use 和 result 放在同一条消息里，这是正常形状。改成 `hasResult && !hasUse` 才算非法切点。
+
+同时修了 `byteCut` 的第二个缺陷：循环只从 `cut + 1` 找切点，跳过了 `cut` 本身。`[纯文本头, 裸结果, 裸结果]` 这种形状在 `cut = 0` 就合法，却被直接走过。
+
+## 预算表
+
+一张表定死五档，`ShellTimeoutPolicy` 只从 `BudgetClassifier` 取数，调用方的 `resourceClass` 只能往上抬，传入的超时被忽略。地址空间一列已移除。
+
+| 档 | 挂钟 | CPU | 进程数 | 文件大小 | 输出速率 |
 | --- | --- | --- | --- | --- | --- |
-| INTERACTIVE | 60s | 30s | 512MiB | 64 | 256KiB/s |
-| NORMAL | 10min | 300s | 1GiB | 128 | 2MiB/s |
-| BATCH | 20min | 600s | 2GiB | 256 | 8MiB/s |
-| SERVICE | 30min | 不限 | 2GiB | 256 | 64KiB/s |
-| SETUP | 30min | 不限 | 不限 | 256 | 64KiB/s |
+| INTERACTIVE | 60s | 30s | 64 | 256MiB | 256KiB/s |
+| NORMAL | 10min | 300s | 128 | 1GiB | 2MiB/s |
+| BATCH | 20min | 600s | 256 | 4GiB | 8MiB/s |
+| SERVICE | 30min | 不限 | 256 | 4GiB | 64KiB/s |
+| SETUP | 30min | 不限 | 256 | 8GiB | 64KiB/s |
 
-SETUP 只认三个名字：`minis-dev-setup-full`、`minis-android-sdk-setup`、`minis-self-build`。命令里的单个 `&`、`nohup`、`setsid` 归 SERVICE，不是 SETUP。`2>&1` 是重定向，不会被误判成后台任务——这是这一版修掉的一个分类错误，它让普通的 `python3 x.py 2>&1 | tee log | head` 被抬到了 30 分钟。
+SETUP 只认三个名字：`minis-dev-setup-full`、`minis-android-sdk-setup`、`minis-self-build`。命令里的单个 `&`、`nohup`、`setsid` 归 SERVICE，不是 SETUP。`2>&1` 是重定向，不会被误判成后台任务。
 
 ## 一次性命令与持久 shell
 
-一次性命令用 `GuardianScript.oneshot`：硬 `ulimit`，一个看门狗子 shell 在到期后 `kill -TERM -$$` 再 `kill -KILL -$$`，`trap EXIT` 只杀看门狗自己。全程不出现 `kill -0` 和 `kill -TERM 0`。`su -c` 走同一条路径，宿主侧墙钟取 min(档位, HOST_SU_MAX_TIMEOUT_MS)。
+一次性命令用 `GuardianScript.oneshot`：进程组看门狗，到期 `kill -TERM -$$` 再 `kill -KILL -$$`，`trap EXIT` 只杀看门狗自己。全程不出现 `kill -0` 和 `kill -TERM 0`。`su -c` 走同一条路径，宿主侧墙钟取 min(档位, HOST_SU_MAX_TIMEOUT_MS)。
 
-持久 shell 启动时设一次 `ulimit`、起一次监督进程，然后 `exec /bin/bash --noprofile --norc`。之后的每条命令只重装看门狗：不再套子 shell，不再设第二次 `ulimit`，不再挂 `EXIT` trap。调用 `wrapChild` 已经是编译错误。这一条直接修掉了「每条命令的执行结果只能从子 shell 的管道里读到」这个结构问题。
+持久 shell 启动时设一次 rlimit、起一次监督进程，然后 `exec /bin/bash --noprofile --norc`。之后每条命令只重装看门狗：不再套子 shell，不再设第二次 rlimit，不再挂 `EXIT` trap。调用 `wrapChild` 已经是编译错误。
 
-## 输出与界面
+## 输出、排队与卡顿
 
-一次性命令的输出经 `StreamSink` 限流；持久 shell 的行回调走 20/s、突发 40 的令牌桶；`StreamSessionController` 的发布也走 `UIBus`，同一个桶。工具行更新不能没有令牌就发出去——2000 行 shell 输出曾经变成 45000 个主线程任务。流结束直接摘掉流式 id，不排队。流式结束不依赖行回调把消息喂完。
+输出经 `StreamSink`、持久 shell 行回调令牌桶、`StreamSessionController` 的 `UIBus` 三处限流，工具行更新不能没有令牌就发出去。流结束直接摘掉流式 id。
 
-## 会话排队
+`queueWaitMs(0)` 是 120 秒，配置范围 1–1800 秒。排队超时抛 `SlotQueueTimeout` 而不是 `CancellationException`，取消和正常释放走同一个 `releaseSlot`。
 
-`queueWaitMs(0)` 是 120 秒，配置范围 1–1800 秒。排队超时抛 `SlotQueueTimeout`，不是 `CancellationException`，所以它不会被当成用户取消吞掉。取消和正常释放走同一个 `releaseSlot`，超时的等待者会让位给下一个。
+`HangDetector` 始终计数卡顿，长间隔只影响日志采样。补救循环只杀非 `terminal:` 根的 guest，用户的终端不在这条路径上。
 
-## 卡顿与补救
+## 权限
 
-`HangDetector` 始终计数卡顿。原先的 FREEZE_GAP_CEILING 只影响 `writeStallSample` 的采样率，不再让长间隔漏计。`StallSignal` 每个 tick 都观察，低于 3 秒清零。补救循环只杀非 `terminal:` 根的 guest；用户的终端不在这条路径上。卡顿补救和内存回收都不再调用 `SandboxWorkload.stopAll`。
+YOYO 现在放行宿主 `su`。2.0.10 第一版对 `su` 无条件确认，出现在模式判定之前，和用户选的模式矛盾。
 
-## 磁盘与驻留
-
-驻留窗口按字节算，`HotWindow.RESIDENT_BYTES` 是 8MiB。溢出的仍是终端工具块（SUCCESS / FAILED / CANCELLED / TIMEOUT），落库走现有的 `ContextOffload`，不改写 `partsJson`。压力下先冻结再驱逐被 pin 的内容，但除最新一条外；`IdleSessionBudget.victims()` 仍然永不返回被 pin 的项。
-
-## 宿主提权与 SecurityGate
-
-`SecurityGateImpl` 对 shell 工具先过 `GuestWorkloadPolicy.hostRefusal`，宽范围的查找直接拒绝；宿主 `su` 和无作用域的 walk 不再沿用本会话的 YOLO 或同类工具放行，`su` 每次都问。
+无界 `find` 不再无条件拒绝。它慢，但不可逆的破坏是另一回事：挂钟、输出速率、驻留窗口是慢的刹车。拒绝它等于把一个只读命令变成不可用。块设备写入和 `rm -rf /` 仍是硬拒绝——不可逆，用户没有界面能恢复。
 
 ## 计划讨论角色图
 
-`DiscussionGraph` 把共享白板换成有界的角色图：简报 → 方案 → 工程师与测试并行审查 → 最多修订一次 → 只由提出异议的角色复议 → 秘书写执行契约。缺裁决就算异议，含糊的回答不能一路通过。讨论阶段的工具保持只读，主会话按契约执行。秘书留在主模型上，因为执行契约的就是主模型。
-
-## Rootfs SDK 工具安装
-
-`RootfsManager` 抽成 `extractSdkZip` 加标记文件，版本相同就直接跳过。写 `source.properties` 时统一 `Pkg.UserSrc=false`（不再用 `Pkg.Desc`），`aapt2` 覆盖改由 `writeAaptOverride` 单独负责。失败重试两次，每次都清掉半成品目录和标记。
-
-## 这一版没有做的事
-
-- 不升数据库，迁移 19 不变。
-- 不动 cgroup v2、PSI。
-- 不引入第二种消息格式。
-- 不从卡顿补救或内存回收里杀用户终端。
+`DiscussionGraph` 把共享白板换成有界的角色图：简报 → 方案 → 工程师与测试并行审查 → 最多修订一次 → 只由提出异议的角色复议 → 秘书写执行契约。缺裁决就算异议，含糊的回答不能一路通过。讨论阶段的工具保持只读，主会话按契约执行。
 
 ## 验证
 
-- `:app:testDebugUnitTest` 38 项全过，含 `GuestWorkloadPolicyTest`、`KernelContractTest`、`ResourceBoundaryTest`、`SuCommandTest`、`ShellTimeoutPolicyTest`、`IdleSessionBudgetTest`。
-- 发行包由 GitHub Actions 构建，产物挂在 `android-latest` 滚动预发布与本版本标签下。
-- 尚未在真机重跑当初把主线程打满的那条命令。
+- `:app:testDebugUnitTest` 1788 项全过。
+- 新增 `ResidentWindowTest`，锁住字节裁剪在工具密集会话上真正生效、以及界面块永不被改写。
+- 新增两条 `ResourceBoundaryTest`，锁住不下发地址空间上限、rlimit 失败不 fatal、assets 脚本不再有 `|| exit 1`。
+- 尚未在真机重跑当初压垮设备的命令。上面三个缺陷都是真机先撞出来的，单测只证明代码符合当时的理解。

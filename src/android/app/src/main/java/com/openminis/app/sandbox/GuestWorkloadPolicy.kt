@@ -66,6 +66,15 @@ internal object GuestWorkloadPolicy {
             c.contains("pip install") || c.contains("pip3 install")
     }
 
+    /**
+     * True for a `find` rooted at /, /data, /home, /root, /var, /sys or /proc.
+     *
+     * Not a refusal any more. 2.0.10 refused these outright in every mode,
+     * which made a read-only command unavailable; slowness is handled by the
+     * wall clock, the output rate and the resident window. Kept because it is
+     * the honest description of the walk, and a caller that wants to warn
+     * about it should ask here rather than re-parsing argv.
+     */
     fun isBroadFind(command: String): Boolean =
         findPathArgs(command).any(::isBroadRoot)
 
@@ -123,15 +132,27 @@ internal object GuestWorkloadPolicy {
     fun shouldSampleHang(gapMs: Long, ceilingMs: Long, workloadLive: Boolean): Boolean =
         workloadLive || gapMs <= ceilingMs
 
-    /** Host `su` and unscoped walks must not inherit "allow this tool". */
+    /**
+     * Host `su` and unscoped walks must not inherit "allow this tool".
+     *
+     * Only `su` belongs here. A broad `find` is slow, not irreversible, so
+     * it is not a permission question — it is handed to the resource brakes
+     * (wall clock, output rate, the 8 MiB resident window) and refused only
+     * when the disk is already stressed, via [diskRefusal].
+     */
     fun requiresFreshConfirm(command: String): Boolean {
-        if (isBroadFind(command)) return true
         val c = command.lowercase()
         return c.contains("android-su") || c.contains("su -c") ||
             Regex("""(?:^|[;&|`(\n])\s*(?:\S*/)?su(?:\s|$)""").containsMatchIn(c)
     }
 
-    /** Hard refuse. Confirmation cannot make these safe on a handheld. */
+    /**
+     * Irreversible host damage that no confirmation makes acceptable, because
+     * the user has no surface to undo it.
+     *
+     * An unscoped walk is deliberately NOT here: slowness has its own brakes,
+     * and refusing it outright made a read-only command unavailable.
+     */
     fun hostRefusal(command: String): String? {
         val c = command.lowercase().replace(Regex("\\s+"), " ")
         if (c.contains("mkfs") || c.contains("of=/dev/") || c.contains(">/dev/block") ||
@@ -143,10 +164,6 @@ internal object GuestWorkloadPolicy {
             c.contains("rm -rf /") || c.contains("rm -fr /")
         ) {
             return "命令未启动（exit 126）：禁止删除根目录。"
-        }
-        if (isBroadFind(command)) {
-            return "命令未启动（exit 126）：禁止对 /、/data、/root、/home、/var 做无界 find。" +
-                "改为限定目录，例如 find /var/minis/workspace -maxdepth 4。"
         }
         return null
     }

@@ -11,16 +11,41 @@ import java.io.File
 class ResourceBoundaryTest {
     @Test
     fun guest_limits_are_absolute_not_a_device_fraction() {
-        assertEquals(256L * 1024L, GuestLimits.addressLimitKiB())
         assertEquals("--max-old-space-size=192", GuestLimits.nodeOptions(null))
         assertEquals(
             "--max-old-space-size=192",
             GuestLimits.nodeOptions("--max-old-space-size=4096"),
         )
-        assertTrue(GuestLimits.wrap("true").startsWith("ulimit -H -v "))
-        assertFalse(GuestLimits.wrap("true").contains("kill -0"))
         assertFalse(GuestLimits.nodeOptions().contains("%"))
         assertEquals(192, ResourceLimits.NODE_OLD_SPACE_MB)
+    }
+
+    /**
+     * The brick. HyperOS and the memory-pressure policies clamp the hard
+     * RLIMIT_AS on a new process and that clamp survives an app restart, so
+     * an app-side `ulimit -H -v` could only raise a limit it is not allowed
+     * to raise: EPERM, and with `exit 1` a dead shell. The app must not set
+     * the address space at all, and no rlimit may be fatal.
+     */
+    @Test
+    fun the_app_never_sets_the_address_space_and_never_exits_on_a_failed_rlimit() {
+        for (command in listOf("true", "ls -la", "apt install -y curl", "sleep 100 &")) {
+            val wrapped = GuestLimits.wrap(command)
+            assertFalse("address space set for: $command", wrapped.contains("ulimit -H -v"))
+            assertFalse("address space set for: $command", wrapped.contains("ulimit -S -v"))
+            assertFalse("fatal rlimit for: $command", wrapped.contains("|| exit 1"))
+        }
+    }
+
+    /** The two assets bootstrap scripts had the same fatal ulimit. */
+    @Test
+    fun the_bootstrap_scripts_do_not_set_a_fatal_address_space() {
+        val profile = File("src/main/assets/default_mount/etc/profile.d")
+        for (name in listOf("minis.sh", "minis-limits.sh")) {
+            val text = File(profile, name).readText()
+            assertFalse("$name sets an address-space cap", Regex("""ulimit\s+(-[A-Za-z]+\s+)*-v""").containsMatchIn(text))
+            assertFalse("$name can kill the shell", text.contains("|| exit 1"))
+        }
     }
 
     @Test

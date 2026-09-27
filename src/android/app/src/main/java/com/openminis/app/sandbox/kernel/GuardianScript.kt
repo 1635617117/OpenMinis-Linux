@@ -82,18 +82,25 @@ object GuardianScript {
         return "( sleep $wall; kill -TERM -\$\$ 2>/dev/null; sleep 3; kill -KILL -\$\$ 2>/dev/null ) & "
     }
 
+    /**
+     * CPU, process count, file size, core dump. NOT the address space.
+     *
+     * RLIMIT_AS is the host's decision. HyperOS and the memory-pressure
+     * policies clamp the hard limit on the new process, and that clamp
+     * survives an app restart, so an app-side `ulimit -H -v` is either
+     * redundant or a brick: raising a hard limit needs privilege, the shell
+     * gets EPERM, and the previous `|| exit 1` turned that into a dead
+     * shell. Nothing here may kill the shell.
+     */
     private fun hardLimits(budget: ProcessBudget): String = buildString {
-        val mem = budget.addressKiB()
-        append("ulimit -H -v ").append(mem).append(" || exit 1; ")
-        append("ulimit -S -v ").append(mem).append(" || exit 1; ")
         if (budget.cpuSeconds > 0) {
-            append("ulimit -H -t ").append(budget.cpuSeconds).append(" || exit 1; ")
-            append("ulimit -S -t ").append(budget.cpuSeconds).append(" || exit 1; ")
+            append("ulimit -H -t ").append(budget.cpuSeconds).append(" 2>/dev/null || true; ")
+            append("ulimit -S -t ").append(budget.cpuSeconds).append(" 2>/dev/null || true; ")
         }
-        append("ulimit -H -u ").append(budget.nproc).append(" >/dev/null 2>&1 || true; ")
-        append("ulimit -S -u ").append(budget.nproc).append(" >/dev/null 2>&1 || true; ")
-        append("ulimit -H -f ").append(budget.fileBlocks()).append(" >/dev/null 2>&1 || true; ")
-        append("ulimit -S -f ").append(budget.fileBlocks()).append(" >/dev/null 2>&1 || true; ")
-        append("ulimit -H -c 0 >/dev/null 2>&1 || true; ")
+        append("ulimit -H -u ").append(budget.nproc).append(" 2>/dev/null || true; ")
+        append("ulimit -S -u ").append(budget.nproc).append(" 2>/dev/null || true; ")
+        append("ulimit -H -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
+        append("ulimit -S -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
+        append("ulimit -H -c 0 2>/dev/null || true; ")
     }
 }

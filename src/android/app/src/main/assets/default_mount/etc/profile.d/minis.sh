@@ -50,7 +50,8 @@ export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE}"
 export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-$SSL_CERT_FILE}"
 export PIP_CERT="${PIP_CERT:-$SSL_CERT_FILE}"
 export NODE_EXTRA_CA_CERTS="${NODE_EXTRA_CA_CERTS:-$SSL_CERT_FILE}"
-ulimit -v 262144 || exit 1
+# No address-space limit here: RLIMIT_AS belongs to the host and this is not
+# fatal if it is already clamped. See profile.d/minis-limits.sh.
 export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=192"
 
 # Toolchain paths (populated by minis-dev-setup / minis-android-sdk-setup).

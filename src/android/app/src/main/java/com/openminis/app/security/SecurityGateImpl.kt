@@ -266,13 +266,26 @@ class SecurityGateImpl : SecurityGate {
             )
         }
 
-        // Host su and unscoped walks must not inherit YOLO or same-tool allow.
-        // Broad finds are refused outright; su still asks, every time.
+        // Irreversible host damage is refused outright — no mode makes a
+        // block-device write or `rm -rf /` acceptable, and the user has no
+        // surface to undo it.
+        //
+        // Host `su` is a permission question, so it follows the mode. YOYO
+        // means "run it": 2.0.10 asked on every `su` even under YOYO, which
+        // contradicted the mode the user picked. A bare `su` still needs a
+        // confirm in ASK, because "su with no command" is an interactive
+        // root shell.
+        //
+        // An unscoped `find` is neither: it is slow, not irreversible, and
+        // the wall clock, output rate and resident window are the brakes for
+        // that. Refusing it made a read-only command unavailable.
         if (cmd.toolName in SHELL_TOOLS) {
             GuestWorkloadPolicy.hostRefusal(command)?.let {
                 return Decision.Denied(it, hard = true)
             }
-            if (GuestWorkloadPolicy.requiresFreshConfirm(command)) {
+            if (GuestWorkloadPolicy.requiresFreshConfirm(command) &&
+                mode != PermissionMode.ALLOW_ALL
+            ) {
                 return Decision.NeedConfirm(
                     "宿主提权不能沿用本会话的工具放行",
                     preview(cmd),

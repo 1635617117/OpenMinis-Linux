@@ -19,7 +19,10 @@ object ResourceLimits {
     const val ADMIT_BUDGET_BYTES = 8L * 1024L * 1024L
     const val SUBSTR_CHUNK_CHARS = 65536
     const val HEALTHY_TICK_MS = 60_000L
-    /** Guest address-space cap. Absolute, never a percent of device RAM. */
-    const val GUEST_ADDRESS_BYTES = 256L * 1024L * 1024L
+    /**
+     * No guest address-space cap. RLIMIT_AS is the host's decision: the
+     * memory-pressure policies clamp the hard limit and it survives an app
+     * restart, so setting it here was either redundant or a brick.
+     */
     const val NODE_OLD_SPACE_MB = 192
 }

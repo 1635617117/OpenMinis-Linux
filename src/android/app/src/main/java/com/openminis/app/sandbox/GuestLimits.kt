@@ -5,17 +5,16 @@ import com.openminis.app.sandbox.kernel.BudgetClassifier
 import com.openminis.app.sandbox.kernel.GuardianScript
 
 /**
- * Absolute guest ceilings. Not a fraction of device RAM.
+ * Guest-side ceilings handed to the shell.
  *
- * The prefix runs in the same shell as the command. It must not re-exec
- * the command on fallback: `nice cmd || nice cmd` runs a pipeline twice
- * and treats `head`'s exit as success. Missing `ionice`/`renice` is
- * ignored; the host cgroup in [SandboxWorkload] is the brake that still
- * holds when those tools are absent.
+ * No address-space limit: RLIMIT_AS is the host's decision. The prefix runs
+ * in the same shell as the command, so it must not re-exec the command on
+ * fallback: `nice cmd || nice cmd` runs a pipeline twice and treats `head`'s
+ * exit as success. Nothing in the prefix may kill the shell — a failed
+ * rlimit is logged and ignored, because the host's clamp is authoritative
+ * and an `exit 1` here is a brick.
  */
 object GuestLimits {
-    fun addressLimitKiB(): Long = ResourceLimits.GUEST_ADDRESS_BYTES / 1024L
-
     fun nodeOptions(existing: String? = null): String {
         val flag = "--max-old-space-size=${ResourceLimits.NODE_OLD_SPACE_MB}"
         val stripped = existing.orEmpty()

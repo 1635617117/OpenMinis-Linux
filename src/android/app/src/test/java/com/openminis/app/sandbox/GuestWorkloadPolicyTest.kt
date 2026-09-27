@@ -5,6 +5,7 @@ import com.openminis.app.sandbox.kernel.GuardianScript
 import com.openminis.app.sandbox.kernel.WorkClass
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,7 +20,6 @@ class GuestWorkloadPolicyTest {
         val budget = BudgetClassifier.classify(incident)
         val wrapped = GuestLimits.wrap(incident)
         val groupKill = "kill -TERM -" + "$" + "$"
-        assertTrue(wrapped.startsWith("ulimit -H -v ${budget.addressKiB()}"))
         assertTrue(wrapped.contains("ulimit -H -t ${budget.cpuSeconds}"))
         assertTrue(wrapped.contains("ulimit -S -t ${budget.cpuSeconds}"))
         assertTrue(wrapped.contains("ulimit -H -u ${budget.nproc}"))
@@ -65,7 +65,11 @@ class GuestWorkloadPolicyTest {
     fun findIsNormalAndACallerTimeoutDoesNotChangeIt() {
         assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /var/minis/workspace -name '*.kt'", 60_000L))
         assertEquals(600_000L, ShellTimeoutPolicy.effectiveMs("find /data -name '*.db'", 30_000L))
-        assertTrue(GuestWorkloadPolicy.hostRefusal("find /data -name '*.db'")!!.contains("/data"))
+        // A broad walk is slow, not irreversible. It is no longer refused
+        // outright — refusing a read-only command in every mode made it
+        // unavailable. The wall clock, output rate and resident window brake
+        // it instead, and the disk gate still refuses it under pressure.
+        assertNull(GuestWorkloadPolicy.hostRefusal("find /data -name '*.db'"))
     }
 
     @Test
@@ -131,12 +135,26 @@ class GuestWorkloadPolicyTest {
     }
 
     @Test
-    fun hostSuTimeoutIsCappedAndBroadFindIsRefused() {
+    fun hostSuTimeoutIsCappedAndBroadFindIsNotRefused() {
         assertEquals(120_000L, GuestWorkloadPolicy.clampHostTimeout(999_000L))
         assertEquals(15_000L, GuestWorkloadPolicy.clampHostTimeout(15_000L))
         assertTrue(GuestWorkloadPolicy.requiresFreshConfirm("su -c id"))
-        assertTrue(GuestWorkloadPolicy.hostRefusal("find /var/minis /tmp /root /home /data -maxdepth 3")!!.contains("/data"))
+        // Still described honestly, but not a refusal: the brakes are the
+        // clock, the output rate and the resident window.
+        assertTrue(GuestWorkloadPolicy.isBroadFind("find /var/minis /tmp /root /home /data -maxdepth 3"))
+        assertNull(GuestWorkloadPolicy.hostRefusal("find /var/minis /tmp /root /home /data -maxdepth 3"))
         assertNull(GuestWorkloadPolicy.hostRefusal("find /var/minis/workspace -maxdepth 4"))
+    }
+
+    @Test
+    fun irreversibleHostDamageIsStillRefused() {
+        for (command in listOf(
+            "mkfs.ext4 /dev/block/sda",
+            "dd if=/dev/zero of=/dev/block/sda",
+            "rm -rf /",
+        )) {
+            assertNotNull("$command must stay refused", GuestWorkloadPolicy.hostRefusal(command))
+        }
     }
 
     @Test

@@ -63,20 +63,75 @@ class SecurityGateImplTest {
         assertTrue(denied is Decision.Denied)
     }
 
+    /**
+     * YOYO means "run it". 2.0.10 asked on every host `su` even under
+     * ALLOW_ALL, which contradicted the mode the user picked.
+     */
     @Test
-    fun yoloDoesNotAutoRunHostSuOrBroadFind() {
+    fun yoyoLetsHostSuThrough() {
         val su = gate.decide(
             gate.classify("shell_execute", """{"command":"su -c id"}"""),
             PermissionMode.ALLOW_ALL,
         )
+        assertTrue("su must follow the mode under YOLO: $su", su is Decision.Allow)
+    }
+
+    @Test
+    fun askStillConfirmsHostSuEveryTime() {
+        val su = gate.decide(
+            gate.classify("shell_execute", """{"command":"su -c id"}"""),
+            PermissionMode.ASK,
+        )
         assertTrue(su is Decision.NeedConfirm)
         assertTrue((su as Decision.NeedConfirm).mustPrompt)
+    }
+
+    /**
+     * An unscoped walk is slow, not irreversible, so it is not refused
+     * outright any more — the wall clock, output rate and resident window
+     * are the brakes for it. 2.0.10 refused it in every mode, which made a
+     * read-only command unavailable.
+     *
+     * `/var`, not `/data`: a guest `/data` is the sandbox's own unmounted
+     * tree and is refused by SuPathPolicy for being unusable, which is a
+     * separate and correct rule.
+     */
+    @Test
+    fun yoyoLetsABroadFindThroughToTheResourceBrakes() {
         val find = gate.decide(
-            gate.classify("shell_execute", """{"command":"find /data -name '*.db'"}"""),
+            gate.classify("shell_execute", """{"command":"find /var -name '*.db'"}"""),
             PermissionMode.ALLOW_ALL,
         )
-        assertTrue(find is Decision.Denied)
-        assertTrue((find as Decision.Denied).hard)
+        assertTrue("a broad find must not be refused outright: $find", find is Decision.Allow)
+    }
+
+    /**
+     * A read-only command is auto-run in every mode by design, so a broad
+     * walk is available under ASK too. What changed in 2.0.10 was that the
+     * DESTRUCTIVE branch reached in front of this and refused it outright.
+     */
+    @Test
+    fun aBroadFindIsAvailableUnderAskBecauseItIsReadOnly() {
+        val find = gate.decide(
+            gate.classify("shell_execute", """{"command":"find /var -name '*.db'"}"""),
+            PermissionMode.ASK,
+        )
+        assertTrue("a read-only walk must stay available: $find", find is Decision.Allow)
+    }
+
+    @Test
+    fun yoyoStillConfirmsHostBlockDeviceWrites() {
+        // A block-device write is FATAL_BANNED, so it is a confirm-with-prompt
+        // even under YOLO — that branch runs before the mode check and YOLO's
+        // contract is "auto-run except fatal-confirm". It is never an Allow.
+        for (command in listOf("dd if=/dev/zero of=/dev/block/sda", "mkfs.ext4 /dev/block/sda")) {
+            val d = gate.decide(
+                gate.classify("shell_execute", """{"command":"$command"}"""),
+                PermissionMode.ALLOW_ALL,
+            )
+            assertTrue("$command must not auto-run: $d", d is Decision.NeedConfirm)
+            assertTrue((d as Decision.NeedConfirm).mustPrompt)
+        }
     }
 
     @Test

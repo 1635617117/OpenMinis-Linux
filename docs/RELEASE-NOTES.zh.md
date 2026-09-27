@@ -1,7 +1,7 @@
 # OpenMinis-Linux 2.0.10-linux
 
 - versionCode **210**
-- 沙箱内核：一张预算表（INTERACTIVE / NORMAL / BATCH / SERVICE / SETUP）决定挂钟、CPU、地址空间、进程数与输出速率，调用方超时被忽略。一次性命令用进程组看门狗；持久 shell 不再套子 shell、不再设第二次 `ulimit`、不再挂 EXIT trap。输出经 `StreamSink`、行回调令牌桶和 `UIBus` 三处限流。排队默认 120 秒，超时抛 `SlotQueueTimeout` 并让位。卡顿始终计数，补救只杀非 `terminal:` 根，不杀用户终端。驻留窗口 8MiB，溢出仍走 `ContextOffload`。计划讨论换成有界角色图，最多修订一次，讨论只读。数据库仍是 19。详见 `docs/github-release-2.0.10-linux.md`。
+- 沙箱内核：一张预算表（INTERACTIVE / NORMAL / BATCH / SERVICE / SETUP）决定挂钟、CPU、进程数与输出速率，调用方超时被忽略。地址空间上限交给宿主——宿主扣的 hard `RLIMIT_AS` 跨重启存活，App 下发 `ulimit -H -v` 只能拿到 EPERM，叠加 `|| exit 1` 就是死 shell；rlimit 失败一律不致命。聊天界面不再被改写，工具输出冷存只作用在 `agentHistory`；字节上限的边界规则修正后，工具密集会话上真正生效。一次性命令用进程组看门狗；持久 shell 不套子 shell、不重复设 rlimit、不挂 EXIT trap。输出经 `StreamSink`、行回调令牌桶和 `UIBus` 三处限流。排队默认 120 秒，超时抛 `SlotQueueTimeout` 并让位。卡顿始终计数，补救只杀非 `terminal:` 根。YOYO 放行宿主 `su`，无界 `find` 交给资源刹车，只有块设备与 `rm -rf /` 硬拒。计划讨论换成有界角色图。数据库仍是 19。详见 `docs/github-release-2.0.10-linux.md`。
 
 ---
 
