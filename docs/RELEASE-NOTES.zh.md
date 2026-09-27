@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.9-linux
+
+- versionCode **209**
+- 只做机械拆分：聊天、OpenAI、配置仓库和流式 Markdown 的可搬函数改为同包扩展。公开签名不变，数据库仍是 19。硬拆会改行为的函数留在原类。详见 `docs/github-release-2.0.9-linux.md`。
+
+---
+
 # OpenMinis-Linux 2.0.8-linux
 
 - versionCode **208**
