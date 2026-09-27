@@ -1629,7 +1629,7 @@ class ChatViewModel(
      * Read only through [browserTabPool]; the backing `by lazy` fills this in.
      */
     @Volatile
-    private var _browserTabPoolRef: BrowserTabPool? = null
+    internal var _browserTabPoolRef: BrowserTabPool? = null
 
     /** Browser tab pool for browser_use tool. Lazily created on first access. */
     val browserTabPool: BrowserTabPool by lazy {
@@ -3195,7 +3195,7 @@ class ChatViewModel(
      *  menu item, encoded in the draft id. Filed at draft promotion — the
      *  folder_id row can only exist once the session does (iOS defers the
      *  same way via pendingFolderDraft). */
-    private val initialFolderId: String? =
+    internal val initialFolderId: String? =
         sessionId.substringAfter("__fld__", "").substringBefore("__grp__")
             .takeIf { it.isNotEmpty() }
 
@@ -3433,69 +3433,6 @@ class ChatViewModel(
         }
     }
 
-    /** Ensure the session exists in the database. Called before first message. */
-    internal suspend fun ensureSession(): String {
-        if (realSessionId.isNotEmpty()) return realSessionId
-        val modelId = currentModel?.id ?: providerRepository.allVisibleEntries().firstOrNull()?.model?.id ?: "unknown"
-        // [T-memory-global-toggle-settings-ui-android] Snapshot the
-        // current in-memory `_memoryEnabled` into the new row. For a
-        // draft VM this matches the global default we seeded at
-        // construction; if the user flipped /memory on the draft
-        // before first send, that choice wins.
-        val session = chatRepository.createSession(
-            modelId = modelId,
-            memoryEnabled = _memoryEnabled.value,
-            permissionMode = _permissionMode.value.name,
-        )
-        realSessionId = session.id
-        // "New Chat in Group": file the just-promoted draft into its folder.
-        // Unconditional (vs iOS setFolderIfUnfiled) — the session is seconds
-        // old and nothing else can have filed it yet.
-        initialFolderId?.let { chatRepository.setFolderForSessions(it, listOf(session.id)) }
-        // Move our cached VM from the draft key ("__new__...") to the real
-        // sessionId so re-entering the session reuses the same instance.
-        if (isDraft) {
-            ChatViewModelStore.rename(sessionId, session.id)
-            // Bring every disk/shell resource that was opened with the draft
-            // id over to the real id *before* agent tools start running against
-            // the persisted session — otherwise the first tool call (e.g.
-            // yt-dlp writing into /var/minis/attachments) would land in
-            // minis-sessions/__new__*/… and be orphaned when the user
-            // re-enters the session and everything is resolved via the real
-            // id. See debug report 2026-04-21 (TikTok Chinese filename).
-            migrateDraftResources(fromDraft = sessionId, toReal = session.id)
-            // [T-android-session-skill-override-init-timing] Re-point any
-            // session_skill_overrides / mcp_session_overrides rows written
-            // pre-first-message (against `__new__<uuid>`) onto the real
-            // session id, mirroring the disk-resource hop above. Without
-            // this, a skill or MCP server the user toggled on the draft
-            // session sheet vanishes the next time the same chat is opened
-            // (the prop carries the real id by then, but the override row
-            // is still stranded under the draft key). Aligns with iOS
-            // ed861471 (T-ios-session-skill-override-init-timing). Cheap
-            // no-op when no rows match.
-            skillRepository?.renameSessionOverrides(fromDraft = sessionId, toReal = session.id)
-            mcpRepository?.renameSessionOverrides(fromDraft = sessionId, toReal = session.id)
-            // Re-point the lazily-created BrowserTabPool if it was already
-            // instantiated against the draft key (e.g. user opened the browser
-            // sheet before sending a message). Without this, cookies and
-            // downloads keep flowing into the draft directory.
-            _browserTabPoolRef?.setSession(session.id)
-        }
-        // Persist the current model binding so it survives re-entry
-        val groupId = _selectedGroupId.value
-        val entryId = _activeEntryId.value
-        val binding = when {
-            groupId != null && entryId != null -> """{"type":"group","groupId":"$groupId","lastEntryId":"$entryId"}"""
-            groupId != null -> """{"type":"group","groupId":"$groupId"}"""
-            entryId != null -> """{"type":"entry","entryId":"$entryId"}"""
-            else -> null
-        }
-        if (binding != null) {
-            chatRepository.updateSessionBinding(realSessionId, binding, modelId)
-        }
-        return realSessionId
-    }
 
     /**
      * Move every per-session disk resource from the draft directory to the
@@ -3510,7 +3447,7 @@ class ChatViewModel(
      * observed with the Chinese-named TikTok download that appeared to
      * "disappear" after `yt-dlp` reported success.
      */
-    private fun migrateDraftResources(fromDraft: String, toReal: String) {
+    internal fun migrateDraftResources(fromDraft: String, toReal: String) {
         // Stop any shell that was already spun up against the draft id; its
         // -b mount arguments were frozen to the draft directory at launch, so
         // we can't reuse it after the migration.
