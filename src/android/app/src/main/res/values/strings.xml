@@ -213,7 +213,7 @@
     <string name="settings_plan_discussion_off">Off</string>
     <string name="settings_plan_discussion_auto">Auto (skip chitchat)</string>
     <string name="settings_plan_discussion_always">Every message</string>
-    <string name="settings_plan_discussion_footer">Auto opens a shared board (main session and teammates) only for task-shaped messages. Every round is written into the chat. Off and Every message override that. Previously-on chats migrate to Every message.</string>
+    <string name="settings_plan_discussion_footer">Auto opens a role graph only for task-shaped messages: product brief, architecture, parallel engineer/tester critique, at most one revise, then a secretary contract. Discussion is read-only. The main session then executes the contract. Off and Every message override Auto.</string>
     <string name="settings_memory">Memory</string>
     <string name="settings_memory_subtitle">Persistent knowledge across sessions</string>
     <!-- [T-mcp-integration-android] MCP Integrations settings entry + management screen -->
@@ -1541,7 +1541,7 @@
     <string name="chat_menu_fast_mode">Enable Fast Mode</string>
     <string name="chat_menu_auto_compact">Auto Compact</string>
     <string name="chat_menu_plan_discussion">Plan discussion</string>
-    <string name="plan_discussion_banner">Plan discussion is on (Settings → Multi-agent). Task-shaped messages debate on a shared board first; every round is visible in chat.</string>
+    <string name="plan_discussion_banner">Plan discussion is on (Settings → Multi-agent). Task-shaped messages run a role graph first: brief, design, parallel critique, at most one revise, then the contract.</string>
     <string name="settings_task_notifications_permission">Notification permission is required on Android 13+. If the toggle is on but you see no alerts, grant notifications for Minis Ultra.</string>
     <string name="settings_task_notifications_granted">Notification permission granted.</string>
     <string name="settings_task_notifications_denied">Notification permission denied — task alerts will not appear until you grant it.</string>

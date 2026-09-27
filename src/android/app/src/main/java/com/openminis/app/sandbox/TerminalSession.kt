@@ -10,6 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -103,7 +104,7 @@ class TerminalSession(private val context: Context) {
     @Volatile
     private var lastTranscriptLength: Int = 0
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     @Volatile private var cols: Int = DEFAULT_COLS
     @Volatile private var rows: Int = DEFAULT_ROWS
@@ -123,6 +124,7 @@ class TerminalSession(private val context: Context) {
      * executable with the same args the legacy [buildInteractiveCommand] built.
      */
     fun start(sessionId: String? = null, initialCols: Int = DEFAULT_COLS, initialRows: Int = DEFAULT_ROWS) {
+        if (!scope.isActive) scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
         if (_state.value == State.RUNNING) return
         _state.value = State.BOOTING
         cols = initialCols
@@ -174,11 +176,12 @@ class TerminalSession(private val context: Context) {
 
                 // If a session is active, cd into its workspace so the user lands
                 // in a familiar directory (mirrors legacy behaviour).
-                if (sessionId != null) {
-                    kotlinx.coroutines.delay(300)
-                    val initCmd = "cd /var/minis && clear\r".toByteArray()
-                    session.write(initCmd, 0, initCmd.size) // (text, offset, length)
+                kotlinx.coroutines.delay(300)
+                termuxShellPid(session)?.let {
+                    SandboxWorkload.trackPid(it, "terminal:${sessionId ?: "anon"}")
                 }
+                val initCmd = (GuestLimits.interactivePrelude() + "cd /var/minis && clear\r").toByteArray()
+                session.write(initCmd, 0, initCmd.size)
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to start Termux PTY session", t)
                 _outputBytes.emit("Error: ${t.message}\r\n".toByteArray())
@@ -188,6 +191,7 @@ class TerminalSession(private val context: Context) {
     }
 
     fun stop() {
+        scope.cancel()
         val s = termuxSession
         termuxSession = null
         attachedView = null
@@ -255,6 +259,7 @@ class TerminalSession(private val context: Context) {
     private fun killTermuxProcessTree(s: com.termux.terminal.TerminalSession) {
         val pid = termuxShellPid(s)
         if (pid != null) {
+            SandboxWorkload.releasePid(pid, kill = true, reason = "terminal-stop")
             // (1) Descendant walk via /proc — best-effort.
             try {
                 val tree = listOf(pid) + collectDescendants(pid)

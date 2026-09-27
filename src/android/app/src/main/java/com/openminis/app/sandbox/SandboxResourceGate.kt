@@ -19,8 +19,9 @@ object SandboxResourceGate {
         val trimmed = command.trim()
         if (Regex("""^(?:kill|pkill|killall)(?:\s|$)""").containsMatchIn(trimmed) ||
             Regex("""^(?:\S*/)?gradle(?:w)?\s+--stop\s*$""").matches(trimmed)) return false
-        return isApkBuild(command) || isPackageManager(command) || Regex("""(^|[\s/;&|()])(?:jadx(?:-gui)?|apktool|java|javac|kotlinc|ninja|make|cmake|gcc|g\+\+|clang(?:\+\+)?|rustc|cargo|ffmpeg)(?=$|[\s;&|()])""")
-            .containsMatchIn(command.lowercase())
+        // Unknown binaries are heavy. A keyword denylist misses the next bomb.
+        if (GuestWorkloadPolicy.isObviouslyReadOnly(command)) return false
+        return true
     }
 
     /**

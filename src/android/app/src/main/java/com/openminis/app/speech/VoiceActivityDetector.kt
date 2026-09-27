@@ -10,6 +10,9 @@ import io.codeconcept.realtimecutvadlibrary.VADWrapper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
@@ -241,7 +244,8 @@ class VoiceActivityDetector(
     private var vad: VADWrapper? = null
     private var recorder: AudioRecord? = null
     private var captureJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var scopeJob = SupervisorJob()
+    private var scope = CoroutineScope(scopeJob + Dispatchers.IO)
 
     // AGC state, carried frame to frame.
     private var smoothedGain = 1.0f
@@ -283,6 +287,10 @@ class VoiceActivityDetector(
      */
     @Suppress("MissingPermission")
     fun start(): String? {
+        if (!scope.isActive) {
+            scopeJob = SupervisorJob()
+            scope = CoroutineScope(scopeJob + Dispatchers.IO)
+        }
         if (running.getAndSet(true)) return null
         cancelled.set(false)
         smoothedGain = 1.0f
@@ -575,6 +583,9 @@ class VoiceActivityDetector(
 
     private fun stopInternal() {
         running.set(false)
+        scopeJob.cancel()
+        scopeJob = SupervisorJob()
+        scope = CoroutineScope(scopeJob + Dispatchers.IO)
         isSpeaking = false
         backfill.clear()
         backfillSamples = 0

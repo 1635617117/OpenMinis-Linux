@@ -44,6 +44,13 @@ internal object SandboxMemoryPressure {
         return cachedLimits
     }
 
+    fun isCritical(context: Context): Boolean = runCatching {
+        val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val info = ActivityManager.MemoryInfo().also(am::getMemoryInfo)
+        val reserve = maxOf(info.threshold, (info.totalMem / 10).coerceIn(256L shl 20, 1024L shl 20))
+        info.lowMemory || info.availMem < reserve
+    }.getOrDefault(false)
+
     suspend fun reason(context: Context): String? = withContext(Dispatchers.IO) {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val info = ActivityManager.MemoryInfo().also(am::getMemoryInfo)

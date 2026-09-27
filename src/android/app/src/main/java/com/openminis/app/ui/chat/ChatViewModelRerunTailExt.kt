@@ -85,7 +85,7 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
                     systemPrompt +
                         "\n\n## Agreed plan from Plan Discussion\n" +
-                        "A plan discussion already ran on a shared board visible to the user (every round is in the previous assistant message). Follow the Synthesis. Do not start another discussion or spawn discussants.\n\n" +
+                        "A role graph already finished: brief, design, parallel critique, at most one revise, then a secretary contract. The full board is the previous assistant message. Follow the 执行契约 below. Do not start another discussion or spawn discussants. Unresolved objections are constraints.\n\n" +
                         planMarkdown
                 } else {
                     systemPrompt
@@ -122,6 +122,8 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 SessionConcurrencyManager.releaseSlot(activeSessionId)
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY exit")
             }
+        } catch (e: com.openminis.app.service.SlotQueueTimeout) {
+            setInlineError(e.message ?: "会话排队超时，名额已释放")
         } catch (e: CancellationException) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
             Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")

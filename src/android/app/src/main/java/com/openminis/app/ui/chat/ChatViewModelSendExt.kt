@@ -349,6 +349,8 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
                     SessionConcurrencyManager.releaseSlot(activeSessionId)
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob FINALLY exit")
                 }
+            } catch (e: com.openminis.app.service.SlotQueueTimeout) {
+                setInlineError(e.message ?: "会话排队超时，名额已释放")
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob CANCELLED waiting for slot")
                 Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")

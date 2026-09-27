@@ -15,9 +15,11 @@ package com.openminis.app.sandbox
  *   - long-running services (daemons, watch mode) are either cancelled by the
  *     user or preempted by the coordinator's wait-queue
  *
- * The shortening tiers in [forCommand] are not applied: a slow `find`
- * must not die at 60s. [minimumMs] only raises the budget for setup
- * scripts that the default 10-minute shell cap kills mid-apt.
+ * The numbers live here. [com.openminis.app.sandbox.kernel.BudgetClassifier]
+ * is the only reader the live path uses. [effectiveMs] ignores the requested
+ * timeout: `maxOf(requested, minimumMs)` is how a 10-minute default outlived
+ * the table. [minimumMs] remains the named-setup floor and is not a general
+ * class other tasks can enter.
  */
 object ShellTimeoutPolicy {
     /** Default (baseline) timeout matching the existing call-site default. */
@@ -38,46 +40,15 @@ object ShellTimeoutPolicy {
     /** Long-running services / daemons — always allowed the full budget. */
     const val LONG_RUNNING_TIMEOUT_MS = 1_800_000L // 30 min
 
-    private val quickPrefixes = setOf(
-        "ls", "cat", "head", "tail", "wc", "grep", "rg", "egrep", "fgrep",
-        "sed", "awk", "tr", "cut", "sort", "uniq", "find",
-        "echo", "printf", "pwd", "which", "whoami", "id", "env", "date",
-        "basename", "dirname", "file", "stat", "du", "df",
-        "mkdir", "rmdir", "touch", "chmod", "chown", "cp", "mv", "rm", "ln",
-    )
-
-    private val networkPrefixes = setOf(
-        "ping", "dig", "nslookup", "host", "traceroute",
-        "curl", "wget", "http",
-        "ssh", "scp", "rsync",
-    )
-
-    /** Install commands — any of these (possibly with subcommand) triggers. */
-    private val installTokens = setOf(
-        "apk", "apt", "apt-get", "yum", "dnf", "pacman", "brew",
-        "pip", "pip3", "pipx",
-        "npm", "pnpm", "yarn", "bun",
-        "gem", "bundle",
-        "go get", "go install",
-    )
-
-    /** Build / compile drivers. */
-    private val buildPrefixes = setOf(
-        "make", "gmake", "ninja", "cmake",
-        "cargo", "rustc",
-        "go build", "go test",
-        "gradle", "gradlew", "mvn",
-        "webpack", "vite", "rollup", "esbuild",
-        "tsc", "swc", "babel",
-    )
-
-    /** Long-running / daemon drivers. */
-    private val longRunningPrefixes = setOf(
-        "watch",
-        "node --watch", "npm run dev", "npm run start", "npm start",
-        "python -m http.server",
-        "serve", "http-server",
-    )
+    /** Table read by BudgetClassifier. Do not arm these from a caller timeout. */
+    const val INTERACTIVE_WALL_MS = 60_000L
+    const val NORMAL_WALL_MS = 600_000L
+    const val BATCH_WALL_MS = 1_200_000L
+    const val SERVICE_WALL_MS = LONG_RUNNING_TIMEOUT_MS
+    const val SETUP_WALL_MS = LONG_RUNNING_TIMEOUT_MS
+    const val SERVICE_RATE_BPS = 64L * 1024L
+    const val SETUP_RATE_BPS = 64L * 1024L
+    const val SETUP_FSIZE_BYTES = 8L * 1024L * 1024L * 1024L
 
     /**
      * Floor for commands that outlive the default shell cap. Zero means
@@ -94,37 +65,18 @@ object ShellTimeoutPolicy {
     }
 
     /**
-     * Return a recommended timeout (ms) for [command]. Takes the first
-     * non-whitespace token and consults the classifier tables above. Unknown
-     * commands fall through to [DEFAULT_TIMEOUT_MS] so behavior stays
-     * conservative for anything unrecognized.
+     * Class wall clock. [requestedMs] is ignored. The live callers are
+     * [com.openminis.app.sandbox.ExecutionCoordinator.execute] and
+     * [com.openminis.app.sandbox.ShellExecutor.execute], which call
+     * [com.openminis.app.sandbox.kernel.BudgetClassifier.classify] themselves.
      */
-    fun forCommand(command: String): Long {
+    fun effectiveMs(command: String, requestedMs: Long): Long =
+        com.openminis.app.sandbox.kernel.BudgetClassifier.armMs(command, requestedMs)
 
-        val trimmed = command.trim()
-        if (trimmed.isEmpty()) return DEFAULT_TIMEOUT_MS
-        val lower = trimmed.lowercase()
+    /** Same wall [effectiveMs] returns. Not a second table. */
+    fun ceilingMs(command: String): Long =
+        com.openminis.app.sandbox.kernel.BudgetClassifier.classify(command).wallMs
 
-        // Pipelines / shell-chains — take the first sub-command for classification.
-        val firstSegment = lower.substringBefore("&&").substringBefore("||").substringBefore(";").trim()
-        val firstToken = firstSegment.substringBefore(' ')
-
-        // Check longest-match phrases first (go build vs go).
-        if (longRunningPrefixes.any { firstSegment.startsWith(it) }) return LONG_RUNNING_TIMEOUT_MS
-        if (buildPrefixes.any { firstSegment.startsWith(it) }) return BUILD_TIMEOUT_MS
-        if (installTokens.any { firstSegment.startsWith(it) && firstSegment.containsInstallSubcommand() }) {
-            return INSTALL_TIMEOUT_MS
-        }
-
-        if (firstToken in networkPrefixes) return NETWORK_TIMEOUT_MS
-        if (firstToken in quickPrefixes) return QUICK_TIMEOUT_MS
-
-        return DEFAULT_TIMEOUT_MS
-    }
-
-    /** Heuristic: treat bare `apk`, `pip` etc. without an install subcommand as neutral. */
-    private fun String.containsInstallSubcommand(): Boolean {
-        val installVerbs = listOf("install", "add", "get", "update", "upgrade")
-        return installVerbs.any { " $it" in this } || this.startsWith("apk ") || this.startsWith("pip install")
-    }
+    /** Same value [ceilingMs] returns. Dead as a caller; do not revive it. */
+    fun forCommand(command: String): Long = ceilingMs(command)
 }

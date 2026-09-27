@@ -24,6 +24,7 @@ import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Extension
 import com.openminis.app.data.BPETokenizer
 import com.openminis.app.data.ContextOffload
+import com.openminis.app.ui.chat.retention.HotWindow
 import com.openminis.app.data.ContextPolicy
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.data.FileMentionIndex
@@ -4690,8 +4691,40 @@ class ChatViewModel(
 
     // A conservative text estimate, not a process PSS measurement. Account
     // for the separately retained LLM history as well as UI tool output.
-    internal fun retainedTextBytes(): Long = _messages.value.sumOf { message ->
-        message.content.length.toLong() * 4 + message.toolBlocks.sumOf { it.content.length.toLong() * 4 }
+    internal fun retainedTextBytes(): Long = messageTextBytes(_messages.value) + agentHistoryBytes()
+
+    internal fun agentHistoryBytes(): Long = agentHistory.sumOf { msg ->
+        msg.content.length.toLong() * 2 +
+            (msg.reasoningContent?.length?.toLong() ?: 0L) * 2 +
+            msg.contentParts.sumOf { part ->
+                when (part) {
+                    is AgentContentPart.Text -> part.text.length.toLong() * 2
+                    is AgentContentPart.ToolResult ->
+                        part.content.length.toLong() * 2 + (part.imageData?.size?.toLong() ?: 0L)
+                    is AgentContentPart.ToolUse -> part.input.toString().length.toLong() * 2
+                    is AgentContentPart.ImageData -> part.data.size.toLong()
+                }
+            }
+    }
+
+    /**
+     * Drop resident text. Tool results move through the existing offload
+     * store (a file_read path), not a second message format, and partsJson
+     * is not rewritten.
+     */
+    internal fun freezeResident() {
+        _messages.value = trimLoadedWindow(_messages.value)
+        if (agentHistoryBytes() <= HotWindow.RESIDENT_BYTES) return
+        offloadContextIfNeeded(
+            contextWindow = 200_000,
+            lastContextTokens = (agentHistoryBytes() / 4L).toInt().coerceAtLeast(1),
+            force = true,
+        )
+        trimAgentHistory()
+    }
+
+    private fun messageTextBytes(messages: List<ChatMessage>): Long = messages.sumOf { message ->
+        message.content.length.toLong() * 2 + message.toolBlocks.sumOf { it.content.length.toLong() * 2 }
     }
 
     internal fun trimIdleBrowser() { _browserTabPoolRef?.trimIdleTabs() }
@@ -5070,7 +5103,9 @@ class ChatViewModel(
                     merged.add(msg)
                 }
             }
-            merged
+            merged.mapIndexed { index, msg ->
+                if (index < merged.size - 4) spillResident(msg) else msg
+            }
         }
     }
 
@@ -5093,20 +5128,33 @@ class ChatViewModel(
 
     internal fun trimAgentHistory() {
         val overflow = agentHistory.size - MAX_AGENT_HISTORY_MESSAGES
-        if (overflow <= 0) return
-        // A cut boundary must never orphan a ToolResult: providers reject a
-        // tool_result whose tool_use was trimmed away. Walk the cut forward
-        // until the boundary message contains no ToolResult parts, then drop
-        // everything before it in one contiguous slice.
-        var keep = overflow
-        while (keep < agentHistory.size &&
-            agentHistory[keep].contentParts.any { it is AgentContentPart.ToolResult }
-        ) {
-            keep++
+        if (overflow > 0) {
+            // A cut boundary must never orphan a ToolResult: providers reject a
+            // tool_result whose tool_use was trimmed away. Walk the cut forward
+            // until the boundary message contains no ToolResult parts, then drop
+            // everything before it in one contiguous slice.
+            var keep = overflow
+            while (keep < agentHistory.size &&
+                agentHistory[keep].contentParts.any { it is AgentContentPart.ToolResult }
+            ) {
+                keep++
+            }
+            if (keep < agentHistory.size) {
+                agentHistory.subList(0, keep).clear()
+                llmHistoryStartOffset += keep
+            }
         }
-        if (keep >= agentHistory.size) return
-        agentHistory.subList(0, keep).clear()
-        llmHistoryStartOffset += keep
+        while (agentHistoryBytes() > HotWindow.RESIDENT_BYTES && agentHistory.size > 1) {
+            var cut = 1
+            while (cut < agentHistory.size &&
+                agentHistory[cut].contentParts.any { it is AgentContentPart.ToolResult }
+            ) {
+                cut++
+            }
+            if (cut >= agentHistory.size) return
+            agentHistory.subList(0, cut).clear()
+            llmHistoryStartOffset += cut
+        }
     }
 
     internal suspend fun awaitBoundedHistoryRebuild(
@@ -5160,14 +5208,44 @@ class ChatViewModel(
 
 
     internal fun trimLoadedWindow(messages: List<ChatMessage>): List<ChatMessage> {
-        if (messages.size <= MAX_LOADED_MESSAGE_WINDOW) return messages
-        val droppedCount = messages.size - MAX_LOADED_MESSAGE_WINDOW
-        // Only persisted rows advance the database offset. System info bubbles
-        // are UI-only, so counting them would skip real rows on the next page.
-        val droppedRows = messages.take(droppedCount)
-            .sumOf { msg -> msg.sourceDbIds?.size?.coerceAtLeast(1) ?: 1 }
-        loadedMessageOffset = (loadedMessageOffset - droppedRows).coerceAtLeast(0)
-        return messages.takeLast(MAX_LOADED_MESSAGE_WINDOW)
+        var window = messages
+        if (window.size > MAX_LOADED_MESSAGE_WINDOW) {
+            val droppedCount = window.size - MAX_LOADED_MESSAGE_WINDOW
+            // Only persisted rows advance the database offset. System info bubbles
+            // are UI-only, so counting them would skip real rows on the next page.
+            val droppedRows = window.take(droppedCount)
+                .sumOf { msg -> msg.sourceDbIds?.size?.coerceAtLeast(1) ?: 1 }
+            loadedMessageOffset = (loadedMessageOffset - droppedRows).coerceAtLeast(0)
+            window = window.takeLast(MAX_LOADED_MESSAGE_WINDOW)
+        }
+        while (messageTextBytes(window) > HotWindow.RESIDENT_BYTES && window.size > 1) {
+            val rows = window.first().sourceDbIds?.size?.coerceAtLeast(1) ?: 1
+            loadedMessageOffset = (loadedMessageOffset - rows).coerceAtLeast(0)
+            window = window.drop(1)
+        }
+        if (window.size <= 4) return window
+        return window.dropLast(4).map { spillResident(it) } + window.takeLast(4)
+    }
+
+    private fun spillResident(message: ChatMessage): ChatMessage {
+        val blocks = message.toolBlocks.map { block ->
+            val terminal = block.toolStatus == ToolBlockStatus.SUCCESS ||
+                block.toolStatus == ToolBlockStatus.FAILED ||
+                block.toolStatus == ToolBlockStatus.CANCELLED ||
+                block.toolStatus == ToolBlockStatus.TIMEOUT
+            if (!terminal || block.content.length < HotWindow.TOOL_SPILL_CHARS) return@map block
+            if (block.content.startsWith(ContextOffload.OFFLOADED_PREFIX)) return@map block
+            val path = ContextOffload.offloadContent(
+                context,
+                activeSessionId,
+                block.content,
+                block.id,
+                block.toolName.ifEmpty { "tool" },
+            )
+            if (path.isEmpty()) block
+            else block.copy(content = "${ContextOffload.OFFLOADED_PREFIX} ${block.content.length} chars at $path")
+        }
+        return if (blocks == message.toolBlocks) message else message.copy(toolBlocks = blocks)
     }
 
     private data class ToolResultData(val output: String, val success: Boolean)

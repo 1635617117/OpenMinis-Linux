@@ -17,7 +17,8 @@ class ResourceBoundaryTest {
             "--max-old-space-size=192",
             GuestLimits.nodeOptions("--max-old-space-size=4096"),
         )
-        assertTrue(GuestLimits.wrap("true").startsWith("ulimit -v ${GuestLimits.addressLimitKiB()}"))
+        assertTrue(GuestLimits.wrap("true").startsWith("ulimit -H -v "))
+        assertFalse(GuestLimits.wrap("true").contains("kill -0"))
         assertFalse(GuestLimits.nodeOptions().contains("%"))
         assertEquals(192, ResourceLimits.NODE_OLD_SPACE_MB)
     }

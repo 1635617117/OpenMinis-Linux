@@ -109,6 +109,14 @@ object HangDetector {
 
     private var appContext: Context? = null
 
+    /**
+     * Set by the application after start. Diagnostics must not import the
+     * sandbox package; the hook is how a counted hang kills a live guest
+     * instead of only degrading markdown.
+     */
+    @Volatile var hasLiveWorkload: () -> Boolean = { false }
+    @Volatile var onCountedHang: (count: Int, durationMs: Long) -> Unit = { _, _ -> }
+
     private val _renderBreakerActive = MutableStateFlow(false)
 
     /**
@@ -284,6 +292,7 @@ object HangDetector {
             ticks++
             val now = nowElapsed()
             val since = now - lastHeartbeatAt.get()
+            com.openminis.app.sandbox.kernel.remediation.StallSignal.observe(since)
             // [T-HANG-DIAG] every 30 ticks (~15s) emit a liveness ping so we
             // can confirm the watchdog is alive even when nothing hangs.
             // Volume is intentionally tiny (~4 lines / minute).
@@ -291,6 +300,7 @@ object HangDetector {
                 println("[T-HANG-DIAG] HangDetector tick=$ticks sinceHeartbeat=${since}ms")
             }
             if (since < HANG_THRESHOLD_MS) {
+                com.openminis.app.sandbox.kernel.remediation.StallSignal.clear()
                 if (hangActive) {
                     // Episode over — the heartbeat landed. One labeled
                     // post-recovery snapshot closes the record (its stack is
@@ -314,21 +324,43 @@ object HangDetector {
                 // produce elapsedRealtime gaps of minutes; a live main-thread ANR
                 // cannot survive that long. Log the episode, but only let it
                 // feed the breakers when the gap is plausibly a real hang.
-                val isFreezeArtifact = since > FREEZE_GAP_CEILING_MS
-                if (isFreezeArtifact) {
+                val workloadLive = hasLiveWorkload()
+                val sample = com.openminis.app.sandbox.GuestWorkloadPolicy.shouldSampleHang(
+                    since,
+                    FREEZE_GAP_CEILING_MS,
+                    workloadLive,
+                )
+                if (!sample) {
                     println(
                         "[T-HANG-DIAG] freeze artifact: gap=${since}ms > ${FREEZE_GAP_CEILING_MS}ms — " +
-                            "logged but NOT counted toward breakers",
+                            "log sampling reduced; counter still increments",
+                    )
+                } else if (since > FREEZE_GAP_CEILING_MS) {
+                    println(
+                        "[T-HANG-DIAG] long gap=${since}ms counted: sandbox work is live",
                     )
                 }
-                recordHang(durationMs = since, counts = !isFreezeArtifact)
+                recordHang(
+                    durationMs = since,
+                    counts = com.openminis.app.sandbox.GuestWorkloadPolicy.countsHang(
+                        since,
+                        FREEZE_GAP_CEILING_MS,
+                        workloadLive,
+                    ),
+                    sample = sample,
+                )
                 continue
             }
             episodePeakSinceMs = maxOf(episodePeakSinceMs, since)
             if (now - lastSampleAt >= MID_HANG_RESAMPLE_MS) {
                 lastSampleAt = now
                 escalation++
-                writeStallSample("mid-hang", since, escalation)
+                val sample = com.openminis.app.sandbox.GuestWorkloadPolicy.shouldSampleHang(
+                    since,
+                    FREEZE_GAP_CEILING_MS,
+                    hasLiveWorkload(),
+                )
+                if (sample) writeStallSample("mid-hang", since, escalation)
             }
         }
     }
@@ -380,14 +412,23 @@ object HangDetector {
         }
     }
 
-    private fun recordHang(durationMs: Long, counts: Boolean) {
+    fun tripRenderBreaker() {
+        if (!_renderBreakerActive.value) {
+            _renderBreakerActive.value = true
+            Log.w(TAG, "render breaker TRIPPED by remediation loop")
+        }
+    }
+
+    private fun recordHang(durationMs: Long, counts: Boolean, sample: Boolean = true) {
         val ctx = appContext ?: return
         // [T-android-hangdetector-midhang-sample] The trip-time stack IS a
         // mid-hang sample (the heartbeat is 3s stale and the main thread is
         // still stuck); the watchdog keeps re-sampling every
         // MID_HANG_RESAMPLE_MS via writeStallSample while the episode lasts.
-        writeStallSample("mid-hang", durationMs, escalation = 0)
-        if (!counts) return  // [T-android-hangdetector-freeze-gate]
+        // A freeze-sized gap still counts. Sampling is the only thing the
+        // ceiling is allowed to reduce.
+        if (sample) writeStallSample("mid-hang", durationMs, escalation = 0)
+        if (!counts) return
 
         val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val newCount = prefs.getInt(KEY_HANG_COUNT, 0) + 1
@@ -400,6 +441,11 @@ object HangDetector {
         if (newCount >= RENDER_DEGRADE_HANG_COUNT && !_renderBreakerActive.value) {
             _renderBreakerActive.value = true
             Log.w(TAG, "render breaker TRIPPED at hang count=$newCount — streaming markdown degrades to plain text")
+        }
+        val hook = onCountedHang
+        thread(name = "HangDetector-breaker", isDaemon = true) {
+            runCatching { hook(newCount, durationMs) }
+                .onFailure { Log.w(TAG, "hang breaker hook failed: ${it.message}") }
         }
         val tail = "hang detected duration=${durationMs}ms count=$newCount " +
             "breakerActive=${newCount >= HANG_LIMIT_FOR_BREAKER}"

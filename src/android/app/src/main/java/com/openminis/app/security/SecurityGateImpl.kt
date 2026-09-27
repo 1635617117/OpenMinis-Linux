@@ -1,5 +1,6 @@
 package com.openminis.app.security
 
+import com.openminis.app.sandbox.GuestWorkloadPolicy
 import org.json.JSONObject
 import java.security.MessageDigest
 import java.util.concurrent.CopyOnWriteArrayList
@@ -263,6 +264,21 @@ class SecurityGateImpl : SecurityGate {
                 "⚠️ 极端高危操作（格式化 / 清空 / 批量删除）\n\n${preview(cmd)}",
                 mustPrompt = true,
             )
+        }
+
+        // Host su and unscoped walks must not inherit YOLO or same-tool allow.
+        // Broad finds are refused outright; su still asks, every time.
+        if (cmd.toolName in SHELL_TOOLS) {
+            GuestWorkloadPolicy.hostRefusal(command)?.let {
+                return Decision.Denied(it, hard = true)
+            }
+            if (GuestWorkloadPolicy.requiresFreshConfirm(command)) {
+                return Decision.NeedConfirm(
+                    "宿主提权不能沿用本会话的工具放行",
+                    preview(cmd),
+                    mustPrompt = true,
+                )
+            }
         }
 
         // [6] YOYO: everything except fatal-confirm is auto-run.

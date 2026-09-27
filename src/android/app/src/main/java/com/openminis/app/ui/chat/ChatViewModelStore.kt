@@ -3,6 +3,8 @@ package com.openminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
+import com.openminis.app.ui.chat.retention.HotWindow
+import com.openminis.app.ui.chat.retention.RetentionLedger
 
 /**
  * Process-level cache of ChatViewModels keyed by sessionId. Mirrors iOS
@@ -27,6 +29,7 @@ object ChatViewModelStore {
     private val models = mutableMapOf<String, ChatViewModel>()
     private val lastAccess = mutableMapOf<String, Long>()
     private val mounted = mutableMapOf<String, Int>()
+    private val frozen = mutableSetOf<String>()
     private var generation = 0L
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
     private val trimRunnable = Runnable { trimIdle() }
@@ -69,13 +72,32 @@ object ChatViewModelStore {
             mainHandler.post { trimIdle(pressure) }
             return
         }
+        if (pressure) {
+            for ((id, vm) in models) {
+                if (vm.isStreaming.value) continue
+                if (vm.retainedTextBytes() > HotWindow.RESIDENT_BYTES) {
+                    frozen += id
+                    vm.freezeResident()
+                }
+            }
+        }
         val entries = models.map { (id, vm) ->
             val pinned = (mounted[id] ?: 0) > 0 || !vm.canEvictFromMemory()
             if (pressure && !pinned) vm.trimIdleBrowser()
             IdleSessionBudget.Entry(id, lastAccess[id] ?: 0, vm.retainedTextBytes(), pinned)
         }
         val budget = (Runtime.getRuntime().maxMemory() / 16).coerceIn(8L shl 20, 32L shl 20)
-        IdleSessionBudget.victims(entries, if (pressure) 0 else 3, budget).forEach { id ->
+        val resident = RetentionLedger.residentBytes(entries)
+        if (pressure && RetentionLedger.over(resident, budget)) {
+            Log.w(TAG, "pressure resident=$resident pinned=${RetentionLedger.pinnedCount(entries)} budget=$budget")
+        }
+        val victims = if (pressure) {
+            IdleSessionBudget.pressureVictims(entries, budget, frozen.toSet())
+        } else {
+            IdleSessionBudget.victims(entries, 3, budget)
+        }
+        victims.forEach { id ->
+            frozen.remove(id)
             models[id]?.preserveShellOnCacheEviction()
             // Preserve aliases for navigation entries still holding a draft ID.
             models.remove(id)

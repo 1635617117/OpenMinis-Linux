@@ -7,6 +7,7 @@ import android.util.Log
 import com.openminis.app.data.repository.EnvVarRepository
 import com.openminis.app.notification.SandboxNotifyActions
 import com.openminis.app.sandbox.SandboxResourceGate
+import com.openminis.app.sandbox.kernel.BudgetClassifier
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -118,6 +119,7 @@ object ExecutionCoordinator {
     suspend fun execute(
         sessionId: String,
         command: String,
+        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null,
         resourceClass: SandboxResourceGate.ResourceClass = SandboxResourceGate.ResourceClass.AUTO,
@@ -134,6 +136,12 @@ object ExecutionCoordinator {
         return mutex.withLock {
         lastIdle.remove(sessionId)
         try {
+        val refused = GuestWorkloadPolicy.hostRefusal(command) ?: DiskPressure.refusal(appContext, command)
+        if (refused != null) {
+            Log.w(TAG, "[$sessionId] refused before start: $refused")
+            lineCallback?.invoke(refused)
+            return@withLock CommandResult(output = refused, exitCode = 126, durationMs = 0)
+        }
         SandboxResourceGate.withCommandLock(
             command,
             resourceClass = resourceClass,
@@ -141,6 +149,14 @@ object ExecutionCoordinator {
             limits = { SandboxMemoryPressure.executionLimits(appContext) },
             onWaiting = { lineCallback?.invoke(it) },
         ) {
+            val budget = BudgetClassifier.classify(command, resourceClass)
+            val armed = budget.wallMs
+            if (timeout != armed) {
+                Log.w(
+                    TAG,
+                    "[$sessionId] caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}",
+                )
+            }
             val startTime = System.currentTimeMillis()
 
             // Auto-boot PRoot if not already booted
@@ -170,9 +186,7 @@ object ExecutionCoordinator {
 
             val (rawOutput, exitCode) = shell.executeCommand(
                 command = command,
-                // Setup scripts are documented at 10-20 minutes. The default
-                // 10-minute cap kills them mid-apt and leaves dpkg half-configured.
-                timeout = maxOf(timeout, ShellTimeoutPolicy.minimumMs(command)),
+                timeout = armed,
                 lineCallback = lineCallback,
             )
 

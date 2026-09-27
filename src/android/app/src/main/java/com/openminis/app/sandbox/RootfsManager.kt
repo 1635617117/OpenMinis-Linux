@@ -744,61 +744,53 @@ class RootfsManager private constructor(private val context: Context) {
      */
     private fun installBundledAndroidSdkTools() {
         val marker = File(rootfsDir, "opt/android-sdk/.minis-sdk-tools")
-        val input = try {
-            context.assets.open(SDK_TOOLS_ASSET)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Bundled aarch64 SDK tools asset missing: ${t.message}")
-            return
-        }
-        try {
-            input.use { raw ->
-                ZipInputStream(raw).use { zis ->
-                    while (true) {
-                        val entry = zis.nextEntry ?: break
-                        val name = entry.name.replace('\\', '/').trimStart('/')
-                        if (name.isEmpty() || name.contains("..")) continue
-                        val destRel = when {
-                            name.startsWith("build-tools/") ->
-                                "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/" +
-                                    name.removePrefix("build-tools/")
-                            name.startsWith("platform-tools/") ->
-                                "opt/android-sdk/$name"
-                            else -> continue
-                        }
-                        val out = File(rootfsDir, destRel)
-                        if (entry.isDirectory || name.endsWith("/")) {
-                            out.mkdirs()
-                            continue
-                        }
-                        out.parentFile?.mkdirs()
-                        out.outputStream().use { zis.copyTo(it) }
-                        out.setExecutable(true, false)
+        if (marker.exists() && marker.readText().trim() == SDK_BUILD_TOOLS_REV) return
+        var last: Throwable? = null
+        repeat(2) { attempt ->
+            try {
+                extractSdkZip(SDK_TOOLS_ASSET) { name ->
+                    when {
+                        name.startsWith("build-tools/") ->
+                            "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/" +
+                                name.removePrefix("build-tools/")
+                        name.startsWith("platform-tools/") -> "opt/android-sdk/$name"
+                        else -> null
                     }
                 }
+                File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/source.properties")
+                    .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
+                File(rootfsDir, "opt/android-sdk/platform-tools/source.properties")
+                    .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
+                writeAaptOverride()
+                marker.parentFile?.mkdirs()
+                marker.writeText("$SDK_BUILD_TOOLS_REV\n")
+                Log.i(TAG, "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV")
+                return
+            } catch (t: Throwable) {
+                last = t
+                marker.delete()
+                File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV").deleteRecursively()
+                File(rootfsDir, "opt/android-sdk/platform-tools").deleteRecursively()
+                Log.w(TAG, "SDK tools extract attempt ${attempt + 1} failed: ${t.message}")
             }
-            File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/source.properties")
-                .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
-            File(rootfsDir, "opt/android-sdk/platform-tools/source.properties")
-                .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
-            val gradleProps = File(rootfsDir, "root/.gradle/gradle.properties")
-            gradleProps.parentFile?.mkdirs()
-            val override =
-                "android.aapt2FromMavenOverride=/opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/aapt2"
-            val existing = if (gradleProps.exists()) gradleProps.readText() else ""
-            val next = if (existing.contains("android.aapt2FromMavenOverride")) {
-                existing.replace(Regex("""(?m)^android\.aapt2FromMavenOverride=.*$"""), override)
-            } else if (existing.isEmpty() || existing.endsWith("\n")) {
-                existing + "$override\n"
-            } else {
-                existing + "\n$override\n"
-            }
-            gradleProps.writeText(next)
-            marker.parentFile?.mkdirs()
-            marker.writeText("$SDK_BUILD_TOOLS_REV\n")
-            Log.i(TAG, "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV")
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to install bundled aarch64 SDK tools: ${t.message}", t)
         }
+        Log.e(TAG, "SDK tools extract failed after retry; not marking installed", last)
+    }
+
+    private fun writeAaptOverride() {
+        val gradleProps = File(rootfsDir, "root/.gradle/gradle.properties")
+        gradleProps.parentFile?.mkdirs()
+        val override =
+            "android.aapt2FromMavenOverride=/opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/aapt2"
+        val existing = if (gradleProps.exists()) gradleProps.readText() else ""
+        val next = if (existing.contains("android.aapt2FromMavenOverride")) {
+            existing.replace(Regex("""(?m)^android\.aapt2FromMavenOverride=.*$"""), override)
+        } else if (existing.isEmpty() || existing.endsWith("\n")) {
+            existing + "$override\n"
+        } else {
+            existing + "\n$override\n"
+        }
+        gradleProps.writeText(next)
     }
 
     /**
@@ -807,34 +799,51 @@ class RootfsManager private constructor(private val context: Context) {
      * omitted so the APK stays small; platforms still download at runtime.
      */
     private fun installBundledCmdlineTools() {
-        val input = try {
-            context.assets.open(CMD_TOOLS_ASSET)
-        } catch (t: Throwable) {
-            Log.w(TAG, "Bundled sdkmanager asset missing: ${t.message}")
-            return
+        val marker = File(rootfsDir, "opt/android-sdk/.minis-cmdline-tools")
+        if (marker.exists()) return
+        var last: Throwable? = null
+        repeat(2) { attempt ->
+            try {
+                extractSdkZip(CMD_TOOLS_ASSET) { name ->
+                    if (name.startsWith("cmdline-tools/")) "opt/android-sdk/$name" else null
+                }
+                marker.parentFile?.mkdirs()
+                marker.writeText("ok\n")
+                Log.i(TAG, "Installed bundled Java sdkmanager")
+                return
+            } catch (t: Throwable) {
+                last = t
+                marker.delete()
+                File(rootfsDir, "opt/android-sdk/cmdline-tools").deleteRecursively()
+                Log.w(TAG, "sdkmanager extract attempt ${attempt + 1} failed: ${t.message}")
+            }
         }
-        try {
-            input.use { raw ->
-                ZipInputStream(raw).use { zis ->
-                    while (true) {
-                        val entry = zis.nextEntry ?: break
-                        val name = entry.name.replace('\\', '/').trimStart('/')
-                        if (name.isEmpty() || name.contains("..")) continue
-                        if (!name.startsWith("cmdline-tools/")) continue
-                        val out = File(rootfsDir, "opt/android-sdk/$name")
-                        if (entry.isDirectory || name.endsWith("/")) {
-                            out.mkdirs()
-                            continue
-                        }
-                        out.parentFile?.mkdirs()
-                        out.outputStream().use { zis.copyTo(it) }
-                        if (name.contains("/bin/")) out.setExecutable(true, false)
+        Log.e(TAG, "sdkmanager extract failed after retry; not marking installed", last)
+    }
+
+    private fun extractSdkZip(asset: String, destRel: (String) -> String?) {
+        val input = try {
+            context.assets.open(asset)
+        } catch (t: Throwable) {
+            throw IllegalStateException("bundled asset missing: $asset (${t.message})", t)
+        }
+        input.use { raw ->
+            ZipInputStream(raw).use { zis ->
+                while (true) {
+                    val entry = zis.nextEntry ?: break
+                    val name = entry.name.replace('\\', '/').trimStart('/')
+                    if (name.isEmpty() || name.contains("..")) continue
+                    val rel = destRel(name) ?: continue
+                    val out = File(rootfsDir, rel)
+                    if (entry.isDirectory || name.endsWith("/")) {
+                        out.mkdirs()
+                        continue
                     }
+                    out.parentFile?.mkdirs()
+                    out.outputStream().use { zis.copyTo(it) }
+                    if (name.contains("/bin/") || !name.contains(".")) out.setExecutable(true, false)
                 }
             }
-            Log.i(TAG, "Installed bundled Java sdkmanager")
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to install bundled sdkmanager: ${t.message}", t)
         }
     }
 
@@ -1619,21 +1628,33 @@ class RootfsManager private constructor(private val context: Context) {
             .redirectErrorStream(true)
             .apply { environment().putAll(loaderEnv) }
             .start()
+        SandboxWorkload.track(p, "rootfs-proot")
+        SandboxWorkload.armDeadline(p, timeoutSec * 1000L)
         val outputFuture = java.util.concurrent.CompletableFuture.supplyAsync {
+            val buf = BoundedOutputBuffer(headChars = 256 * 1024, tailChars = 64 * 1024)
             try {
-                p.inputStream.readBytes().toString(Charset.forName("UTF-8"))
+                p.inputStream.bufferedReader(Charset.forName("UTF-8")).use { reader ->
+                    val chunk = CharArray(4096)
+                    while (true) {
+                        val n = reader.read(chunk)
+                        if (n < 0) break
+                        buf.append(chunk, 0, n)
+                    }
+                }
             } catch (_: Exception) {
-                ""
             }
+            if (buf.truncated) Log.w(TAG, "[Proot] output truncated, dropped ${buf.dropped} chars")
+            buf.toString()
         }
         val finished = p.waitFor(timeoutSec, java.util.concurrent.TimeUnit.SECONDS)
         val code: Int
         if (finished) {
             code = p.exitValue()
+            SandboxWorkload.release(p, kill = false, reason = "rootfs-proot-done")
         } else {
-            p.destroyForcibly()
+            SandboxWorkload.release(p, kill = true, reason = "rootfs-proot-timeout")
             code = -1
-            Log.w(TAG, "[Proot] child timed out after ${timeoutSec}s")
+            Log.w(TAG, "[Proot] child timed out after ${timeoutSec}s; process group killed")
         }
         val output = try {
             outputFuture.get(10, java.util.concurrent.TimeUnit.SECONDS)

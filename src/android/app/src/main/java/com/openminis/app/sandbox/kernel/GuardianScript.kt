@@ -1,0 +1,99 @@
+package com.openminis.app.sandbox.kernel
+
+/**
+ * Two guardians. They are not interchangeable.
+ *
+ * [oneshot] is for `bash -c` and `su -c`. The wrapper is the process-group
+ * leader, so a watchdog may use `kill -TERM -$$` and an EXIT trap may reap
+ * that watchdog. `kill -0` is not a group kill: in the shell it is an
+ * existence test.
+ *
+ * [supervisor] is for a long-lived shell. It starts one background watchdog
+ * and nothing else: no `trap`, no `ulimit`, no subshell around later commands.
+ * A subshell would drop cwd and exported variables, which is the whole point
+ * of the persistent shell. A trap on that shell kills the pipe reader and the
+ * next write gets EPIPE.
+ *
+ * [commandWatchdog] re-arms the same supervisor for one command. It is not a
+ * wrap. The command stays in the persistent shell. On success only the
+ * watchdog pid is killed; on expiry `kill -TERM -$$` kills the group,
+ * including grandchildren that called setsid inside the group.
+ */
+object GuardianScript {
+
+    fun oneshot(command: String, budget: ProcessBudget): String = buildString {
+        append(hardLimits(budget))
+        append(watchdog(budget.wallSeconds))
+        append("__minis_wd=\$!; ")
+        append("trap 'kill -KILL \$__minis_wd 2>/dev/null' EXIT; ")
+        append(command)
+    }
+
+    /** Boot-time rlimits for a persistent shell. No watchdog, no trap. */
+    fun bootLimits(budget: ProcessBudget): String = hardLimits(budget)
+
+    /**
+     * Injected once into the persistent shell's start command.
+     * `kill -TERM -$$` — the leading dash is the process group, not a signal
+     * number and not pid 0.
+     */
+    fun supervisor(wallSeconds: Int): String = buildString {
+        val wall = wallSeconds.coerceAtLeast(1)
+        append("( sleep ").append(wall)
+        append("; kill -TERM -\$\$ 2>/dev/null; sleep 3; kill -KILL -\$\$ 2>/dev/null ) & ")
+        append("echo \"[guardian] watchdog armed, wall=").append(wall).append("s pgid=\$\$\"")
+    }
+
+    /**
+     * Lines written before one persistent-shell command. Not a subshell.
+     * The caller must capture `$?` and then `kill -KILL $__minis_cmd_wd`
+     * so a finished command does not leave a timer that kills the session.
+     */
+    fun commandWatchdog(wallSeconds: Int): String = buildString {
+        val wall = wallSeconds.coerceAtLeast(1)
+        append("kill -KILL \${__minis_cmd_wd:-} 2>/dev/null\n")
+        append("( sleep ").append(wall)
+        append("; kill -TERM -\$\$ 2>/dev/null; sleep 3; kill -KILL -\$\$ 2>/dev/null ) &\n")
+        append("__minis_cmd_wd=\$!\n")
+    }
+
+    /**
+     * What the persistent shell actually writes. The command is not inside
+     * parentheses. Ulimits are not repeated here; they were set at boot.
+     */
+    fun persistentCommand(command: String, wallSeconds: Int): String = buildString {
+        // Re-arm. Kill the boot supervisor and the previous command watchdog
+        // so a 30-minute session backstop cannot outlive the command that
+        // replaced it. The command itself is not inside parentheses.
+        append("kill -KILL \${__minis_wd:-} 2>/dev/null\n")
+        append(commandWatchdog(wallSeconds))
+        append(command)
+        if (!command.endsWith("\n")) append('\n')
+    }
+
+    fun persistentBoot(limits: ProcessBudget, sessionWallSeconds: Int): String = buildString {
+        append(bootLimits(limits))
+        append(supervisor(sessionWallSeconds))
+        append("; exec /bin/bash --noprofile --norc")
+    }
+
+    private fun watchdog(wallSeconds: Int): String {
+        val wall = wallSeconds.coerceAtLeast(1)
+        return "( sleep $wall; kill -TERM -\$\$ 2>/dev/null; sleep 3; kill -KILL -\$\$ 2>/dev/null ) & "
+    }
+
+    private fun hardLimits(budget: ProcessBudget): String = buildString {
+        val mem = budget.addressKiB()
+        append("ulimit -H -v ").append(mem).append(" || exit 1; ")
+        append("ulimit -S -v ").append(mem).append(" || exit 1; ")
+        if (budget.cpuSeconds > 0) {
+            append("ulimit -H -t ").append(budget.cpuSeconds).append(" || exit 1; ")
+            append("ulimit -S -t ").append(budget.cpuSeconds).append(" || exit 1; ")
+        }
+        append("ulimit -H -u ").append(budget.nproc).append(" >/dev/null 2>&1 || true; ")
+        append("ulimit -S -u ").append(budget.nproc).append(" >/dev/null 2>&1 || true; ")
+        append("ulimit -H -f ").append(budget.fileBlocks()).append(" >/dev/null 2>&1 || true; ")
+        append("ulimit -S -f ").append(budget.fileBlocks()).append(" >/dev/null 2>&1 || true; ")
+        append("ulimit -H -c 0 >/dev/null 2>&1 || true; ")
+    }
+}

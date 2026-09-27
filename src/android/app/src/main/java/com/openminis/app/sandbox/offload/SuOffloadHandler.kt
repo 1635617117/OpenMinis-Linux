@@ -2,11 +2,13 @@ package com.openminis.app.sandbox.offload
 
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.offload.ShizukuManager
+import com.openminis.app.sandbox.BoundedOutputBuffer
+import com.openminis.app.sandbox.GuestWorkloadPolicy
 import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
+import com.openminis.app.sandbox.SandboxWorkload
 import org.json.JSONObject
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -83,21 +85,26 @@ class SuOffloadHandler : NativeOffloadHandler {
     }
 
     private fun exec(command: String, timeoutMs: Long): NativeOffloadResult {
+        GuestWorkloadPolicy.hostRefusal(command)?.let {
+            return NativeOffloadResult(126, it + "\n")
+        }
+        val armed = GuestWorkloadPolicy.clampHostTimeout(timeoutMs)
+        val confined = SuCommand.confineHost(command)
         val su = SuCommand.findSuBinary()
         if (su != null) {
             try {
-                val (code, output) = SuCommand.runHost(listOf(su, "-c", command), timeoutMs)
+                val (code, output) = SuCommand.runHost(listOf(su, "-c", confined), armed)
                 if (!SuCommand.looksLikeElevationFailure(code, output)) {
                     return NativeOffloadResult(code, output)
                 }
                 AppLogger.info(TAG, "host su refused elevation (code=$code); trying Shizuku")
-                return execViaShizuku(command, timeoutMs, "host su refused elevation")
+                return execViaShizuku(confined, armed, "host su refused elevation")
             } catch (t: Throwable) {
                 AppLogger.warning(TAG, "su -c failed: ${t.message}")
-                return execViaShizuku(command, timeoutMs, t.message ?: "host su failed")
+                return execViaShizuku(confined, armed, t.message ?: "host su failed")
             }
         }
-        return execViaShizuku(command, timeoutMs, "host su binary not found")
+        return execViaShizuku(confined, armed, "host su binary not found")
     }
 
     private fun execViaShizuku(
@@ -184,7 +191,9 @@ internal object SuCommand {
                 "status", "ping" -> return Parsed(Kind.STATUS, timeoutMs = timeoutMs)
                 "--timeout" -> {
                     val secs = args.getOrNull(i + 1)?.toLongOrNull()
-                    if (secs != null && secs > 0) timeoutMs = secs * 1000L
+                    if (secs != null && secs > 0) {
+                        timeoutMs = GuestWorkloadPolicy.clampHostTimeout(secs * 1000L)
+                    }
                     i += 2
                     continue
                 }
@@ -232,14 +241,36 @@ internal object SuCommand {
         return null
     }
 
+    /**
+     * Same-shell prefix. `nice cmd || cmd` is not used: a pipeline must not
+     * run twice when `nice` is missing. Host cgroup is the brake that holds.
+     */
+    fun confineHost(command: String): String {
+        val classified = com.openminis.app.sandbox.kernel.BudgetClassifier.classify(command)
+        val wall = minOf(classified.wallMs, GuestWorkloadPolicy.HOST_SU_MAX_TIMEOUT_MS)
+        return com.openminis.app.sandbox.kernel.GuardianScript.oneshot(
+            command,
+            classified.copy(wallMs = wall),
+        )
+    }
+
     fun runHost(argv: List<String>, timeoutMs: Long): Pair<Int, String> {
         val pb = ProcessBuilder(argv)
         pb.redirectErrorStream(true)
         val proc = pb.start()
-        val buf = ByteArrayOutputStream()
+        SandboxWorkload.track(proc, "host-su")
+        SandboxWorkload.armDeadline(proc, timeoutMs)
+        val buf = BoundedOutputBuffer(headChars = 32 * 1024, tailChars = 32 * 1024)
         val reader = Thread {
             try {
-                proc.inputStream.copyTo(buf)
+                proc.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                    val chunk = CharArray(4096)
+                    while (true) {
+                        val n = reader.read(chunk)
+                        if (n < 0) break
+                        buf.append(chunk, 0, n)
+                    }
+                }
             } catch (_: Throwable) {
             }
         }
@@ -247,13 +278,13 @@ internal object SuCommand {
         reader.start()
         val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!finished) {
-            proc.destroyForcibly()
+            SandboxWorkload.release(proc, kill = true, reason = "host-su-timeout")
             reader.join(1_000)
-            return 124 to "android-su: timed out after ${timeoutMs}ms\n"
+            return 124 to "android-su: timed out after ${timeoutMs}ms; process group killed\n${buf}"
         }
         reader.join(1_000)
-        val text = buf.toString(Charsets.UTF_8.name())
-        return proc.exitValue() to text
+        SandboxWorkload.release(proc, kill = false, reason = "host-su-done")
+        return proc.exitValue() to buf.toString()
     }
 
     /**

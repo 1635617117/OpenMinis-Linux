@@ -17,4 +17,22 @@ internal object IdleSessionBudget {
             }
         }
     }
+
+    /**
+     * Pressure path. Unpinned sessions go first. Pinned sessions are eligible
+     * only after they have been frozen, and the newest one is kept so the
+     * screen the user is on is not the first victim.
+     */
+    fun pressureVictims(
+        entries: List<Entry>,
+        maxBytes: Long,
+        frozenIds: Set<String>,
+    ): List<String> {
+        val unpinned = victims(entries, maxIdle = 0, maxBytes = maxBytes)
+        val left = entries.filter { it.id !in unpinned }
+        if (left.sumOf { it.bytes.coerceAtLeast(0L) } <= maxBytes) return unpinned
+        val pinned = left.filter { it.pinned && it.id in frozenIds }.sortedBy { it.lastAccess }
+        if (pinned.size <= 1) return unpinned
+        return unpinned + pinned.dropLast(1).map { it.id }
+    }
 }

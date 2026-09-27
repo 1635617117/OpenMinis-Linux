@@ -5,6 +5,9 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import java.io.PrintWriter
@@ -55,7 +58,8 @@ class DebugServer(
 
     private var serverSocket: ServerSocket? = null
     private var acceptJob: Job? = null
-    private val scope = CoroutineScope(Dispatchers.IO)
+    private var scopeJob = SupervisorJob()
+    private var scope = CoroutineScope(scopeJob + Dispatchers.IO)
     private val rpcHandler = DebugRPCHandler(context)
 
     /**
@@ -87,6 +91,10 @@ class DebugServer(
 
     fun start() {
         if (serverSocket != null) return
+        if (!scope.isActive) {
+            scopeJob = SupervisorJob()
+            scope = CoroutineScope(scopeJob + Dispatchers.IO)
+        }
         stopped = false
 
         acceptJob = scope.launch {
@@ -117,6 +125,7 @@ class DebugServer(
         serverSocket = null
         acceptJob?.cancel()
         acceptJob = null
+        scopeJob.cancel()
         Log.i(TAG, "Server stopped")
     }
 

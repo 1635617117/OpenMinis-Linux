@@ -2,7 +2,10 @@ package com.openminis.app.sandbox
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.sandbox.kernel.BudgetClassifier
+import com.openminis.app.sandbox.kernel.StreamSink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.io.BufferedReader
@@ -42,13 +45,23 @@ object ShellExecutor {
     suspend fun execute(
         context: Context,
         command: String,
+        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
         timeout: Long = DEFAULT_TIMEOUT_MS,
         environment: Map<String, String> = emptyMap(),
         lineCallback: ((String) -> Unit)? = null
     ): ShellResult = withContext(Dispatchers.IO) {
         check(PRootKernel.isBooted) { "PRootKernel must be booted before executing commands" }
 
-        val first = runOnce(context, command, timeout, environment, lineCallback, noSeccomp = false)
+        val budget = BudgetClassifier.classify(command)
+        val armed = budget.wallMs
+        if (timeout != armed) {
+            Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
+        }
+        val first = runOnce(
+            context, command, armed, environment, lineCallback, noSeccomp = false,
+            outputCapBytes = budget.outputCapBytes,
+            outputRateBytesPerSec = budget.outputRateBytesPerSec,
+        )
 
         // [T-android-seccomp-selfheal / GH#186] If the child died on an early
         // fatal signal with no output at all, the host kernel's seccomp fast
@@ -71,7 +84,11 @@ object ShellExecutor {
         // The retry deliberately reuses the caller's lineCallback: the first
         // attempt produced no output (that is a precondition of retrying), so
         // there is nothing to duplicate.
-        val retried = runOnce(context, command, timeout, environment, lineCallback, noSeccomp = true)
+        val retried = runOnce(
+            context, command, armed, environment, lineCallback, noSeccomp = true,
+            outputCapBytes = budget.outputCapBytes,
+            outputRateBytesPerSec = budget.outputRateBytesPerSec,
+        )
         if (retried.exitCode == 0) {
             com.openminis.app.logging.AppLogger.warning(
                 TAG,
@@ -96,6 +113,8 @@ object ShellExecutor {
         environment: Map<String, String>,
         lineCallback: ((String) -> Unit)?,
         noSeccomp: Boolean,
+        outputCapBytes: Long = BudgetClassifier.normal().outputCapBytes,
+        outputRateBytesPerSec: Long = BudgetClassifier.normal().outputRateBytesPerSec,
     ): ShellResult = withContext(Dispatchers.IO) {
         val prootCommand = PRootKernel.buildProotCommand(command)
 
@@ -135,7 +154,7 @@ object ShellExecutor {
             env[SeccompFallbackPolicy.NO_SECCOMP_ENV] = SeccompFallbackPolicy.NO_SECCOMP_VALUE
         }
 
-        val output = StringBuilder()
+        val output = BoundedOutputBuffer()
         var exitCode = -1
 
         // Keep the Process in a local. withTimeout cancels the block and runs
@@ -146,27 +165,39 @@ object ShellExecutor {
             val process = processBuilder.start()
             started = process
             currentProcess = process
+            SandboxWorkload.track(process, "oneshot")
+            SandboxWorkload.armDeadline(process, timeout)
             withTimeout(timeout) {
                     // Read raw chars to preserve \r for TerminalSanitizer CR-folding.
                     // readLine() would consume \r as line terminator, losing progress overwrites.
+                    val sink = StreamSink(outputCapBytes, outputRateBytesPerSec)
                     InputStreamReader(process.inputStream, StandardCharsets.UTF_8).use { reader ->
                         val buf = CharArray(4096)
                         var lastLineForCallback = StringBuilder()
                         var n: Int
                         while (reader.read(buf).also { n = it } != -1) {
                             output.append(buf, 0, n)
-                            // Feed lines to callback for UI updates
+                            val wait = sink.writeWaitMs(n)
+                            val room = sink.append(buf, 0, n)
+                            // Feed lines to callback for UI updates. The sink
+                            // rate is the producer brake; the callback still
+                            // sees lines already read.
                             if (lineCallback != null) {
                                 for (i in 0 until n) {
                                     val c = buf[i]
                                     if (c == '\n') {
                                         lineCallback.invoke(lastLineForCallback.toString())
                                         lastLineForCallback.clear()
-                                    } else if (c != '\r') {
+                                    } else if (c != '\r' && lastLineForCallback.length < BoundedOutputBuffer.MAX_LINE_CHARS) {
                                         lastLineForCallback.append(c)
                                     }
                                 }
                             }
+                            if (!room || !sink.canRead()) {
+                                Log.w(TAG, "output cap hit; stopping read so the guest blocks")
+                                break
+                            }
+                            if (wait > 0L) delay(wait)
                         }
                         if (lineCallback != null && lastLineForCallback.isNotEmpty()) {
                             lineCallback.invoke(lastLineForCallback.toString())
@@ -177,22 +208,24 @@ object ShellExecutor {
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             Log.w(TAG, "Command timed out after ${timeout}ms: $command")
-            started?.destroyForcibly()
-            output.appendLine("\n[Command timed out after ${timeout / 1000}s]")
+            SandboxWorkload.release(started, kill = true, reason = "oneshot-timeout")
+            output.appendLine("\n[Command timed out after ${timeout / 1000}s; guest process group killed]")
             exitCode = 124 // Standard timeout exit code
         } catch (e: kotlinx.coroutines.CancellationException) {
-            started?.destroyForcibly()
+            SandboxWorkload.release(started, kill = true, reason = "oneshot-cancel")
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Command failed: $command", e)
-            started?.destroyForcibly()
+            SandboxWorkload.release(started, kill = true, reason = "oneshot-error")
             output.appendLine("\n[Error: ${e.message}]")
             exitCode = -1
         } finally {
             if (currentProcess === started) currentProcess = null
+            SandboxWorkload.release(started, kill = false, reason = "oneshot-done")
         }
 
         val durationMs = System.currentTimeMillis() - startTime
+        if (output.truncated) Log.w(TAG, "output truncated, dropped ${output.dropped} chars")
         Log.d(TAG, "Command completed in ${durationMs}ms with exit code $exitCode")
 
         ShellResult(
@@ -208,7 +241,7 @@ object ShellExecutor {
     fun destroyCurrent() {
         currentProcess?.let { process ->
             Log.i(TAG, "Destroying current process")
-            process.destroyForcibly()
+            SandboxWorkload.release(process, kill = true, reason = "destroyCurrent")
             currentProcess = null
         }
     }

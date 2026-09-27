@@ -2,6 +2,9 @@ package com.openminis.app.sandbox
 
 import android.content.Context
 import android.util.Log
+import com.openminis.app.sandbox.kernel.BudgetClassifier
+import com.openminis.app.sandbox.kernel.GuardianScript
+import com.openminis.app.sandbox.kernel.TokenBucket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -65,16 +68,13 @@ class PersistentShell(
 
     private class CommandCallback(
         val marker: String,
-        val output: StringBuilder = StringBuilder(),
+        val output: BoundedOutputBuffer = BoundedOutputBuffer(),
         val lineCallback: ((String) -> Unit)?,
         var onComplete: ((String, Int) -> Unit)? = null,
     ) {
         val framer = MarkerFramer(marker)
         fun appendOutput(text: String) {
-            val room = MAX_OUTPUT_CHARS - output.length
-            if (room <= 0) return
-            if (text.length <= room) output.append(text)
-            else output.append(text, 0, room).append("\n[... output truncated ...]\n")
+            output.append(text)
         }
     }
 
@@ -224,6 +224,17 @@ class PersistentShell(
         }
 
         cmd.add("/bin/bash")
+        cmd.add("-c")
+        // Ulimits and the session watchdog are injected once, then exec
+        // replaces this bash with the long-lived shell. Later commands are
+        // not wrapped: a subshell would drop cwd and exports, and an EXIT
+        // trap would kill the pipe reader.
+        cmd.add(
+            GuardianScript.persistentBoot(
+                BudgetClassifier.setup(),
+                (com.openminis.app.sandbox.ShellTimeoutPolicy.SETUP_WALL_MS / 1000L).toInt(),
+            ),
+        )
 
         val debugOffload = com.openminis.app.BuildConfig.DEBUG
 
@@ -270,6 +281,7 @@ class PersistentShell(
 
         val p = processBuilder.start()
         process = p
+        SandboxWorkload.track(p, "shell:$sessionId")
         stdinWriter = BufferedWriter(OutputStreamWriter(p.outputStream, StandardCharsets.UTF_8))
 
         // Start background reader thread
@@ -444,7 +456,10 @@ class PersistentShell(
         Log.i(TAG, "Persistent shell process exited")
     }
 
+    private val lineBudget = TokenBucket(ratePerSec = 20.0, burst = 40)
+
     private fun feedLines(text: String, callback: (String) -> Unit) {
+        if (!lineBudget.tryTake(System.currentTimeMillis())) return
         val lines = text.split('\n')
         for (i in lines.indices) {
             val line = lines[i].replace("\r", "")
@@ -507,6 +522,7 @@ class PersistentShell(
 
     suspend fun executeCommand(
         command: String,
+        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null,
     ): Pair<String, Int> {
@@ -530,6 +546,11 @@ class PersistentShell(
             return Pair(detail, -1)
         }
 
+        val budget = BudgetClassifier.classify(command)
+        val armed = budget.wallMs
+        if (timeout != armed) {
+            Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
+        }
         val marker = UUID.randomUUID().toString().take(8)
         // [T-android-ghost-cwd] Heal the shell's cwd before handing control back
         // to the next command. This shell is long-lived, so a `cd` into a
@@ -545,20 +566,28 @@ class PersistentShell(
             // `set -e`. That would abort the rest of a compound command and
             // skip the done marker, so the caller sees a cut-off with no code.
             append("set +e\n")
-            append(command).append('\n')
+            // Supervisor re-arm. Not a subshell around the command, not a trap,
+            // not a second ulimit. On expiry `kill -TERM -$$` kills the group.
+            append(GuardianScript.persistentCommand(command, budget.wallSeconds))
             append("__minis_rc=\$?\n")
+            append("kill -KILL \${__minis_cmd_wd:-} 2>/dev/null\n")
             append("if [ ! -d \"\$PWD\" ]; then cd /var/minis/workspace 2>/dev/null || cd / ; fi\n")
             append("echo \"__MINIS_DONE_${marker}_EXIT_\${__minis_rc}__\"\n")
         }
 
         return withContext(Dispatchers.IO) {
-            val result = withTimeoutOrNull(timeout) {
+            SandboxWorkload.armDeadline(process, armed)
+            try {
+            val result = withTimeoutOrNull(armed) {
                 suspendCancellableCoroutine { cont ->
                     val cb = CommandCallback(
                         marker = marker,
                         lineCallback = lineCallback,
                     )
                     cb.onComplete = { output, exitCode ->
+                        if (cb.output.truncated) {
+                            Log.w(TAG, "output truncated, dropped ${cb.output.dropped} chars")
+                        }
                         if (cont.isActive) {
                             cont.resume(Pair(output, exitCode))
                         }
@@ -587,11 +616,14 @@ class PersistentShell(
                 // The guest shell reads the next command only after the previous
                 // one exits. Leaving it alive makes the timeout a no-op and lets
                 // the old marker/output land on the next command.
-                Log.w(TAG, "command timed out after ${timeout / 1000}s; killing shell")
+                Log.w(TAG, "command timed out after ${armed / 1000}s; killing shell tree")
                 stop()
-                Pair("[Command timed out after ${timeout / 1000}s]", 124)
+                Pair("[Command timed out after ${armed / 1000}s; guest process group killed]", 124)
             } else {
                 result
+            }
+            } finally {
+                SandboxWorkload.clearDeadline(process)
             }
         }
     }
@@ -641,6 +673,7 @@ class PersistentShell(
         val cb = pendingCallback
         try { stdinWriter?.close() } catch (_: Exception) {}
         if (process === p) stdinWriter = null
+        SandboxWorkload.release(p, kill = true, reason = "shell-stop:$sessionId")
         p?.destroyForcibly()
         runCatching { p?.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
         if (process === p) process = null

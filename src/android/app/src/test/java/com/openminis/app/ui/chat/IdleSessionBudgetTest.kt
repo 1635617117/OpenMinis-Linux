@@ -23,4 +23,21 @@ class IdleSessionBudgetTest {
         assertEquals(listOf("old"), IdleSessionBudget.victims(entries, maxBytes = 100))
         assertTrue(IdleSessionBudget.victims(entries, maxBytes = 120).isEmpty())
     }
+
+    @Test fun pinnedStayUntilPressureHasFrozenThem() {
+        val entries = listOf(
+            IdleSessionBudget.Entry("active", 3, 80, true),
+            IdleSessionBudget.Entry("pinned-old", 1, 80, true),
+            IdleSessionBudget.Entry("idle", 2, 10, false),
+        )
+        assertTrue(IdleSessionBudget.victims(entries, maxIdle = 3, maxBytes = 100).isEmpty())
+        assertEquals(
+            listOf("idle"),
+            IdleSessionBudget.pressureVictims(entries, maxBytes = 100, frozenIds = emptySet()),
+        )
+        assertEquals(
+            listOf("idle", "pinned-old"),
+            IdleSessionBudget.pressureVictims(entries, maxBytes = 100, frozenIds = setOf("pinned-old", "active")),
+        )
+    }
 }

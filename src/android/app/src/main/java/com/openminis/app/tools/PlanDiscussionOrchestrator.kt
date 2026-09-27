@@ -7,16 +7,20 @@ import com.openminis.app.data.model.LLMStreamChunk
 import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.provider.LLMProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 
 /**
- * Shared-transcript plan discussion: main proposes, team models (or the
- * same model playing independent stances) do [ROUNDS] of agree/refute with
- * tools, then the main model synthesizes for the user to judge.
+ * Drives [DiscussionGraph]. Roles speak only on their edge. Critics run in
+ * parallel and do not see each other. An objection selects at most one
+ * clarification and one architect revise; objectors then revote once.
  */
 object PlanDiscussionOrchestrator {
-    const val ROUNDS = 3
-    private const val MAX_TOOL_TURNS = 6
+    private const val MAX_TOOL_TURNS = 3
 
     data class Member(
         val displayName: String,
@@ -24,11 +28,13 @@ object PlanDiscussionOrchestrator {
         val provider: LLMProvider,
         val maxTokens: Int,
         val temperature: Double? = null,
+        val role: String = "",
     )
 
     data class Result(
         val markdown: String,
         val transcript: String,
+        val contract: String,
     )
 
     suspend fun run(
@@ -40,79 +46,175 @@ object PlanDiscussionOrchestrator {
         executeTool: suspend (String, String) -> ToolExecutionResult,
         onProgress: suspend (String) -> Unit = {},
     ): Result {
-        val board = StringBuilder()
-        board.append("User request:\n").append(userText.trim()).append("\n")
-        if (conversationExcerpt.isNotBlank()) {
-            board.append("\nRecent conversation:\n").append(conversationExcerpt.take(6000)).append("\n")
+        val seats = DiscussionGraph.staff(userText, members.size)
+        val statements = mutableListOf<DiscussionGraph.Statement>()
+        val toolGate = Mutex()
+        val guarded: suspend (String, String) -> ToolExecutionResult = { name, json ->
+            val denied = DiscussionGraph.denyExecution(name, json)
+            if (denied != null) {
+                ToolExecutionResult(denied, false)
+            } else {
+                toolGate.withLock { executeTool(name, json) }
+            }
         }
 
         suspend fun push(status: String) {
-            onProgress(liveMarkdown(status, userText, board.toString()))
+            onProgress(
+                liveMarkdown(
+                    status,
+                    userText,
+                    DiscussionGraph.renderBoard(userText, conversationExcerpt, statements),
+                ),
+            )
         }
 
-        push("主会话正在提出实现方式…")
-        val proposal = speak(
-            member = main,
-            tools = tools,
-            executeTool = executeTool,
-            system = facilitatorPrompt(main.displayName),
-            user = "Propose the next implementation approach for the user request. Be concrete (files, steps, risks). Do not implement yet unless a tiny probe is required to decide.\n\n$board",
-        )
-        board.append("\n### Proposal (").append(main.displayName).append(")\n").append(proposal).append("\n")
+        suspend fun say(
+            seat: DiscussionGraph.Seat,
+            phase: DiscussionGraph.Phase,
+            instruction: String,
+            withTools: Boolean,
+        ): DiscussionGraph.Statement {
+            val member = memberFor(seat, main, members)
+            push("${seat.role}：${DiscussionGraph.phaseHeading(phase)}")
+            val raw = speak(
+                member = member,
+                tools = if (withTools) DiscussionGraph.allowedTools(seat.role, tools) else emptyList(),
+                executeTool = guarded,
+                system = DiscussionGraph.roleSystem(seat.role),
+                user = instruction + "\n\n" + DiscussionGraph.renderBoard(userText, conversationExcerpt, statements),
+            )
+            val statement = DiscussionGraph.parseStatement(seat.role, phase, raw)
+            statements += statement
+            return statement
+        }
 
-        val panel = members.ifEmpty { listOf(main.copy(stance = "critic")) }
-        repeat(ROUNDS) { round ->
-            val n = round + 1
-            push("计划讨论 第 $n/$ROUNDS 轮")
-            for (m in panel) {
-                push("${m.displayName}（${m.stance}）发言中…")
-                val turn = speak(
-                    member = m,
-                    tools = tools,
-                    executeTool = executeTool,
-                    system = discussantPrompt(m.displayName, m.stance),
-                    user = "Round $n of $ROUNDS. Read the shared board. Agree, refine, or refute with evidence. You may use tools to inspect the workspace. Do not claim the decision is final.\n\n$board",
+        say(
+            seat = DiscussionGraph.seat(seats, "产品经理"),
+            phase = DiscussionGraph.Phase.BRIEF,
+            instruction = "写简报，不要设计实现。用这些标题：【目标】【非目标】【验收】【必须】【可砍】【未知】。",
+            withTools = false,
+        )
+        say(
+            seat = DiscussionGraph.seat(seats, "架构师"),
+            phase = DiscussionGraph.Phase.DESIGN,
+            instruction = "根据简报给一个可执行方案。用这些标题：【方案】【放弃】【边界】【失败恢复】。可以只读查看仓库。不要开始实现。",
+            withTools = true,
+        )
+
+        val critics = DiscussionGraph.critics(seats)
+        push(critics.joinToString("、") { it.role } + "并行审查")
+        val critiqueBoard = DiscussionGraph.renderBoard(userText, conversationExcerpt, statements)
+        val critiques = speakAll(critics) { seat ->
+            speak(
+                member = memberFor(seat, main, members),
+                tools = DiscussionGraph.allowedTools(seat.role, tools),
+                executeTool = guarded,
+                system = DiscussionGraph.roleSystem(seat.role),
+                user = "独立审查方案。不要附和。必须以 VERDICT / OBJECTION / ASK 三行结束。\n\n" +
+                    critiqueBoard,
+            )
+        }
+        critics.zip(critiques).forEach { (seat, raw) ->
+            statements += DiscussionGraph.parseStatement(seat.role, DiscussionGraph.Phase.CRITIQUE, raw)
+        }
+
+        val objections = DiscussionGraph.openObjections(statements)
+        if (objections.isNotEmpty()) {
+            val clarify = DiscussionGraph.clarificationRole(seats, objections)
+            if (clarify != null) {
+                say(
+                    seat = DiscussionGraph.seat(seats, clarify),
+                    phase = DiscussionGraph.Phase.CLARIFY,
+                    instruction = "只回答点名给你的异议，不要重写方案。\n\n" + formatObjections(objections),
+                    withTools = false,
                 )
-                board.append("\n### Round $n · ").append(m.displayName)
-                    .append(" (").append(m.stance).append(")\n")
-                    .append(turn).append("\n")
+            }
+            say(
+                seat = DiscussionGraph.seat(seats, "架构师"),
+                phase = DiscussionGraph.Phase.REVISE,
+                instruction = "只修订下面这些未关闭异议。每条写采纳或不采纳以及理由。不要开始实现。\n\n" +
+                    formatObjections(objections),
+                withTools = true,
+            )
+            val objectors = DiscussionGraph.objectorSeats(seats, objections)
+            push(objectors.joinToString("、") { it.role } + "复审")
+            val boardForRevote = DiscussionGraph.renderBoard(userText, conversationExcerpt, statements)
+            val revotes = speakAll(objectors) { seat ->
+                speak(
+                    member = memberFor(seat, main, members),
+                    tools = DiscussionGraph.allowedTools(seat.role, tools),
+                    executeTool = guarded,
+                    system = DiscussionGraph.roleSystem(seat.role),
+                    user = "复审修订。只判断你自己的异议是否关闭。必须以 VERDICT / OBJECTION / ASK 三行结束。\n\n" +
+                        boardForRevote,
+                )
+            }
+            objectors.zip(revotes).forEach { (seat, raw) ->
+                statements += DiscussionGraph.parseStatement(seat.role, DiscussionGraph.Phase.REVOTE, raw)
             }
         }
 
-        push("主会话正在合成方案…")
-        val synthesis = speak(
-            member = main,
-            tools = tools,
-            executeTool = executeTool,
-            system = synthesizerPrompt(main.displayName),
-            user = "Synthesize the discussion into one plan the USER can accept or reject. List: recommended approach, dissent that was not adopted (and why), files/steps, risks. Do not start implementing.\n\n$board",
+        push("秘书助理写执行契约")
+        val open = DiscussionGraph.openObjections(statements)
+        val brief = statements.firstOrNull { it.phase == DiscussionGraph.Phase.BRIEF }?.body.orEmpty()
+        val design = statements.lastOrNull {
+            it.phase == DiscussionGraph.Phase.REVISE || it.phase == DiscussionGraph.Phase.DESIGN
+        }?.body.orEmpty()
+        val fallback = DiscussionGraph.fallbackContract(brief, design, open)
+        val minutes = speak(
+            member = memberFor(DiscussionGraph.seat(seats, "秘书助理"), main, members),
+            tools = emptyList(),
+            executeTool = guarded,
+            system = DiscussionGraph.roleSystem("秘书助理"),
+            user = "把讨论收成一份执行契约。必须包含【已定】【未采纳】【任务】【风险】【停止条件】。" +
+                "未关闭的异议写入【未采纳】，不要假装已经同意。不要开始实现。\n\n" +
+                DiscussionGraph.renderBoard(userText, conversationExcerpt, statements) +
+                "\n\n未关闭异议:\n" + formatObjections(open),
         )
-        board.append("\n### Synthesis (").append(main.displayName).append(")\n").append(synthesis).append("\n")
-
-        return Result(markdown = discussionMarkdown(board.toString()), transcript = board.toString())
+        val contract = DiscussionGraph.extractContract(minutes, fallback)
+        statements += DiscussionGraph.parseStatement("秘书助理", DiscussionGraph.Phase.MINUTES, minutes)
+        val board = DiscussionGraph.renderBoard(userText, conversationExcerpt, statements)
+        return Result(
+            markdown = DiscussionGraph.discussionMarkdown(board, contract),
+            transcript = board,
+            contract = contract,
+        )
     }
 
-    fun discussionMarkdown(board: String): String {
-        return buildString {
-            append("## 计划讨论（主会话 × 子 Agent）\n\n")
-            append("本轮在共享白板上进行：用户与主会话都能看见每一轮发言。讨论结束后主会话按 Synthesis 执行，不要再开一轮讨论。关闭入口：设置 → 多智能体。\n\n")
-            append(board.trim())
-            append("\n\n---\n讨论结束，本轮将按合成方案开始执行。\n")
-        }
+    fun discussionMarkdown(board: String): String =
+        DiscussionGraph.discussionMarkdown(board, board.substringAfter("【已定】", board).trim())
+
+    fun liveMarkdown(status: String, userText: String, board: String): String = buildString {
+        appendLine("## 计划讨论（进行中）")
+        appendLine()
+        appendLine("**状态：** $status")
+        appendLine()
+        appendLine("**任务：** ${userText.trim().take(500)}")
+        appendLine()
+        if (board.isNotBlank()) appendLine(board.takeLast(12_000))
     }
 
-    fun liveMarkdown(status: String, userText: String, board: String): String {
-        return buildString {
-            appendLine("## 计划讨论（进行中）")
-            appendLine()
-            appendLine("**状态：** $status")
-            appendLine()
-            appendLine("**任务：** ${userText.trim().take(500)}")
-            appendLine()
-            if (board.isNotBlank()) {
-                appendLine(board.takeLast(12_000))
-            }
-        }
+    private fun memberFor(seat: DiscussionGraph.Seat, main: Member, members: List<Member>): Member {
+        val base = if (seat.providerIndex < 0 || members.isEmpty()) main
+        else members[seat.providerIndex % members.size]
+        val model = base.displayName.substringBefore(" · ").trim().ifBlank { base.displayName }
+        return base.copy(
+            displayName = "${seat.role} · $model",
+            stance = seat.role,
+            role = seat.role,
+        )
+    }
+
+    private suspend fun speakAll(
+        seats: List<DiscussionGraph.Seat>,
+        block: suspend (DiscussionGraph.Seat) -> String,
+    ): List<String> = supervisorScope {
+        seats.map { seat -> async { block(seat) } }.awaitAll()
+    }
+
+    private fun formatObjections(items: List<DiscussionGraph.Statement>): String {
+        if (items.isEmpty()) return "无"
+        return items.joinToString("\n") { "- ${it.role}：${it.objection.ifBlank { it.body.take(400) }}" }
     }
 
     private suspend fun speak(
@@ -150,8 +252,8 @@ object PlanDiscussionOrchestrator {
                     if (report.isNotEmpty()) report.append("\n\n")
                     report.append(text)
                 }
-                if (toolCalls.isEmpty()) {
-                    return report.toString().ifBlank { text.ifBlank { "(empty)" } }
+                if (toolCalls.isEmpty() || tools.isEmpty()) {
+                    return report.toString().ifBlank { "(无发言)" }
                 }
                 val assistantParts = mutableListOf<AgentContentPart>()
                 if (text.isNotEmpty()) assistantParts.add(AgentContentPart.Text(text))
@@ -167,17 +269,6 @@ object PlanDiscussionOrchestrator {
                 )
                 val resultParts = mutableListOf<AgentContentPart>()
                 for ((id, name, args) in toolCalls) {
-                    if (SubAgentKind.isSpawnTool(name)) {
-                        resultParts.add(
-                            AgentContentPart.ToolResult(
-                                id = id,
-                                name = name,
-                                content = "Plan discussion members cannot spawn nested sub-agents.",
-                                isError = true,
-                            ),
-                        )
-                        continue
-                    }
                     val result = try {
                         executeTool(name, args.toString())
                     } catch (e: CancellationException) {
@@ -209,28 +300,6 @@ object PlanDiscussionOrchestrator {
             report.append("(").append(member.displayName).append(" failed: ")
                 .append(e.message ?: e.javaClass.simpleName).append(")")
         }
-        return report.toString().trim().ifBlank { "(no statement)" }
+        return report.toString().trim().ifBlank { "(无发言)" }
     }
-
-    private fun facilitatorPrompt(name: String) = """
-        You are $name, the session facilitator for a PLAN DISCUSSION.
-        Your statement is posted to a shared board visible to the USER and every discussant.
-        Goal: propose the next implementation approach. Other models will see
-        this board and may agree or refute. Use tools to inspect the real workspace.
-        Do not implement the whole task. Stay in your own stance.
-    """.trimIndent()
-
-    private fun discussantPrompt(name: String, stance: String) = """
-        You are $name in a shared plan discussion. Independent stance: $stance.
-        You CAN see every previous statement on the board; the USER also sees this board live.
-        Use tools (shell, files, skills) as needed.
-        Agree, refine, or refute with specifics. Do not rubber-stamp. Do not implement the full task.
-        Do not spawn sub-agents.
-    """.trimIndent()
-
-    private fun synthesizerPrompt(name: String) = """
-        You are $name synthesizing a plan discussion for the USER.
-        Produce one clear recommendation. Record dissent that you did not adopt.
-        The full board is visible to the user. The user decides. Do not start coding the plan.
-    """.trimIndent()
 }

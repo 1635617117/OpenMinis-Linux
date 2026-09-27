@@ -32,6 +32,25 @@ object SubAgentActivityTracker {
         val turnCap: Int = 0,
         val currentTool: String = "",
         val transcript: String = "",
+        /** 思考中 / 回复中 / 调用工具 / 执行中. Empty until the runner reports one. */
+        val phase: String = "",
+        val steps: List<Step> = emptyList(),
+    )
+
+    /**
+     * One row in the live detail page. Same three kinds the session page
+     * renders: thinking, assistant text, and a tool card.
+     */
+    data class Step(
+        val id: String,
+        val kind: String,
+        val title: String = "",
+        val body: String = "",
+        val toolName: String = "",
+        val toolArgs: String = "",
+        val status: String = "",
+        val startedAt: Long = 0L,
+        val durationMs: Long = 0L,
     )
 
     private val _members = MutableStateFlow<List<Member>>(emptyList())
@@ -112,6 +131,143 @@ object SubAgentActivityTracker {
     fun finish(id: String, success: Boolean, error: String? = null) {
         _members.value = _members.value.filterNot { it.id == id }
     }
+
+    fun setPhase(id: String, phase: String, tool: String = "") {
+        if (phase.isBlank() && tool.isBlank()) return
+        mutate(id) { m ->
+            val nextTool = when {
+                tool.isNotBlank() -> tool
+                phase == "思考中" || phase == "回复中" -> ""
+                else -> m.currentTool
+            }
+            m.copy(
+                phase = phase.ifBlank { m.phase },
+                currentTool = nextTool,
+                lastStep = if (nextTool.isBlank()) phase else "$phase · $nextTool",
+            )
+        }
+    }
+
+    fun appendStream(id: String, stepId: String, kind: String, delta: String) {
+        if (delta.isEmpty() || stepId.isBlank()) return
+        mutate(id) { m ->
+            val steps = m.steps.toMutableList()
+            val idx = steps.indexOfLast { it.id == stepId }
+            if (idx >= 0) {
+                val cur = steps[idx]
+                steps[idx] = cur.copy(body = clip(cur.body + delta, 8_000), status = "streaming")
+            } else {
+                trim(steps)
+                steps += Step(
+                    id = stepId,
+                    kind = kind,
+                    title = if (kind == "thinking") "思考" else "",
+                    body = clip(delta, 8_000),
+                    status = "streaming",
+                    startedAt = System.currentTimeMillis(),
+                )
+            }
+            m.copy(steps = steps)
+        }
+    }
+
+    fun beginTool(id: String, toolId: String, name: String) {
+        if (toolId.isBlank()) return
+        mutate(id) { m ->
+            val steps = m.steps.toMutableList()
+            if (steps.none { it.id == toolId }) {
+                trim(steps)
+                steps += Step(
+                    id = toolId,
+                    kind = "tool",
+                    title = name,
+                    toolName = name,
+                    status = "streaming",
+                    startedAt = System.currentTimeMillis(),
+                )
+            }
+            m.copy(steps = steps, phase = "调用工具", currentTool = name, lastStep = "调用工具 · $name")
+        }
+    }
+
+    fun updateToolArgs(id: String, toolId: String, name: String, args: String) {
+        mutate(id) { m ->
+            val steps = m.steps.toMutableList()
+            val idx = steps.indexOfLast { it.id == toolId }
+            val clipped = clip(args, 4_000)
+            if (idx >= 0) {
+                val cur = steps[idx]
+                steps[idx] = cur.copy(
+                    toolName = name.ifBlank { cur.toolName },
+                    title = name.ifBlank { cur.title },
+                    toolArgs = clipped,
+                    status = if (cur.status == "running" || cur.status == "success" || cur.status == "failed") cur.status else "pending",
+                )
+            } else {
+                trim(steps)
+                steps += Step(
+                    id = toolId,
+                    kind = "tool",
+                    title = name,
+                    toolName = name,
+                    toolArgs = clipped,
+                    status = "pending",
+                    startedAt = System.currentTimeMillis(),
+                )
+            }
+            m.copy(steps = steps, phase = "调用工具", currentTool = name.ifBlank { m.currentTool })
+        }
+    }
+
+    fun markToolRunning(id: String, toolId: String, name: String, args: String) {
+        mutate(id) { m ->
+            val steps = m.steps.toMutableList()
+            val idx = steps.indexOfLast { it.id == toolId }
+            if (idx >= 0) {
+                val cur = steps[idx]
+                steps[idx] = cur.copy(
+                    toolName = name.ifBlank { cur.toolName },
+                    title = name.ifBlank { cur.title },
+                    toolArgs = args.ifBlank { cur.toolArgs },
+                    status = "running",
+                    startedAt = cur.startedAt.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                )
+            }
+            m.copy(steps = steps, phase = "执行中", currentTool = name.ifBlank { m.currentTool }, lastStep = "执行中 · $name")
+        }
+    }
+
+    fun finishTool(id: String, toolId: String, name: String, success: Boolean, output: String) {
+        mutate(id) { m ->
+            val steps = m.steps.toMutableList()
+            val idx = steps.indexOfLast { it.id == toolId }
+            val now = System.currentTimeMillis()
+            if (idx >= 0) {
+                val cur = steps[idx]
+                steps[idx] = cur.copy(
+                    toolName = name.ifBlank { cur.toolName },
+                    title = name.ifBlank { cur.title },
+                    body = clip(output, 4_000),
+                    status = if (success) "success" else "failed",
+                    durationMs = if (cur.startedAt > 0) now - cur.startedAt else 0L,
+                )
+            }
+            m.copy(steps = steps, phase = "思考中", currentTool = "", lastStep = "思考中")
+        }
+    }
+
+    private fun mutate(id: String, block: (Member) -> Member) {
+        synchronized(this) {
+            _members.value = _members.value.map { m -> if (m.id == id) block(m) else m }
+        }
+    }
+
+    private fun trim(steps: MutableList<Step>) {
+        while (steps.size >= 80) steps.removeAt(0)
+    }
+
+    private fun clip(text: String, max: Int): String =
+        if (text.length <= max) text else text.takeLast(max)
 
     fun appendLog(id: String, line: String) {
         if (line.isBlank()) return

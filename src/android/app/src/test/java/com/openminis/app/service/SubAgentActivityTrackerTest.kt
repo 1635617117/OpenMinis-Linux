@@ -95,4 +95,25 @@ class SubAgentActivityTrackerTest {
         assertFalse(solo.contains("## "))
         SubAgentActivityTracker.clearSession("s5")
     }
+
+    @Test
+    fun liveStepsKeepThinkingTextAndToolApart() {
+        SubAgentActivityTracker.clearSession("s6")
+        val id = SubAgentActivityTracker.start("s6", "修扫描", "工程师", "gpt", index = 1, total = 1)
+        SubAgentActivityTracker.setPhase(id, "思考中")
+        SubAgentActivityTracker.appendStream(id, "t1-think", "thinking", "先看")
+        SubAgentActivityTracker.appendStream(id, "t1-think", "thinking", "调用栈")
+        SubAgentActivityTracker.beginTool(id, "call-1", "file_read")
+        SubAgentActivityTracker.markToolRunning(id, "call-1", "file_read", """{"path":"src/Foo.kt"}""")
+        SubAgentActivityTracker.finishTool(id, "call-1", "file_read", true, "class Foo")
+        val m = SubAgentActivityTracker.membersFor("s6").first()
+        assertEquals("思考中", m.phase)
+        assertEquals(1, m.steps.count { it.kind == "thinking" })
+        assertEquals("先看调用栈", m.steps.first { it.kind == "thinking" }.body)
+        val tool = m.steps.first { it.kind == "tool" }
+        assertEquals("success", tool.status)
+        assertEquals("file_read", tool.toolName)
+        assertTrue(tool.body.contains("Foo"))
+        SubAgentActivityTracker.clearSession("s6")
+    }
 }

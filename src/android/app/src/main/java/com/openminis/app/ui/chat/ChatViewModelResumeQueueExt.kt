@@ -131,6 +131,8 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
                     SessionConcurrencyManager.releaseSlot(activeSessionId)
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
                 }
+            } catch (e: com.openminis.app.service.SlotQueueTimeout) {
+                setInlineError(e.message ?: "会话排队超时，名额已释放")
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
             }

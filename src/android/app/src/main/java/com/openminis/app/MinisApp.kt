@@ -395,6 +395,15 @@ class MinisApp : Application(), ImageLoaderFactory {
         // so a user trapped opening a session that hangs the UI gets
         // unstuck on the next launch.
         com.openminis.app.diagnostics.HangDetector.start(this)
+        com.openminis.app.diagnostics.HangDetector.hasLiveWorkload = {
+            com.openminis.app.sandbox.SandboxWorkload.hasLiveWork()
+        }
+        com.openminis.app.diagnostics.HangDetector.onCountedHang = { _, _ -> }
+        com.openminis.app.sandbox.SandboxWorkload.attach(this)
+        com.openminis.app.sandbox.kernel.remediation.RemediationLoop.start(filesDir) { reason ->
+            com.openminis.app.sandbox.SandboxWorkload.stopUnprotected(reason)
+            com.openminis.app.sandbox.ExecutionCoordinator.stopCurrentCommand()
+        }
 
         // [T-android-safemode-lateinit-crash-147] Structural backstop for the
         // whole repository block.
@@ -1051,6 +1060,9 @@ class MinisApp : Application(), ImageLoaderFactory {
         runCatching { com.openminis.app.ui.markdown.KaTeXRendererCache.evictAll() }
             .onFailure { Log.w("MinisApp", "KaTeXRendererCache.evictAll failed: ${it.message}") }
 
+        if (level == TRIM_MEMORY_RUNNING_CRITICAL || level >= TRIM_MEMORY_COMPLETE) {
+            com.openminis.app.sandbox.SandboxWorkload.stopUnprotected("trim-memory level=$level")
+        }
         if (level >= TRIM_MEMORY_COMPLETE) {
             Log.i("MinisApp", "onTrimMemory(level=$level): tearing down the offscreen KaTeX WebView")
             runCatching { com.openminis.app.ui.chat.KatexWebViewPool.releaseWebView() }

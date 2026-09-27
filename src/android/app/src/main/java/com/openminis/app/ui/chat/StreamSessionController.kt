@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.sandbox.kernel.UIBus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -146,6 +147,22 @@ internal class StreamSessionController(
                 unflushed >= newlineFlushMinChars
 
             fun publish(text: String, blocks: List<AssistantBlock>, awaiting: Boolean) {
+                val at = System.currentTimeMillis()
+                if (!UIBus.admit(at, criticalEvent = false)) {
+                    st.pendingContent = text
+                    st.pendingBlocks = blocks
+                    st.pendingAwaiting = awaiting
+                    val wait = UIBus.waitMs(at, criticalEvent = false).coerceAtLeast(16L)
+                    st.trailingJob?.cancel()
+                    st.trailingJob = scope.launch {
+                        delay(wait)
+                        val pc = st.pendingContent ?: return@launch
+                        publish(pc, st.pendingBlocks, st.pendingAwaiting)
+                        st.pendingContent = null
+                        st.trailingJob = null
+                    }
+                    return
+                }
                 streamingById.value = streamingById.value + (
                     id to StreamingDelta(
                         content = text,

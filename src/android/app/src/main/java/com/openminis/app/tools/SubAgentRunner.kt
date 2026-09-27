@@ -19,6 +19,25 @@ object SubAgentRunner {
     /** Absolute safety ceiling so a runaway loop cannot burn tokens forever. */
     const val ABSOLUTE_MAX_TURNS = 200
 
+    /**
+     * Live rows for the detail page. The parent card still uses [onStep];
+     * this stream is what makes thinking, a tool call, and execution distinct.
+     */
+    sealed class UiEvent {
+        data class Phase(val label: String, val tool: String = "") : UiEvent()
+        data class Thinking(val stepId: String, val delta: String) : UiEvent()
+        data class Text(val stepId: String, val delta: String) : UiEvent()
+        data class ToolStart(val id: String, val name: String) : UiEvent()
+        data class ToolArgs(val id: String, val name: String, val args: String) : UiEvent()
+        data class ToolRunning(val id: String, val name: String, val args: String) : UiEvent()
+        data class ToolDone(
+            val id: String,
+            val name: String,
+            val success: Boolean,
+            val output: String,
+        ) : UiEvent()
+    }
+
     /** Fraction of budget consumed at which a <budget_warning> is injected. */
     private const val WARN_FRACTION = 0.80
 
@@ -38,6 +57,7 @@ object SubAgentRunner {
         maxTokens: Int,
         executeTool: suspend (name: String, argsJson: String) -> ToolExecutionResult,
         onStep: suspend (turn: Int, toolName: String) -> Unit = { _, _ -> },
+        onUi: suspend (UiEvent) -> Unit = {},
         kind: String = SubAgentKind.WORKER,
         writePaths: List<String> = emptyList(),
         maxTurns: Int = ABSOLUTE_MAX_TURNS,
@@ -63,6 +83,10 @@ object SubAgentRunner {
             while (turn < turns) {
                 turn++
                 runCatching { onStep(turn, "") }
+                runCatching { onUi(UiEvent.Phase("思考中")) }
+                var announcedSpeak = false
+                var textSeg = 0
+                var thinkSeg = 0
                 // Compact accumulated history before it can blow the context
                 // window; the freshest tool results stay verbatim.
                 val sendHistory = SubAgentHistoryCompactor.compact(history)
@@ -77,9 +101,31 @@ object SubAgentRunner {
                     thinkingLevel = ThinkingLevel.OFF,
                 ).collect { chunk ->
                     when (chunk) {
-                        is LLMStreamChunk.Text -> textSb.append(chunk.text)
-                        is LLMStreamChunk.ToolCallComplete ->
+                        is LLMStreamChunk.Text -> {
+                            textSb.append(chunk.text)
+                            if (!announcedSpeak) {
+                                announcedSpeak = true
+                                runCatching { onUi(UiEvent.Phase("回复中")) }
+                            }
+                            runCatching { onUi(UiEvent.Text("t$turn-text-$textSeg", chunk.text)) }
+                        }
+                        is LLMStreamChunk.ThinkingDelta -> {
+                            runCatching { onUi(UiEvent.Phase("思考中")) }
+                            runCatching { onUi(UiEvent.Thinking("t$turn-think-$thinkSeg", chunk.text)) }
+                        }
+                        is LLMStreamChunk.ToolUseStart -> {
+                            textSeg++
+                            thinkSeg++
+                            announcedSpeak = false
+                            runCatching { onUi(UiEvent.Phase("调用工具", chunk.name)) }
+                            runCatching { onUi(UiEvent.ToolStart(chunk.id, chunk.name)) }
+                        }
+                        is LLMStreamChunk.ToolInputDelta ->
+                            runCatching { onUi(UiEvent.ToolArgs(chunk.id, "", chunk.accumulated)) }
+                        is LLMStreamChunk.ToolCallComplete -> {
                             toolCalls.add(Triple(chunk.id, chunk.name, chunk.args))
+                            runCatching { onUi(UiEvent.ToolArgs(chunk.id, chunk.name, chunk.args.toString())) }
+                        }
                         else -> Unit
                     }
                 }
@@ -112,6 +158,9 @@ object SubAgentRunner {
                 for ((id, name, args) in toolCalls) {
                     if (SubAgentKind.isSpawnTool(name) || SubAgentKind.blocks(kind, name)) {
                         runCatching { onStep(turn, "$name · blocked") }
+                        runCatching {
+                            onUi(UiEvent.ToolDone(id, name, false, "子代理不能再派生子代理，也不能使用被禁止的工具。"))
+                        }
                         timeline.append("- turn $turn: $name (blocked)\n")
                         resultParts.add(
                             AgentContentPart.ToolResult(
@@ -129,6 +178,7 @@ object SubAgentRunner {
                             runCatching { org.json.JSONObject(argsJson).optString("command") }.getOrDefault(""),
                         )
                         if (denied != null) {
+                            runCatching { onUi(UiEvent.ToolDone(id, name, false, denied)) }
                             timeline.append("- turn $turn: $name (read-only denied)\n")
                             resultParts.add(
                                 AgentContentPart.ToolResult(id = id, name = name, content = denied, isError = true),
@@ -143,6 +193,7 @@ object SubAgentRunner {
                             if (preview.isNotBlank()) append(" · ").append(preview)
                         })
                     }
+                    runCatching { onUi(UiEvent.ToolRunning(id, name, argsJson)) }
                     val result = try {
                         executeTool(name, argsJson)
                     } catch (e: CancellationException) {
@@ -150,6 +201,7 @@ object SubAgentRunner {
                     } catch (e: Exception) {
                         ToolExecutionResult("Error: ${e.message ?: e.javaClass.simpleName}", false)
                     }
+                    runCatching { onUi(UiEvent.ToolDone(id, name, result.success, result.output)) }
                     runCatching {
                         onStep(turn, buildString {
                             append(if (result.success) "ok" else "fail")

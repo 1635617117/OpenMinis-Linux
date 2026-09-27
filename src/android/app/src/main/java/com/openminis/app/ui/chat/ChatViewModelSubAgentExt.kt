@@ -30,6 +30,26 @@ import kotlin.random.Random
 /** Per-retry backoff (seconds). Index 0 = wait before attempt 2, etc. */
 private val SUBAGENT_BACKOFF_S = intArrayOf(2, 5)
 
+private suspend fun publishSubAgentUi(trackerId: String, event: com.openminis.app.tools.SubAgentRunner.UiEvent) {
+    val tracker = com.openminis.app.service.SubAgentActivityTracker
+    when (event) {
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.Phase ->
+            tracker.setPhase(trackerId, event.label, event.tool)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.Thinking ->
+            tracker.appendStream(trackerId, event.stepId, "thinking", event.delta)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.Text ->
+            tracker.appendStream(trackerId, event.stepId, "text", event.delta)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.ToolStart ->
+            tracker.beginTool(trackerId, event.id, event.name)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.ToolArgs ->
+            tracker.updateToolArgs(trackerId, event.id, event.name, event.args)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.ToolRunning ->
+            tracker.markToolRunning(trackerId, event.id, event.name, event.args)
+        is com.openminis.app.tools.SubAgentRunner.UiEvent.ToolDone ->
+            tracker.finishTool(trackerId, event.id, event.name, event.success, event.output)
+    }
+}
+
 internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): String {
         val assistantId = java.util.UUID.randomUUID().toString()
         withContext(Dispatchers.Main) {
@@ -137,7 +157,7 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
                 ) else it
             }
         }
-        return result.markdown
+        return result.contract.ifBlank { result.markdown }
     }
 
 internal suspend fun ChatViewModel.publishRunSubagentLog(
@@ -555,6 +575,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                         }
                     },
                     onStep = { turn, toolName -> onStep(turn, toolName) },
+                    onUi = { event -> publishSubAgentUi(trackerId, event) },
                     kind = kind,
                     writePaths = writePaths,
                     maxTurns = maxTurns,

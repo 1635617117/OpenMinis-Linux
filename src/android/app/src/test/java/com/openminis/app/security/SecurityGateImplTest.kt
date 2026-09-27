@@ -64,6 +64,22 @@ class SecurityGateImplTest {
     }
 
     @Test
+    fun yoloDoesNotAutoRunHostSuOrBroadFind() {
+        val su = gate.decide(
+            gate.classify("shell_execute", """{"command":"su -c id"}"""),
+            PermissionMode.ALLOW_ALL,
+        )
+        assertTrue(su is Decision.NeedConfirm)
+        assertTrue((su as Decision.NeedConfirm).mustPrompt)
+        val find = gate.decide(
+            gate.classify("shell_execute", """{"command":"find /data -name '*.db'"}"""),
+            PermissionMode.ALLOW_ALL,
+        )
+        assertTrue(find is Decision.Denied)
+        assertTrue((find as Decision.Denied).hard)
+    }
+
+    @Test
     fun denyRuleBeatsAllow() {
         gate.setPermissionRules(
             listOf(

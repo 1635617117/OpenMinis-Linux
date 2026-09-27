@@ -775,6 +775,8 @@ object PRootKernel {
         // install fails with "Permission denied". Symlinks are functionally
         // equivalent for the apk consumer.
         cmd.add("--link2symlink")
+        // One-shot proot must reap the guest when the host process is killed.
+        cmd.add("--kill-on-exit")
 
         // Set rootfs
         cmd.add("-r")

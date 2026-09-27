@@ -8,35 +8,31 @@ class PlanDiscussionLiveMarkdownTest {
     @Test
     fun liveMarkdownIncludesStatusTaskAndBoard() {
         val md = PlanDiscussionOrchestrator.liveMarkdown(
-            status = "第 1/3 轮",
+            status = "架构师：方案",
             userText = "fix the storage scanner hang",
-            board = "User request:\nfix the storage scanner hang\n",
+            board = "用户请求:\nfix the storage scanner hang\n",
         )
         assertTrue(md.contains("计划讨论（进行中）"))
-        assertTrue(md.contains("**状态：** 第 1/3 轮"))
+        assertTrue(md.contains("**状态：** 架构师：方案"))
         assertTrue(md.contains("fix the storage scanner hang"))
-        assertTrue(md.contains("User request:"))
+        assertTrue(md.contains("用户请求:"))
     }
 
     @Test
-    fun discussionMarkdownKeepsFullBoard() {
+    fun discussionMarkdownKeepsContractAndBoard() {
+        val contract = "【已定】\n做 B"
         val board = """
-User request:
+用户请求:
 fix hang
 
-### Proposal (main)
-try A
-
-### Round 1 · critic (skeptic)
-refute A
-
-### Synthesis (main)
-do B
+### 方案（架构师）
+做 B
 """.trimIndent()
-        val md = PlanDiscussionOrchestrator.discussionMarkdown(board)
-        assertTrue(md.contains("计划讨论（主会话 × 子 Agent）"))
-        assertTrue(md.contains("### Round 1 · critic (skeptic)"))
-        assertTrue(md.contains("### Synthesis (main)"))
-        assertTrue(md.contains("do B"))
+        val md = PlanDiscussionOrchestrator.discussionMarkdown(board + "\n" + contract)
+        assertTrue(md.contains("计划讨论（角色图）"))
+        assertTrue(md.contains("### 执行契约"))
+        assertTrue(md.contains("### Synthesis"))
+        assertTrue(md.contains("做 B"))
+        assertTrue(md.contains("### 方案（架构师）"))
     }
 }

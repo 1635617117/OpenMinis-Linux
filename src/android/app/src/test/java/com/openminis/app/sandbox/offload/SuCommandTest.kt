@@ -1,6 +1,7 @@
 package com.openminis.app.sandbox.offload
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -42,6 +43,15 @@ class SuCommandTest {
         assertEquals(SuCommand.Kind.EXEC, p.kind)
         assertEquals("id", p.command)
         assertEquals(15_000L, p.timeoutMs)
+    }
+
+    @Test
+    fun timeoutAboveTwoMinutesIsClamped() {
+        val p = SuCommand.parse(listOf("su", "--timeout", "999999", "-c", "id"))
+        assertEquals(120_000L, p.timeoutMs)
+        val confined = SuCommand.confineHost("id")
+        assertFalse(confined.contains("|| nice"))
+        assertEquals(1, confined.split("id").size - 1)
     }
 
     @Test

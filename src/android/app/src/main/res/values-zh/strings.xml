@@ -184,7 +184,7 @@
     <string name="settings_plan_discussion_off">关闭</string>
     <string name="settings_plan_discussion_auto">自动（跳过闲聊）</string>
     <string name="settings_plan_discussion_always">每条消息</string>
-    <string name="settings_plan_discussion_footer">自动模式只对任务型消息开启共享白板（主会话与队友）。每一轮发言都会写入聊天。关闭/每条消息会覆盖该判断。此前已开启的会话会迁移为「每条消息」。</string>
+    <string name="settings_plan_discussion_footer">自动模式只对任务型消息开会。角色图：产品简报、架构方案、工程师和测试并行审查，有异议才修订一次，秘书写执行契约。讨论只读。结束后主会话按契约执行。关闭和每条消息会覆盖自动判断。</string>
     <string name="settings_memory">记忆</string>
     <string name="settings_memory_subtitle">跨会话保留的持久化知识</string>
     <string name="settings_mcp">MCP 集成</string>
@@ -1422,7 +1422,7 @@
     <string name="chat_menu_fast_mode">启用高速模式</string>
     <string name="chat_menu_auto_compact">自动压缩</string>
     <string name="chat_menu_plan_discussion">计划讨论</string>
-    <string name="plan_discussion_banner">计划讨论已开启（设置 → 多智能体）。任务型消息会先在共享白板上讨论，每一轮都写入聊天。</string>
+    <string name="plan_discussion_banner">计划讨论已开启（设置 → 多智能体）。任务型消息先走角色图：简报、方案、并行审查、最多修订一次，再按执行契约动手。</string>
     <string name="settings_task_notifications_permission">Android 13+ 需要通知权限。若开关已开但仍无通知，请允许 Minis Ultra 发送通知。</string>
     <string name="settings_task_notifications_granted">已授予通知权限。</string>
     <string name="settings_task_notifications_denied">通知权限被拒绝 — 未授权前不会弹出任务提醒。</string>
