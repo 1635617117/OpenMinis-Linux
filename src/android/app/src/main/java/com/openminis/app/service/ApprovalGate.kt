@@ -19,8 +19,10 @@ object ApprovalGate {
     private val pending = ConcurrentHashMap<String, MutableStateFlow<Boolean?>>()
     private val approvalDetails = ConcurrentHashMap<String, ApprovalRequest>()
 
-    // Session-scoped allow list. "本次会话全部允许" only auto-approves the
-    // same tool name for the rest of this session. Fatal confirms still prompt.
+    // Session-scoped allow list. "本次会话全部允许" now means ALL tools for
+    // the rest of this session (user expectation: one tap, no more dialogs —
+    // observed complaint: shell approved-all, file_write still prompted).
+    // Fatal confirms still prompt via mustPrompt.
     @Volatile private var sessionAllowAll = false
     private val sessionAllowedTools = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 

@@ -12,6 +12,8 @@ import com.openminis.app.accessibility.AccessibilityQueryGuard
 import com.openminis.app.accessibility.AccessibilityRecoveryManager
 import com.openminis.app.accessibility.MinisAccessibilityService
 import com.openminis.app.accessibility.NodeRegistry
+import com.openminis.app.accessibility.ObservationStore
+import com.openminis.app.accessibility.PublishedObservation
 import com.openminis.app.accessibility.RestrictedSettingsManager
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.NativeOffloadHandler
@@ -29,6 +31,20 @@ import org.json.JSONObject
  * matches the rest of `android-*` so `--quiet` strips it cleanly.
  */
 class AccessibilityOffloadHandler(private val context: Context) : NativeOffloadHandler {
+
+    /** Observation contract state (Eta's observation_id discipline, rewritten). */
+    private val observationStore = ObservationStore()
+
+    /**
+     * Whether the observation contract ENFORCES. Default off: node actions
+     * work without --observation, exactly as before the contract existed.
+     * The model opts a dispatch into strictness by passing
+     * `--strict-observation`; a session toggle can also flip this. With
+     * enforcement off the store still tracks the latest observation (ids
+     * stay meaningful), but a missing/stale reference never blocks.
+     */
+    @Volatile
+    private var observationEnforced = false
 
     companion object {
         private const val TAG = "A11yOffload"
@@ -70,9 +86,9 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
                                <externalFilesDir>/a11y_screenshots/<ts>.png
                                and the path is returned.
 """
-        private const val TAP_HELP = "tap node <id> | tap xy <x> <y> | tap text <s> | tap id <res>\n"
-        private const val INPUT_HELP = "input text <s> [--node id] [--clear|--append] | input clear | input key BACK|HOME|RECENTS|NOTIFICATIONS\n"
-        private const val SCROLL_HELP = "scroll node <id> [--direction up|down|left|right] [--times n] | scroll xy <x> <y> | scroll to-text <s>\n"
+        private const val TAP_HELP = "tap node <id> --observation <obsId> | tap xy <x> <y> | tap text <s> | tap id <res>\nNode actions require --observation from the same `ui dump`/`ui find`.\n"
+        private const val INPUT_HELP = "input text <s> [--node id --observation obsId] [--clear|--append] | input clear | input key BACK|HOME|RECENTS|NOTIFICATIONS\n"
+        private const val SCROLL_HELP = "scroll node <id> --observation <obsId> [--direction up|down|left|right] [--times n] | scroll xy <x> <y> | scroll to-text <s>\nNode scrolls require --observation from the same `ui dump`/`ui find`.\n"
         private const val GESTURE_HELP = "gesture swipe <x1> <y1> <x2> <y2> | gesture pinch <cx> <cy> [--scale f] | gesture path \"x,y:x,y\"\n"
         private const val WAIT_HELP = "wait appear | disappear | stable | activity\n"
         private const val EVENT_HELP = "event watch [--type T] [--package P] [--duration ms] | event once [--type T] [--timeout ms]\n"
@@ -256,10 +272,15 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         val compact = args.hasFlag("compact")
         val visibleOnly = args.getBool("visible-only") ?: true
         val arr = JSONArray()
+        walkCollectedIds.clear()
         for (root in svc.rootNodes()) {
             walkNode(svc.nodeRegistry, root, 0, maxDepth, visibleOnly, compact, arr)
         }
-        return ok(args, JSONObject().put("count", arr.length()).put("nodes", arr))
+        val obsId = publishObservation(svc, walkCollectedIds.toSet())
+        return ok(args, JSONObject()
+            .put("observation_id", obsId)
+            .put("count", arr.length())
+            .put("nodes", arr))
     }
 
     private fun walkNode(
@@ -273,12 +294,16 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         }
     }
 
+    /** Node ids allocated during the current dump/find walk (observation contract). */
+    private val walkCollectedIds = LinkedHashSet<String>()
+
     private fun nodeToJson(registry: NodeRegistry, n: AccessibilityNodeInfo, depth: Int, compact: Boolean): JSONObject {
         val id = registry.put(n)
         val rect = Rect(); n.getBoundsInScreen(rect)
         val text = n.text?.toString()
         val desc = n.contentDescription?.toString()
         val obj = JSONObject().put("nodeId", id)
+        walkCollectedIds.add(id)
         if (compact) {
             if (!text.isNullOrEmpty()) obj.put("text", text)
             if (!desc.isNullOrEmpty()) obj.put("contentDesc", desc)
@@ -322,12 +347,45 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         }
         val index = args.getInt("index")
         val arr = JSONArray()
+        walkCollectedIds.clear()
         if (index != null) {
             matches.getOrNull(index)?.let { arr.put(nodeToJson(svc.nodeRegistry, it, 0, compact = false)) }
         } else {
             for (m in matches) arr.put(nodeToJson(svc.nodeRegistry, m, 0, compact = false))
         }
-        return ok(args, JSONObject().put("count", arr.length()).put("data", arr))
+        val obsId = publishObservation(svc, walkCollectedIds.toSet())
+        return ok(args, JSONObject()
+            .put("observation_id", obsId)
+            .put("count", arr.length())
+            .put("data", arr))
+    }
+
+    /**
+     * Publish a fresh observation covering [nodeIds] (Eta's observation_id
+     * discipline, rewritten). Each dump/find gets a new id; node-mutating
+     * actions must cite it until the next observation supersedes it.
+     */
+    private fun publishObservation(svc: MinisAccessibilityService, nodeIds: Set<String>): String {
+        val obsId = "obs-${java.lang.Long.toString(System.currentTimeMillis(), 36)}-${(0..0xFFFF).random().toString(16).padStart(4, '0')}"
+        val (pkg, _) = svc.foregroundPackage()
+        observationStore.publish(PublishedObservation(obsId, System.currentTimeMillis(), pkg, nodeIds))
+        return obsId
+    }
+
+    /**
+     * Gate for node-mutating actions: resolve `--observation <id>` from the
+     * args and validate it against the published observation. Returns the
+     * error result to propagate, or null when the reference is acceptable
+     * (or enforcement is off — the default — in which case it never blocks).
+     */
+    private fun requireObservation(args: OffloadArgs, nodeId: String?): NativeOffloadResult? {
+        if (args.hasFlag("strict-observation")) observationEnforced = true
+        if (!observationEnforced) return null
+        val obsArg = args.get("observation") ?: args.get("obs")
+        observationStore.checkNodeAction(obsArg, nodeId)?.let { (code, message) ->
+            return err(args, code, message)
+        }
+        return null
     }
 
     private fun findMatching(
@@ -473,6 +531,7 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         val svc = svcOrThrow()
         val nodeId = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL tap node: missing <nodeId>\n")
+        requireObservation(args, nodeId)?.let { return it }
         val n = svc.nodeRegistry.get(nodeId)
             ?: return err(args, "NODE_NOT_FOUND", "no live node with id=$nodeId")
         val action = if (args.hasFlag("long")) AccessibilityNodeInfo.ACTION_LONG_CLICK
@@ -585,7 +644,9 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         val text = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL input text: missing <text>\n")
         val node = resolveTargetEditable(svc, args)
-            ?: return err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
+            ?: return observationRejection?.also { observationRejection = null }
+                ?: err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
+        observationRejection = null
         val finalText = when {
             args.hasFlag("clear")  -> text
             args.hasFlag("append") -> (node.text?.toString() ?: "") + text
@@ -599,13 +660,13 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
     private fun inputClear(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
         val node = resolveTargetEditable(svc, args)
-            ?: return err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
+            ?: return observationRejection?.also { observationRejection = null }
+                ?: err(args, "NODE_NOT_FOUND", "no editable focus and no --node specified")
+        observationRejection = null
         return if (svc.setNodeText(node, ""))
             ok(args, JSONObject().put("action", "clear"))
         else err(args, "ACTION_FAILED", "ACTION_SET_TEXT('') failed")
-    }
-
-    private fun inputKey(args: OffloadArgs): NativeOffloadResult {
+    }    private fun inputKey(args: OffloadArgs): NativeOffloadResult {
         val svc = svcOrThrow()
         val keyName = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL input key: missing <keycode>\n")
@@ -619,8 +680,21 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         }
     }
 
+    /**
+     * Resolve the editable target. When the observation contract rejects the
+     * reference, the rejection is written to [observationRejection] so the
+     * caller can propagate the REAL error instead of masking it as
+     * NODE_NOT_FOUND — a stale-observation refusal must tell the model to
+     * re-observe, not to hunt for a node that exists.
+     */
+    private var observationRejection: NativeOffloadResult? = null
+
     private fun resolveTargetEditable(svc: MinisAccessibilityService, args: OffloadArgs): AccessibilityNodeInfo? {
-        args.get("node")?.let { id -> return svc.nodeRegistry.get(id) }
+        args.get("node")?.let { id ->
+            observationRejection = requireObservation(args, id)
+            if (observationRejection != null) return null
+            return svc.nodeRegistry.get(id)
+        }
         for (root in svc.rootNodes()) {
             val focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             if (focused != null) return focused
@@ -644,6 +718,7 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         val svc = svcOrThrow()
         val nodeId = args.positional.getOrNull(2)
             ?: return NativeOffloadResult(2, "$TOOL scroll node: missing <nodeId>\n")
+        requireObservation(args, nodeId)?.let { return it }
         val n = svc.nodeRegistry.get(nodeId)
             ?: return err(args, "NODE_NOT_FOUND", "no live node with id=$nodeId")
         val direction = args.get("direction") ?: "down"
@@ -655,6 +730,9 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
         }
         var done = 0
         repeat(times) { if (n.performAction(action)) done++ }
+        // Scroll evidence: wait briefly for a content-change event so the next
+        // observation reflects the new viewport (Eta's scroll-evidence lesson).
+        if (done > 0) awaitA11yEvent(svc, 400L)
         return ok(args, JSONObject().put("scrolled", done).put("direction", direction))
     }
 
@@ -1014,10 +1092,14 @@ First-run: enable "Minis Ultra" under Settings → Accessibility, then `service 
      * Wait until the accessibility service delivers an event, or [timeoutMs]
      * elapses. Replaces Thread.sleep polling so the offload worker is not
      * pinned for the whole wait.
+     *
+     * Returns true when either an event arrived or the timeout elapsed cleanly;
+     * false only on interrupt (the caller distinguishes evidence via its own
+     * post-condition, e.g. scroll evidence re-checks content).
      */
     private fun awaitA11yEvent(svc: MinisAccessibilityService, timeoutMs: Long): Boolean {
-        if (timeoutMs <= 0L) return !Thread.currentThread().isInterrupted
         if (Thread.currentThread().isInterrupted) return false
+        if (timeoutMs <= 0L) return true
         val lock = Object()
         val listener: (MinisAccessibilityService.RecordedEvent) -> Unit = {
             synchronized(lock) { lock.notifyAll() }

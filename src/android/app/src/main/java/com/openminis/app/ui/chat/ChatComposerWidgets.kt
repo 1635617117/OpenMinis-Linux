@@ -137,11 +137,18 @@ internal fun AttachmentChip(
                         modifier = Modifier.size(20.dp),
                     )
                     Spacer(modifier = Modifier.height(2.dp))
+                    // [T-android-attachment-chip-filename] Long names used to
+                    // wrap at 2 lines in a 64dp chip at 9sp — "awake-error-
+                    // ui.xml" rendered as broken fragments ("awake-orra
+                    // r-u.xml"). Single line + middle ellipsis keeps the
+                    // extension visible, which is what identifies the file.
                     Text(
                         text = attachment.fileName,
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 9.sp),
                         color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 2,
+                        maxLines = 1,
+                        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                        softWrap = false,
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 4.dp),
                     )
@@ -163,7 +170,7 @@ internal fun AttachmentChip(
         ) {
             Icon(
                 Icons.Default.Close,
-                contentDescription = "Remove",
+                contentDescription = "移除附件",
                 tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                 modifier = Modifier.size(13.dp),
             )
@@ -694,7 +701,7 @@ internal fun FloatingToolStatusBar(
                 ) {
                     Icon(
                         Icons.Default.ChevronLeft,
-                        contentDescription = "Previous",
+                        contentDescription = "上一个",
                         tint = if (currentIndex > 0) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier
@@ -711,10 +718,15 @@ internal fun FloatingToolStatusBar(
                         fontWeight = FontWeight.Medium,
                         fontFamily = FontFamily.Monospace,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        // [T-android-tool-pager-squished] Without a horizontal
+                        // floor the "6/6" counter squeezed to ~12px wide when
+                        // the tool title next to it was long — the pager was
+                        // unreadable and the chevrons collided with the digits.
+                        modifier = Modifier.padding(horizontal = 6.dp),
                     )
                     Icon(
                         Icons.Default.ChevronRight,
-                        contentDescription = "Next",
+                        contentDescription = "下一个",
                         tint = if (currentIndex < toolBlocks.lastIndex) MaterialTheme.colorScheme.onSurface
                                else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
                         modifier = Modifier

@@ -117,6 +117,10 @@ object AgentTools {
                     "integer",
                     "Omit to auto-size: simple ≈ 10, complex 40–60, clamped to Settings → Multi-agent.",
                 ),
+                "token_budget" to AgentToolParam(
+                    "integer",
+                    "OPTIONAL shared token cap for this dispatch (weighted: output=1.0, prefill=0.1). Omit for NO token cap — lanes run to their max_turns. When set, the strictest cap among tasks wins; lanes stop with a partial report when the pool is drained.",
+                ),
                 "role" to AgentToolParam("string", "Catalog role (秘书助理, 产品经理, 架构师, 工程师, 前端设计师, 测试工程师, 侦察兵, 拆解工, 分析员) injects focus / do-not / when-silent / who-to-ask and a tool whitelist. Other strings are labels only."),
                 "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
                 "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
@@ -132,7 +136,7 @@ Prefer ONE spawn_agent call with a tasks[] array. You choose how many tasks the 
 
 kind: explore (read-only recon, shell inspection allowed), plan (read-only design), worker (can write), general-purpose (fallback when the slice does not fit the others). Parallel workers MUST set non-overlapping write_paths, or write_paths=none if they must not write.
 
-Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Omit max_turns to auto-size (simple ≈ 10, complex 40–60). Dependent phases: wait, verify Expected result, then dispatch the next wave. A single-task call may still pass prompt at the top level.""",
+Each task prompt MUST be self-contained with ## Task / ## Expected result / ## Constraints / ## Workflow / ## Collaboration. Omit max_turns to auto-size (simple ≈ 10, complex 40–60). token_budget is optional: omit it for no token cap. Dependent phases: wait, verify Expected result, then dispatch the next wave. A single-task call may still pass prompt at the top level.""",
             parameters = mapOf(
                 "tasks" to AgentToolParam(
                     type = "array",

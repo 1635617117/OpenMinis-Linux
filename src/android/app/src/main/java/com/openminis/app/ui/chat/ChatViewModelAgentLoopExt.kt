@@ -1111,6 +1111,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // Flash ONLY on a genuine model switch — never on a
                     // transparent same-model endpoint retry.
                     if (isRealModelChange) _fallbackTrigger.value++
+                    // [T-android-cross-window-compact] REVERTED by design:
+                    // auto-compacting on a model switch silently dropped
+                    // context the user could still see (reads as data loss).
+                    // The new model's own provider error, the in-loop
+                    // threshold guard, and dynamicMaxTokens() handle the
+                    // smaller window without surprise truncation.
                     // Persist the fallback model so re-entering the session starts from here
                     val groupId = _selectedGroupId.value
                     if (groupId != null && newEntry != null) {

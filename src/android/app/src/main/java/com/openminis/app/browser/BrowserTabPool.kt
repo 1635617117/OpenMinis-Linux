@@ -1176,7 +1176,15 @@ class BrowserTabPool(private val context: Context) {
 
     /**
      * Resolved viewport for new WebViews. Priority (matches iOS
-     * `resolvedViewportSize()`): session override > global custom > UA profile default.
+     * `resolvedViewportSize()`): session override > global custom > UA profile
+     * default.
+     *
+     * [T-android-viewport-tablet] The MOBILE_CHROME default is 412x915 — a
+     * phone-sized page even on a 2560x1600 tablet, so every site served the
+     * mobile layout and the agent read a phone page. Adapt the DEFAULT tier
+     * to the device's real CSS-pixel screen (short edge as width, long edge
+     * as height); explicit overrides are untouched. Desktop profile keeps
+     * its fixed 1280x800.
      */
     fun resolvedViewportSize(): Pair<Int, Int> {
         if (_sessionViewportWidth.value > 0 && _sessionViewportHeight.value > 0) {
@@ -1185,7 +1193,16 @@ class BrowserTabPool(private val context: Context) {
         if (_customViewportWidth.value > 0 && _customViewportHeight.value > 0) {
             return _customViewportWidth.value to _customViewportHeight.value
         }
-        return userAgentProfile.viewportSize
+        if (userAgentProfile == UserAgentProfile.DESKTOP_CHROME) {
+            return userAgentProfile.viewportSize
+        }
+        // MOBILE_CHROME / CUSTOM default: follow the actual screen in CSS px.
+        return runCatching {
+            val dm = context.resources.displayMetrics
+            val w = (dm.widthPixels / dm.density).toInt()
+            val h = (dm.heightPixels / dm.density).toInt()
+            if (w > 0 && h > 0) w to h else userAgentProfile.viewportSize
+        }.getOrDefault(userAgentProfile.viewportSize)
     }
 
     /** True if a session or global custom viewport is active. */

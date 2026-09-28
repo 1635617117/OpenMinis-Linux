@@ -2201,21 +2201,19 @@ fun ChatScreen(
         }
     }
     var sawStreamingThisVisit by remember(sessionId) { mutableStateOf(false) }
+    // [T-android-post-reply-no-autofocus] REVERTED auto-refocus: popping the
+    // keyboard back up after every reply annoyed users ("流结束后键盘自弹")
+    // and, worse, mid-stream the composer's focus was being yanked around
+    // while the user was typing the next message ("input text 进不了输入
+    // 框"). The composer stays enabled and focusable throughout streaming —
+    // the user focuses it when they want to type; we never steal or force
+    // focus on the streaming→idle edge.
     LaunchedEffect(isStreaming, sessionId) {
         if (isStreaming) {
             sawStreamingThisVisit = true
-            return@LaunchedEffect
         }
-        if (!sawStreamingThisVisit) return@LaunchedEffect
-        sawStreamingThisVisit = false
-        if (userScrolledAway) return@LaunchedEffect
-        kotlinx.coroutines.delay(200)
-        if (userScrolledAway) return@LaunchedEffect
-        try {
-            inputFocusRequester.requestFocus()
-        } catch (e: IllegalStateException) {
-            AppLogger.debug(tagScroll, "post-reply focus skipped: ${e.message}")
-        }
+        // No refocus on stream end: the keyboard stays wherever the user
+        // left it. sawStreamingThisVisit is kept for any future consumer.
     }
 
     // Show top-level error in snackbar (only for errors without an assistant message)

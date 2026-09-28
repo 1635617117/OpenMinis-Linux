@@ -48,6 +48,14 @@ internal fun ChatViewModel.loadSession() {
         val config = providerRepository.config.value
         _availableGroups.value = config.modelGroups
 
+        // [T-android-intercept-banner-session-leak] InterceptFeedback is a
+        // process-wide singleton, so a rejection banner from the PREVIOUS
+        // session (e.g. a deep-link "new chat" right after denying a tool)
+        // survived the switch and rendered on top of an empty chat. Gate
+        // banners are session-scoped feedback: clear them on every session
+        // entry so a fresh chat starts visually fresh.
+        com.openminis.app.security.InterceptFeedback.clear()
+
         if (isDraft) {
             applyGateMode(_permissionMode.value)
             // Draft session: just set up provider using default group or first entry

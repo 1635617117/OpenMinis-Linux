@@ -43,8 +43,10 @@ internal fun ChatViewModel.checkContextBeforeSend(): PreSendContextAction {
 
         // Exhausted tiers have compactThreshold = 0 by policy: the window is
         // too small for a summary to pay for itself, so compacting is not
-        // on offer. Keep the existing advisory-and-proceed behaviour rather
-        // than blocking the user out of their own chat.
+        // on offer. Keep the advisory-and-proceed behaviour rather than
+        // blocking the user out of their own chat. (An automatic last-ditch
+        // compact here was tried and reverted: it silently dropped context
+        // the user could still see, which reads as data loss.)
         ContextPolicy.CheckResult.EXHAUSTED -> {
             appendSystemInfo(
                 text = "Context is near the model's limit ($tokens / $window tokens). Start a new chat or /compact to continue reliably.",

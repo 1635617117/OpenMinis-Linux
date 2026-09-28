@@ -128,7 +128,7 @@ internal fun RenderBlock(block: MdBlock) {
                     )
                     Icon(
                         imageVector = if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
-                        contentDescription = if (copied) "Copied" else "Copy code",
+                        contentDescription = if (copied) "已复制" else "复制代码",
                         tint = if (copied) Color(0xFF34C759) else Color.White.copy(alpha = 0.4f),
                         modifier = Modifier
                             .size(16.dp)

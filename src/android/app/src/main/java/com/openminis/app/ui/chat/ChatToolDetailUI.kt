@@ -1105,7 +1105,7 @@ internal fun ToolDetailSheet(
                     ) {
                         Icon(
                             Icons.Default.SkipPrevious,
-                            contentDescription = "Previous",
+                            contentDescription = "上一个",
                             tint = if (currentIdx > 0) ChatColors.primaryText else ChatColors.disabledText,
                             modifier = Modifier.size(22.dp),
                         )
@@ -1151,7 +1151,7 @@ internal fun ToolDetailSheet(
                     ) {
                         Icon(
                             Icons.Default.SkipNext,
-                            contentDescription = "Next",
+                            contentDescription = "下一个",
                             tint = if (currentIdx < toolBlocks.lastIndex) ChatColors.primaryText else ChatColors.disabledText,
                             modifier = Modifier.size(22.dp),
                         )

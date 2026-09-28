@@ -1046,7 +1046,12 @@ class ChatRepository(
             return stripSystemReminders(src)
                 .replace(Regex("[\r\n]+"), " ")      // newlines → space
                 .replace(Regex("#{1,6}\\s"), "")      // headings: ## Title → Title
-                .replace(Regex("\\*{1,3}|_{1,3}"), "")// bold/italic markers
+                // [T-android-preview-underscore-eaten] `_{1,3}` stripped EVERY
+                // underscore, so "Count_1_to_30" previewed as "Count1to30".
+                // Only remove PAIRED emphasis markers wrapping text
+                // (___bold___ / *italic*), never lone underscores inside words.
+                .replace(Regex("\\*{1,3}(?=\\S)(.*?\\S)\\*{1,3}"), "$1") // paired * emphasis
+                .replace(Regex("_{2,3}(?=\\S)(.*?\\S)_{2,3}"), "$1")     // paired __ emphasis
                 .replace(Regex("~~"), "")              // strikethrough
                 .replace(Regex("`{1,3}"), "")          // inline/fenced code markers
                 .replace(Regex("^\\s*[-*+]\\s", RegexOption.MULTILINE), "") // list bullets

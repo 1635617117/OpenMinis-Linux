@@ -13,6 +13,7 @@ import com.openminis.app.tools.AgentTools
 import com.openminis.app.tools.PlanDiscussionOrchestrator
 import com.openminis.app.tools.SubAgentLane
 import com.openminis.app.tools.SubAgentRunner
+import com.openminis.app.tools.SubAgentTokenBudget
 import com.openminis.app.tools.ToolExecutionResult
 import com.openminis.app.tools.SubAgentKind
 import kotlinx.coroutines.CancellationException
@@ -286,6 +287,14 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         val sem = limiter ?: Semaphore(
             MultiAgentSettings.clampConcurrent(multiAgentSettings.maxConcurrent.value),
         )
+        // Shared token pool per dispatch (Codex rollout_budget), OPT-IN only:
+        // when the model passes token_budget the strictest requested cap
+        // governs the whole wave; when it omits the field there is NO budget —
+        // lanes run to their turn budgets. A silent default cap would cut
+        // long-running workers off mid-task with a "partial report", which the
+        // user experiences as lost work.
+        val requestedCap = spawns.mapNotNull { it.tokenBudget }.minOrNull()
+        val sharedBudget = requestedCap?.let { SubAgentTokenBudget(SubAgentTokenBudget.clamp(it)) }
         if (spawns.size == 1) {
             val total = waveSize.coerceAtLeast(1)
             val index = if (total > 1) waveIndex + 1 else 1
@@ -302,6 +311,7 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                             index = index,
                             total = total,
                             cardIndex = null,
+                            tokenBudget = sharedBudget,
                         )
                     }
                 } catch (e: CancellationException) {
@@ -329,6 +339,7 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                                 index = i + 1,
                                 total = spawns.size,
                                 cardIndex = i + 1,
+                                tokenBudget = sharedBudget,
                             )
                         }
                     } catch (e: CancellationException) {
@@ -377,6 +388,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
         cardIndex: Int? = null,
         index: Int,
         total: Int,
+        tokenBudget: SubAgentTokenBudget? = null,
     ): ToolExecutionResult {
         val prompt = spawn.prompt
         val role = spawn.role
@@ -579,6 +591,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     kind = kind,
                     writePaths = writePaths,
                     maxTurns = maxTurns,
+                    tokenBudget = tokenBudget,
                 )
             }
             com.openminis.app.service.SubAgentActivityTracker.appendLog(

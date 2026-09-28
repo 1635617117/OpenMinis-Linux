@@ -1884,11 +1884,14 @@ class ChatViewModel(
      * session-scoped allow-all switch, so later sensitive operations in this
      * conversation execute without asking again. The switch lives in
      * ApprovalGate and resets on session teardown (cleanupAll).
+     *
+     * [T-android-allow-all-means-all] The button says 全部允许, so it now
+     * enables the true all-tools switch — not just the same tool name.
+     * Previously shell got approved-all and file_write still prompted,
+     * which contradicted the label the user tapped.
      */
     fun approveAllForSession(id: String) {
-        val tool = pendingApprovals.value[id]?.toolName
-        if (tool != null) ApprovalGate.allowToolForSession(tool)
-        else ApprovalGate.enableSessionAllowAll()
+        ApprovalGate.enableSessionAllowAll()
         approvePendingTool(id)
     }
 
@@ -2202,8 +2205,17 @@ class ChatViewModel(
     // [T-context-ring] Live context token counter for the session-menu ring.
     val contextUsage = MutableStateFlow(com.openminis.app.data.model.ContextUsage(0L, 0L))
 
-    /** Recompute contextUsage from the latest agent history. Called after appending messages. */
+    /**
+     * Recompute contextUsage for the session-menu ring.
+     *
+     * [T-android-context-ring-zero] The char estimate walks `agentHistory`,
+     * which for a long session is TAIL-PAGED (loadSessionTail) — a re-entered
+     * session showed ~0 tokens even while the provider reported 23939/24688.
+     * Prefer the REAL provider-reported context size from the last usage
+     * chunk; fall back to the char estimate only before the first API call.
+     */
     fun refreshContextUsage() {
+        val reported = _lastTurnContextTokens.value
         var usedChars = 0L
         for (msg in agentHistory) {
             for (part in msg.contentParts) {
@@ -2218,8 +2230,9 @@ class ChatViewModel(
             }
         }
         val estTokens = (usedChars / 3.5).toLong()
+        val used = if (reported > 0) reported.toLong() else estTokens
         val window = currentModelContextWindow?.toLong() ?: 0L
-        contextUsage.value = com.openminis.app.data.model.ContextUsage(estTokens, window)
+        contextUsage.value = com.openminis.app.data.model.ContextUsage(used, window)
     }
 
     // ── Session token usage (iOS parity: TokenUsageSheet data) ─────────────
@@ -2425,8 +2438,19 @@ class ChatViewModel(
         if (first != '/' && first != '／') return false
         val name = trimmed.drop(1).lowercase()
         val cmd = availableSlashCommands.firstOrNull { it.title.lowercase() == name }
-            ?: return false
-        executeSlashCommand(cmd)
+        if (cmd != null) {
+            executeSlashCommand(cmd)
+            return true
+        }
+        // [T-android-slash-literal-not-chat] A bare "/" or an unmatched
+        // "/xyz" is a slash-panel interaction, not a chat message. Sending
+        // it to the model made the assistant answer the literal string.
+        // Swallow it with a local notice instead; the composer's slash
+        // panel stays open so the user can pick a real command.
+        appendSystemInfo(
+            text = "未知命令: $trimmed（可用命令见 / 面板）",
+            iconKind = "info",
+        )
         return true
     }
 

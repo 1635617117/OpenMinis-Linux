@@ -294,6 +294,28 @@ class SecurityGateImpl : SecurityGate {
             }
         }
 
+        // Shell prefix rule layer (Codex execpolicy semantics, rewritten):
+        // must come AFTER every hard refusal above so a rule cannot mask one,
+        // and BEFORE any confirmable path below so `forbidden` is not
+        // laundered through an approval dialog and `prompt` is not silently
+        // executed under YOYO.
+        if (cmd.toolName in SHELL_TOOLS) {
+            val command = extractCommand(cmd)
+            PrefixRulePolicy.evaluate(permissionRules, cmd.toolName, command)?.let { (verdict, pattern) ->
+                return when (verdict) {
+                    PrefixRulePolicy.Verdict.FORBIDDEN -> Decision.Denied(
+                        "规则禁止 (forbidden): $pattern",
+                        hard = true,
+                    )
+                    PrefixRulePolicy.Verdict.PROMPT -> Decision.NeedConfirm(
+                        "规则要求确认 (prompt): $pattern",
+                        preview(cmd),
+                        mustPrompt = true,
+                    )
+                }
+            }
+        }
+
         // [6] YOYO: everything except fatal-confirm is auto-run.
         if (mode == PermissionMode.ALLOW_ALL) {
             return Decision.Allow("YOYO：自动执行")
@@ -342,7 +364,7 @@ class SecurityGateImpl : SecurityGate {
         val sb = StringBuilder()
         sb.append("工具: ${cmd.toolName}\n")
         sb.append("能力: ${cmd.capability.label}\n")
-        sb.append("可逆: ${cmd.reversibility}\n")
+        sb.append("可逆: ${cmd.reversibility.label}\n")
         sb.append("说明: ${cmd.why}\n")
         if (command.isNotBlank()) sb.append("目标: $command\n")
         if (cmd.toolName == "env_exec") {
@@ -501,7 +523,7 @@ class SecurityGateImpl : SecurityGate {
             RiskLevel.FATAL_BANNED, RiskLevel.DANGEROUS -> Reversibility.IRREVERSIBLE
             RiskLevel.NORMAL -> Reversibility.REVERSIBLE
         }
-        return GateCommand(toolName, toolArgs, inferCapability(command), rev, "风险等级: $risk, 命令: '$command'")
+        return GateCommand(toolName, toolArgs, inferCapability(command), rev, "风险等级: ${risk.label}, 命令: '$command'")
     }
 
     private fun inferCapability(command: String): Capability = when {

@@ -15,6 +15,7 @@ internal data class ChatSubAgentSpawn(
     val kind: String,
     val writePaths: List<String>,
     val maxTurns: Int,
+    val tokenBudget: Long? = null,
 )
 
 internal fun parseSubAgentSpawn(argsJson: String, defaultCap: Int): ChatSubAgentSpawn? {
@@ -70,6 +71,7 @@ private fun parseTaskObject(args: JSONObject, defaultCap: Int): ChatSubAgentSpaw
     if (prompt.isEmpty()) return null
     val kind = SubAgentKind.normalize(args.optString("kind", ""))
     val requested = if (args.has("max_turns")) args.optInt("max_turns") else null
+    val budgetRaw = if (args.has("token_budget")) args.optLong("token_budget", -1L) else null
     return ChatSubAgentSpawn(
         prompt = prompt,
         role = args.optString("role", "").trim().ifEmpty { null },
@@ -79,5 +81,6 @@ private fun parseTaskObject(args: JSONObject, defaultCap: Int): ChatSubAgentSpaw
         kind = kind,
         writePaths = parseWritePathsArg(args),
         maxTurns = SubAgentKind.clampTurns(kind, requested, defaultCap, prompt),
+        tokenBudget = budgetRaw?.takeIf { it > 0 },
     )
 }

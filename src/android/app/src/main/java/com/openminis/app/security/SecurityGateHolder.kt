@@ -138,9 +138,20 @@ object SecurityGateHolder {
                 val approved = ApprovalGate.waitFor(id)
                 ApprovalNotifier.cancelApproval(context, id)
                 if (!approved) {
-                    InterceptFeedback.publishRejected(canonical, "User rejected or timed out")
+                    // [T-android-rejected-tool-retry-loop] A bare "rejected"
+                    // string reads to the model like any transient failure,
+                    // so it re-issued the SAME call on the next turn (observed:
+                    // deny → immediate `Retry shell echo after 20s`). Make the
+                    // verdict unambiguous and forbid retrying the identical
+                    // call; the model may still continue the task differently.
+                    val verdict = "User REJECTED the approval for $canonical. " +
+                        "This is a deliberate refusal, NOT a failure. Do NOT call " +
+                        "$canonical with the same or equivalent arguments again. " +
+                        "Continue the task without this tool if possible, or state " +
+                        "what you cannot do without it."
+                    InterceptFeedback.publishRejected(canonical, "用户已拒绝该工具调用")
                     ToolExecutionResult(
-                        "User rejected or timed out $canonical",
+                        verdict,
                         false,
                         toolTitle = canonical,
                     )

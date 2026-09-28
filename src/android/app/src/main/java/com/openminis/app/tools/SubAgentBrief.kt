@@ -40,6 +40,7 @@ Independent slices: one spawn_agent call with a tasks[] array. Dependent phases:
 You are a sub-agent (kind=$kind), not the session coordinator. You cannot see the parent chat. Complete ONLY this slice and return a report.
 - Do not call spawn_agent or run_subagent. Nested dispatch is blocked.
 - Do not rewrite unrelated files or expand the scope.
+- Do not delegate reading or summarizing a skill's SKILL.md back to another sub-agent; if the task requires a skill you were pointed at, read it yourself with file_read.
 $roleLine$writeLine- If you cannot meet the expected result, say so explicitly and list what failed.""".trimIndent()
 
         if (isStructured(body)) {

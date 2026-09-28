@@ -44,8 +44,10 @@ object SubAgentRunner {
     /** Fraction at which the agent is ordered to stop calling tools and write up. */
     private const val FORCE_FRACTION = 0.95
 
-    /** Cap on a single tool-result / report chunk kept in history (tail kept). */
-    private const val MAX_REPORT_CHARS = 12_000
+    /** Cap on a single tool-result / report chunk kept in history (tail kept).
+     *  Generous: truncation here is a last-resort runaway guard, not a
+     *  content policy — the coordinator asked for full reports. */
+    private const val MAX_REPORT_CHARS = 64_000
 
     suspend fun run(
         provider: LLMProvider,
@@ -63,6 +65,7 @@ object SubAgentRunner {
         maxTurns: Int = ABSOLUTE_MAX_TURNS,
         roleContext: Context? = null,
         temperature: Double? = null,
+        tokenBudget: SubAgentTokenBudget? = null,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
@@ -81,6 +84,16 @@ object SubAgentRunner {
         try {
             var turn = 0
             while (turn < turns) {
+                // Shared token budget hard stop (Codex SessionBudgetExceeded
+                // semantics): once the pool is exhausted this lane stops
+                // immediately and hands in what it has. A sibling that busts
+                // the budget stops itself; the wave continues with the rest.
+                if (tokenBudget != null && tokenBudget.exhausted) {
+                    runCatching { onStep(turn, "token budget exhausted") }
+                    val partial = report.toString().trim()
+                    val footer = "(stopped: shared token budget exhausted at $turn/$turns turns)"
+                    return ToolExecutionResult(composeOutput(partial, timeline.toString(), footer), true)
+                }
                 turn++
                 runCatching { onStep(turn, "") }
                 runCatching { onUi(UiEvent.Phase("思考中")) }
@@ -95,7 +108,10 @@ object SubAgentRunner {
                 provider.streamMessage(
                     messages = sendHistory,
                     systemPrompt = system,
-                    maxTokens = maxTokens.coerceIn(256, 8192),
+                    // Output cap follows the model's own declared ceiling (the
+                    // coordinator already sized maxTokens per entry); 8192 was a
+                    // blanket cap that clipped long reports on capable models.
+                    maxTokens = maxTokens.coerceAtLeast(256),
                     temperature = temperature,
                     tools = tools,
                     thinkingLevel = ThinkingLevel.OFF,
@@ -125,6 +141,28 @@ object SubAgentRunner {
                         is LLMStreamChunk.ToolCallComplete -> {
                             toolCalls.add(Triple(chunk.id, chunk.name, chunk.args))
                             runCatching { onUi(UiEvent.ToolArgs(chunk.id, chunk.name, chunk.args.toString())) }
+                        }
+                        is LLMStreamChunk.Usage -> {
+                            // Shared token budget (Codex rollout_budget semantics,
+                            // rewritten): usage is recorded even when it busts the
+                            // budget, and the verdict is a HARD stop for this lane,
+                            // not an advisory. Prefill weight <1 because cached
+                            // context reads are cheap; output weight 1.
+                            //
+                            // `inputTokens` is already fresh-only by the parser
+                            // convention (OpenAIProviderUsage.kt subtracts the
+                            // cached portion; Anthropic reports it separately), so
+                            // prefill is taken as-is — subtracting cacheRead here
+                            // would double-subtract. Gate on any usage field, not
+                            // latestContextTokens: Gemini never sets that field.
+                            if (tokenBudget != null &&
+                                (chunk.usage.outputTokens > 0 || chunk.usage.inputTokens > 0)
+                            ) {
+                                tokenBudget.recordUsage(
+                                    outputTokens = chunk.usage.outputTokens,
+                                    prefillTokens = chunk.usage.inputTokens,
+                                )
+                            }
                         }
                         else -> Unit
                     }
@@ -403,6 +441,7 @@ Turn budget: you have $turns turns. A <budget_warning> will be injected as you a
 Rules:
 - Complete ONLY the assigned slice. Do not rewrite unrelated files.
 - Do not spawn further sub-agents. spawn_agent / run_subagent are not available and will error if you try.
+- Do not delegate reading or summarizing a skill's SKILL.md to another agent — that discipline does not exist here; read it yourself if the brief points you at one.
 - Searching/reading source: prefer grep_source (one call = matching lines ± context) over paging file_read through a big file. Old tool outputs are auto-trimmed from your context, so re-read a file if you need it back.
 $toolLine
 - Follow the brief's Workflow, then return a concise report: what changed, files touched, leftover risks, and whether Expected result passed.
