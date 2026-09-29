@@ -103,21 +103,128 @@ object GroupChat {
     }
 
     /**
-     * A leading @token addresses one speaker when it fuzzy-matches a name.
-     * Emails and unmatched @words are left as ordinary text.
+     * One participant the composer can @. [name] is the speaker label used in
+     * bubbles; [modelId] is an extra alias so `@mimo-v2.6-pro` still finds a
+     * model whose display name is different.
      */
-    fun addressedName(text: String, names: List<String>): String? {
-        val token = Regex("""^\s*@([^\s:：,，]{1,40})""").find(text)?.groupValues?.getOrNull(1) ?: return null
+    data class MentionCandidate(
+        val name: String,
+        val modelId: String,
+        val vendor: String,
+        val host: Boolean,
+        /** Visible identity that is not the model name, such as the host soul name. */
+        val extra: String = "",
+    )
+
+    /**
+     * Canonical speaker plus every string the user may type after @.
+     * [key] distinguishes two models that share a display name.
+     */
+    data class Addressable(
+        val name: String,
+        val aliases: List<String> = listOf(name),
+        val key: String = name,
+    )
+
+    /**
+     * The first @ that names a participant, anywhere after whitespace.
+     * Emails (`a@b.com`) and unmatched tokens, including skill paths, stay
+     * ordinary text so the whole group still answers.
+     */
+    fun addressedName(text: String, names: List<String>): String? =
+        resolveAddress(text, names.map { Addressable(it) })
+
+    fun resolveAddress(text: String, targets: List<Addressable>): String? =
+        resolveTarget(text, targets)?.name
+
+    fun resolveTarget(text: String, targets: List<Addressable>): Addressable? {
+        if (text.isEmpty() || targets.isEmpty()) return null
+        var i = 0
+        while (i < text.length) {
+            val ch = text[i]
+            if ((ch == '@' || ch == '＠') && (i == 0 || text[i - 1].isWhitespace())) {
+                matchRest(text.substring(i + 1), targets)?.let { return it }
+            }
+            i++
+        }
+        return null
+    }
+
+    fun mentionCandidates(host: MentionCandidate, others: List<MentionCandidate>): List<MentionCandidate> {
+        val hostName = host.name.trim().ifBlank { host.modelId.trim() }.ifBlank { "Host" }
+        val hostRow = host.copy(name = hostName, host = true)
+        val seen = mutableSetOf(hostRow.name to hostRow.modelId)
+        val rest = others.mapNotNull { other ->
+            val name = other.name.trim().ifBlank { other.modelId.trim() }
+            if (name.isEmpty()) return@mapNotNull null
+            val row = other.copy(name = name, host = false)
+            if (!seen.add(row.name to row.modelId)) return@mapNotNull null
+            row
+        }
+        return listOf(hostRow) + rest
+    }
+
+    fun filterMentions(candidates: List<MentionCandidate>, filter: String): List<MentionCandidate> {
+        val query = compactVendorText(filter)
+        if (query.isEmpty()) return candidates
+        return candidates.filter { candidate ->
+            compactVendorText(candidate.name).contains(query) ||
+                compactVendorText(candidate.modelId).contains(query) ||
+                compactVendorText(candidate.extra).contains(query)
+        }
+    }
+
+    /** Unique display name when possible; model id only when names collide. */
+    fun mentionInsertToken(candidate: MentionCandidate, roster: List<MentionCandidate>): String {
+        val name = candidate.name.trim()
+        if (name.isNotEmpty() && roster.count { it.name == candidate.name } == 1) return name
+        val id = candidate.modelId.trim()
+        if (id.isNotEmpty()) return id
+        return name.ifBlank { "Host" }
+    }
+
+    private fun matchRest(rest: String, targets: List<Addressable>): Addressable? {
+        if (rest.isEmpty()) return null
+        var best: Addressable? = null
+        var bestLen = 0
+        for (target in targets) {
+            for (alias in target.aliases) {
+                val len = boundaryPrefixLength(rest, alias)
+                if (len > bestLen) {
+                    best = target
+                    bestLen = len
+                }
+            }
+        }
+        if (best != null) return best
+        val token = Regex("""^([^\s:：,，]{1,80})""").find(rest)?.groupValues?.getOrNull(1) ?: return null
         val compactToken = compactVendorText(token)
         if (compactToken.length < 2) return null
-        return names.firstOrNull { name ->
-            val compactName = compactVendorText(name)
-            compactName.isNotEmpty() && (
-                compactName == compactToken ||
-                    compactName.startsWith(compactToken) ||
-                    compactToken.startsWith(compactName) ||
-                    (compactToken.length >= 3 && compactName.contains(compactToken))
-                )
+        return targets.maxByOrNull { target ->
+            target.aliases.maxOfOrNull { aliasScore(compactToken, it) } ?: 0
+        }?.takeIf { target ->
+            target.aliases.any { aliasScore(compactToken, it) > 0 }
+        }
+    }
+
+    private fun boundaryPrefixLength(rest: String, alias: String): Int {
+        val name = alias.trim()
+        if (name.length < 2 || rest.length < name.length) return 0
+        if (!rest.regionMatches(0, name, 0, name.length, ignoreCase = true)) return 0
+        val next = rest.getOrNull(name.length)
+        if (next != null && !next.isWhitespace() && next !in ",，:：。.!！?？") return 0
+        return name.length
+    }
+
+    private fun aliasScore(compactToken: String, alias: String): Int {
+        val compactName = compactVendorText(alias)
+        if (compactName.isEmpty() || compactToken.length < 2) return 0
+        return when {
+            compactName == compactToken -> 1000 + compactName.length
+            compactName.startsWith(compactToken) -> 800 + compactToken.length
+            compactToken.startsWith(compactName) -> 600 + compactName.length
+            compactToken.length >= 3 && compactName.contains(compactToken) -> 400 + compactToken.length
+            else -> 0
         }
     }
 

@@ -49,7 +49,9 @@ import com.openminis.app.provider.ProviderFactory
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.terminal.MinisOpenUrlBroker
 import com.openminis.app.terminal.MinisUrlMarker
+import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.tools.AgentTools
+import com.openminis.app.tools.GroupChat
 import com.openminis.app.tools.FileEditTool
 import com.openminis.app.tools.FileReadTool
 import com.openminis.app.tools.FileWriteTool
@@ -119,6 +121,7 @@ internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
         return
     }
     val filter = text.substring(anchor + 1, safeCaret)
+    val filterChanged = _mentionFilter.value != filter
     _mentionAnchor.value = anchor
     _mentionFilter.value = filter
     if (!_showMentionMenu.value) {
@@ -126,17 +129,18 @@ internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
         // Mirror iOS: pre-select row 0 so a hardware-keyboard Return
         // commits the top match without an extra Down press.
         _mentionSelectedIndex.value = 0
-        val sid = realSessionId.ifEmpty { sessionId }
-        if (sid.isNotEmpty()) fileMentionIndex.refreshIfNeeded(sid)
-        Log.i(ChatViewModel.TAG, "mention menu open anchor=$anchor filter=\"$filter\"")
+        // Group chat @ lists speakers. Scanning files here is what made the
+        // popup fill with skills/… paths that do not address anyone.
+        if (!groupChatEnabled.value) {
+            val sid = realSessionId.ifEmpty { sessionId }
+            if (sid.isNotEmpty()) fileMentionIndex.refreshIfNeeded(sid)
+        }
+        Log.i(ChatViewModel.TAG, "mention menu open anchor=$anchor filter=\"$filter\" group=${groupChatEnabled.value}")
+    } else if (groupChatEnabled.value && filterChanged) {
+        // The top row is the match Enter will insert. Don't keep a highlight
+        // that belonged to the previous, longer list.
+        _mentionSelectedIndex.value = 0
     } else {
-        // Filter changed while open — clamp the highlight back into range
-        // so it never points past the end of a shrunk filtered list.
-        // Async: the next combine emission for [mentionEntries] will have
-        // the new size; we only need to keep the index sane in the
-        // interim. Concretely: if the user types past the only remaining
-        // match, the filter narrows and on the next list emission the
-        // composable's LaunchedEffect resets us back into bounds.
         val current = _mentionSelectedIndex.value
         if (current < 0) _mentionSelectedIndex.value = 0
     }
@@ -155,14 +159,14 @@ internal fun ChatViewModel.dismissMentionMenu() {
  * matches iOS so Up at row 0 lands at the last row and vice versa.
  */
 internal fun ChatViewModel.mentionMenuUp() {
-    val count = mentionEntries.value.size
+    val count = activeMentionCount()
     if (count <= 0) return
     val idx = _mentionSelectedIndex.value
     _mentionSelectedIndex.value = if (idx <= 0) count - 1 else idx - 1
 }
 
 internal fun ChatViewModel.mentionMenuDown() {
-    val count = mentionEntries.value.size
+    val count = activeMentionCount()
     if (count <= 0) return
     val idx = _mentionSelectedIndex.value
     _mentionSelectedIndex.value = if (idx >= count - 1) 0 else idx + 1
@@ -178,6 +182,14 @@ internal fun ChatViewModel.executeSelectedMention(
     currentText: String,
     currentCaret: Int,
 ): Pair<String, Int>? {
+    if (groupChatEnabled.value) {
+        val models = groupMentions.value
+        if (models.isEmpty()) return null
+        val idx = _mentionSelectedIndex.value.let {
+            if (it in models.indices) it else 0
+        }
+        return selectGroupMention(models[idx], currentText, currentCaret)
+    }
     val entries = mentionEntries.value
     if (entries.isEmpty()) return null
     val idx = _mentionSelectedIndex.value.let {
@@ -185,6 +197,65 @@ internal fun ChatViewModel.executeSelectedMention(
     }
     return selectMention(entries[idx], currentText, currentCaret)
 }
+
+internal fun ChatViewModel.selectGroupMention(
+    entry: GroupChat.MentionCandidate,
+    currentText: String,
+    currentCaret: Int,
+): Pair<String, Int> {
+    val anchor = _mentionAnchor.value
+    if (anchor < 0 || anchor > currentText.length) {
+        dismissMentionMenu()
+        return currentText to currentCaret
+    }
+    var endOffset = anchor + 1
+    while (endOffset < currentText.length && !currentText[endOffset].isWhitespace()) {
+        endOffset++
+    }
+    val token = GroupChat.mentionInsertToken(entry, currentGroupMentions())
+    val replacement = "@$token "
+    val newText = currentText.substring(0, anchor) +
+        replacement +
+        currentText.substring(endOffset)
+    dismissMentionMenu()
+    return newText to (anchor + replacement.length)
+}
+
+internal fun ChatViewModel.currentGroupMentions(): List<GroupChat.MentionCandidate> {
+    val config = providerRepository.config.value
+    val entries = config.modelEntries
+    val hostEntry = _activeEntryId.value?.let { id -> entries.find { it.id == id } }
+    val hostModel = hostEntry?.model ?: currentModel
+    val hostName = hostModel?.displayName?.trim().orEmpty()
+    val hostModelId = hostModel?.id?.trim().orEmpty()
+    val soulName = com.openminis.app.agent.SoulStore.cachedMetadata.value.name.trim()
+    val host = GroupChat.MentionCandidate(
+        name = hostName,
+        modelId = hostModelId,
+        vendor = GroupChat.vendorKey(hostModelId, hostName),
+        host = true,
+        extra = soulName,
+    )
+    val slotIds = MultiAgentSettings.retainLive(
+        multiAgentSettings.selectedModelEntryIds.value,
+        entries.map { it.id }.toSet(),
+        multiAgentSettings.maxConcurrent.value,
+    )
+    val others = slotIds.mapNotNull { id ->
+        if (id.isBlank() || id == hostEntry?.id) return@mapNotNull null
+        val entry = entries.find { it.id == id } ?: return@mapNotNull null
+        GroupChat.MentionCandidate(
+            name = entry.model.displayName,
+            modelId = entry.model.id,
+            vendor = GroupChat.vendorKey(entry.model.id, entry.model.displayName),
+            host = false,
+        )
+    }
+    return GroupChat.mentionCandidates(host, others)
+}
+
+private fun ChatViewModel.activeMentionCount(): Int =
+    if (groupChatEnabled.value) groupMentions.value.size else mentionEntries.value.size
 
 /**
  * Replace the active `@<token>` in [currentText] with `@<linuxPath> ` and

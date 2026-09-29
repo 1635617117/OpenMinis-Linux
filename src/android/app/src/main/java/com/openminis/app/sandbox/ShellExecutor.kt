@@ -5,6 +5,7 @@ import android.util.Log
 import com.openminis.app.sandbox.kernel.BudgetClassifier
 import com.openminis.app.sandbox.kernel.StreamSink
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -173,12 +174,27 @@ object ShellExecutor {
             activeRun?.registerProcess(process)
             SandboxWorkload.armDeadline(process, timeout)
             withTimeout(timeout) {
+                    coroutineScope {
                     // Read raw chars to preserve \r for TerminalSanitizer CR-folding.
                     // readLine() would consume \r as line terminator, losing progress overwrites.
+                    // The chat card only sees lineCallback, so a CR-only meter used to
+                    // look frozen. Emit the latest CR line at most once a second, and
+                    // speak if the guest produces no visible output at all.
                     val sink = StreamSink(outputCapBytes, outputRateBytesPerSec)
+                    val beat = SilentOutputHeartbeat()
+                    val callbackLock = Any()
+                    val beatJob = if (lineCallback != null) {
+                        launchSilentHeartbeat(beat, { true }) { line ->
+                            synchronized(callbackLock) { lineCallback.invoke(line) }
+                        }
+                    } else {
+                        null
+                    }
+                    try {
                     InputStreamReader(process.inputStream, StandardCharsets.UTF_8).use { reader ->
                         val buf = CharArray(4096)
                         var lastLineForCallback = StringBuilder()
+                        var lastProgressAt = 0L
                         var n: Int
                         while (reader.read(buf).also { n = it } != -1) {
                             output.append(buf, 0, n)
@@ -190,10 +206,16 @@ object ShellExecutor {
                             if (lineCallback != null) {
                                 for (i in 0 until n) {
                                     val c = buf[i]
-                                    if (c == '\n') {
-                                        lineCallback.invoke(lastLineForCallback.toString())
+                                    if (c == '\n' || c == '\r') {
+                                        val now = System.currentTimeMillis()
+                                        beat.onOutput(now)
+                                        val line = lastLineForCallback.toString()
                                         lastLineForCallback.clear()
-                                    } else if (c != '\r' && lastLineForCallback.length < BoundedOutputBuffer.MAX_LINE_CHARS) {
+                                        if (line.isNotEmpty() && (c == '\n' || now - lastProgressAt >= 1_000L)) {
+                                            lastProgressAt = now
+                                            synchronized(callbackLock) { lineCallback.invoke(line) }
+                                        }
+                                    } else if (lastLineForCallback.length < BoundedOutputBuffer.MAX_LINE_CHARS) {
                                         lastLineForCallback.append(c)
                                     }
                                 }
@@ -205,11 +227,16 @@ object ShellExecutor {
                             if (wait > 0L) delay(wait)
                         }
                         if (lineCallback != null && lastLineForCallback.isNotEmpty()) {
-                            lineCallback.invoke(lastLineForCallback.toString())
+                            beat.onOutput()
+                            synchronized(callbackLock) { lineCallback.invoke(lastLineForCallback.toString()) }
                         }
                     }
 
                     exitCode = process.waitFor()
+                    } finally {
+                        beatJob?.cancel()
+                    }
+                    }
             }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             Log.w(TAG, "Command timed out after ${timeout}ms: $command")

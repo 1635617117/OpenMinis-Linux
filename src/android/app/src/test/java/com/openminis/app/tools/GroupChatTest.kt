@@ -72,4 +72,53 @@ class GroupChatTest {
         assertEquals("质疑", GroupChat.stance(1))
         assertEquals("主张", GroupChat.stance(4))
     }
+
+    @Test
+    fun mentionUsesModelIdAndIgnoresSkillPaths() {
+        val targets = listOf(
+            GroupChat.Addressable("苏苏", listOf("苏苏", "mimo-v2.6-pro")),
+            GroupChat.Addressable("DeepSeek V3", listOf("DeepSeek V3", "deepseek-chat")),
+        )
+        assertEquals("苏苏", GroupChat.resolveAddress("@mimo-v2.6-pro 你先说", targets))
+        assertEquals("苏苏", GroupChat.resolveAddress("＠苏苏 继续", targets))
+        assertEquals("DeepSeek V3", GroupChat.resolveAddress("先问一下 @DeepSeek V3 这个风险", targets))
+        assertEquals(null, GroupChat.resolveAddress("@skills/逆向技能路由 看看", targets))
+        assertEquals(null, GroupChat.resolveAddress("邮件是 a@b.com", targets))
+    }
+
+    @Test
+    fun mentionPickerListsModelsNotSkills() {
+        val roster = GroupChat.mentionCandidates(
+            GroupChat.MentionCandidate("mimo-v2.6-pro", "mimo-v2.6-pro", "unknown", host = true),
+            listOf(
+                GroupChat.MentionCandidate("DeepSeek V3", "deepseek-chat", "deepseek", host = false),
+                GroupChat.MentionCandidate("DeepSeek V3", "deepseek-reasoner", "deepseek", host = false),
+            ),
+        )
+        assertEquals(listOf("mimo-v2.6-pro", "DeepSeek V3", "DeepSeek V3"), roster.map { it.name })
+        assertEquals(emptyList<String>(), GroupChat.filterMentions(roster, "逆向").map { it.name })
+        assertEquals(listOf("mimo-v2.6-pro"), GroupChat.filterMentions(roster, "mimo").map { it.name })
+        val withSoul = roster.map { if (it.host) it.copy(extra = "苏苏") else it }
+        assertEquals(listOf("mimo-v2.6-pro"), GroupChat.filterMentions(withSoul, "苏苏").map { it.name })
+        assertEquals("mimo-v2.6-pro", GroupChat.mentionInsertToken(roster[0], roster))
+        assertEquals("deepseek-reasoner", GroupChat.mentionInsertToken(roster[2], roster))
+    }
+
+    @Test
+    fun collidingDisplayNamesStillAddressOneModel() {
+        val targets = listOf(
+            GroupChat.Addressable(
+                "DeepSeek V3",
+                aliases = listOf("DeepSeek V3", "deepseek-chat"),
+                key = "deepseek-chat",
+            ),
+            GroupChat.Addressable(
+                "DeepSeek V3",
+                aliases = listOf("DeepSeek V3", "deepseek-reasoner"),
+                key = "deepseek-reasoner",
+            ),
+        )
+        assertEquals("deepseek-reasoner", GroupChat.resolveTarget("@deepseek-reasoner 你说", targets)?.key)
+        assertEquals("deepseek-chat", GroupChat.resolveTarget("@DeepSeek V3 你说", targets)?.key)
+    }
 }

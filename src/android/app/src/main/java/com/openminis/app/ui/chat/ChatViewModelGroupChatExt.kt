@@ -54,6 +54,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     val hostPlain = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "Host"
     val hostMember = GroupMember(
         name = hostPlain,
+        modelId = mainEntry?.model?.id ?: currentModel?.id.orEmpty(),
         vendor = hostVendor,
         provider = provider,
         snapshot = hostSnapshot,
@@ -62,21 +63,43 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
             ?: com.openminis.app.data.model.ThinkingLevel.OFF,
     )
-    val members = listOf(hostMember) + slotMembers.filter { it.name != hostPlain }
-    val wantsClose = closingNow
-    if (!wantsClose && members.size < 2) {
-        publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
-        return
+    val members = listOf(hostMember) + slotMembers.filter { slot ->
+        slot.modelId != hostMember.modelId || slot.name != hostMember.name
     }
+    val wantsClose = closingNow
     val spoken = prior.toMutableList()
     val contextText = recentContext()
     val addressed = if (!wantsClose) {
-        GroupChat.addressedName(userText, members.map { it.name } + hostPlain)
+        GroupChat.resolveTarget(
+            userText,
+            members.map { member ->
+                GroupChat.Addressable(
+                    name = member.name,
+                    key = member.modelId.ifBlank { member.name },
+                    aliases = listOf(
+                        member.name,
+                        member.modelId,
+                        if (member.modelId == hostMember.modelId && member.name == hostMember.name) {
+                            com.openminis.app.agent.SoulStore.cachedMetadata.value.name
+                        } else {
+                            ""
+                        },
+                    ).map { it.trim() }.filter { it.isNotEmpty() }.distinct(),
+                )
+            },
+        )
     } else {
         null
     }
+    if (!wantsClose && addressed == null && members.size < 2) {
+        publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
+        return
+    }
+    // A resolved @ names exactly one speaker. Do not fall through into the
+    // all-members round — the others must not start, not even to say PASS.
     if (!wantsClose && addressed != null && !groupChatCloseRequested) {
-        val member = members.find { it.name == addressed }
+        val member = members.find { (it.modelId.ifBlank { it.name }) == addressed.key }
+            ?: members.find { it.name == addressed.name }
         if (member != null) {
             spoken += speakMembers(listOf(member), analyzing) {
                 GroupChat.directPrompt(it.name, userText, GroupChat.transcript(prior), contextText)
@@ -175,6 +198,7 @@ internal fun ChatViewModel.endGroupChat() {
 
 private data class GroupMember(
     val name: String,
+    val modelId: String,
     val vendor: String,
     val provider: LLMProvider,
     val snapshot: ModelAttributionSnapshot?,
@@ -205,6 +229,7 @@ private fun ChatViewModel.groupMembers(
         val provider = providerForModelEntry(entry) ?: return@mapNotNull null
         GroupMember(
             name = entry.model.displayName,
+            modelId = entry.model.id,
             vendor = GroupChat.vendorKey(
                 entry.model.id,
                 entry.model.displayName,

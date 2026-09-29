@@ -10,11 +10,12 @@ class GuestAptScriptTest {
         val script = GuestAptScript.install(listOf("ca-certificates", "curl"))
         assertFalse(script.contains("Verify-Peer"))
         assertFalse(script.contains("Verify-Host"))
-        assertTrue(script.contains("apt-get update -qq"))
+        assertFalse(script.contains("-qq"))
+        assertTrue(script.contains("apt-get update"))
         assertTrue(script.contains("minis-mirror auto"))
         assertTrue(script.contains("minis_release_apt_lock"))
         assertTrue(script.contains("minis_acquire_apt_lock 120 || exit 1"))
         assertFalse(script.contains("minis_acquire_apt_lock 120 || true"))
-        assertTrue(script.contains("apt-get install -y -qq --no-upgrade --no-install-recommends ca-certificates curl"))
+        assertTrue(script.contains("apt-get install -y --no-upgrade --no-install-recommends ca-certificates curl"))
     }
 }

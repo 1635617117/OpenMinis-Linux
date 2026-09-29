@@ -52,7 +52,8 @@ official:http://ports.ubuntu.com/ubuntu-ports/"
 
 PROBE_PATH="dists/noble/Release"
 PROBE_TIMEOUT=5
-UPDATE_TIMEOUT=120
+# A dead mirror must not sit for two minutes before the next candidate.
+UPDATE_TIMEOUT=45
 APT_HELPER="/usr/local/lib/minis-mirror/apt-helper"
 
 log() { printf '%s\n' "$*" >&2; }
@@ -274,6 +275,9 @@ apt_update_ok() {
     export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
     export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
     export CURL_CA_BUNDLE="${CURL_CA_BUNDLE:-$SSL_CERT_FILE}"
+    # stdout, so both debug (stderr split to logcat) and release see it.
+    # apt's own output stays in the temp file used for the Err:/E: check.
+    printf '%s\n' "minis-mirror: apt update, timeout ${UPDATE_TIMEOUT}s"
     _out="$(mktemp)"
     # Verify TLS. A CA failure is handled by cmd_auto's HTTPS→HTTP rewrite,
     # not by turning verification off.
@@ -299,6 +303,7 @@ apt_probe_uri() {
     # Dir::Etc::sourceparts=- so ubuntu.sources leftovers cannot mask failure.
     _list="/tmp/minis-probe.list"
     gen_sources "$1" > "$_list"
+    printf '%s\n' "minis-mirror: probing $1"
     _out="$(mktemp)"
     timeout 20 apt-get \
         -o Dir::Etc::sourcelist="$_list" \

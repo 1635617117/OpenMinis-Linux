@@ -35,6 +35,11 @@ minis_acquire_apt_lock() {
     while ! mkdir "$MINIS_APT_LOCKDIR" 2>/dev/null; do
         sleep 1
         _waited=$((_waited + 1))
+        # stdout, not stderr: debug builds split stderr to logcat so a
+        # stderr-only wait is invisible in the chat tool card.
+        if [ "$_waited" -eq 1 ] || [ $((_waited % 10)) -eq 0 ]; then
+            echo "minis-apt-lock: 另一个 apt 还在跑，已等待 ${_waited}s / ${_timeout}s"
+        fi
         if [ "$_waited" -ge "$_timeout" ]; then
             echo "minis-apt-lock: timeout waiting for $MINIS_APT_LOCKDIR" >&2
             return 1

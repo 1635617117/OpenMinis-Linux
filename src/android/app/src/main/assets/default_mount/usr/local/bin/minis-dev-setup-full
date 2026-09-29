@@ -9,8 +9,7 @@ export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
 
 echo "minis-dev-setup-full: installing heavy toolchain (500+ MB)"
-echo "This will take 10-20 minutes on slow networks. Press Ctrl+C to abort."
-sleep 3
+echo "下载和解包在手机 PRoot 里仍然要几分钟到十几分钟，但会持续有输出。"
 
 if ! command -v apt-get >/dev/null 2>&1; then
   echo "ERROR: apt-get not found" >&2
@@ -35,31 +34,24 @@ trap 'echo "minis-dev-setup-full: interrupted"; exit 130' INT
 echo "Updating package lists..."
 apt-get update || true
 
-echo "Installing build tools..."
+# One transaction per group so apt downloads in parallel. The old script
+# ran six installs back to back, each waiting out the previous unpack.
+# Optional tools stay separate so a missing gradle does not roll back gcc.
+echo "Installing toolchain..."
 apt-get install -y --no-install-recommends \
   bash bash-completion \
   build-essential gcc g++ make cmake ninja-build pkg-config \
   python3-venv python3-dev \
-  || true
-
-echo "Installing multimedia..."
-apt-get install -y --no-install-recommends ffmpeg || true
-
-echo "Installing Java..."
-apt-get install -y --no-install-recommends openjdk-21-jdk-headless || \
-  apt-get install -y --no-install-recommends openjdk-17-jdk-headless || true
-
-echo "Installing additional tools..."
-apt-get install -y --no-install-recommends \
   tar xz-utils zip file \
   openssh-client rsync sqlite3 \
   || true
 
-echo "Installing Go..."
-apt-get install -y --no-install-recommends golang-go || true
+echo "Installing optional tools (ffmpeg, Go, Gradle)..."
+apt-get install -y --no-install-recommends ffmpeg golang-go gradle || true
 
-echo "Installing Gradle..."
-apt-get install -y --no-install-recommends gradle || true
+echo "Installing Java..."
+apt-get install -y --no-install-recommends openjdk-21-jdk-headless || \
+  apt-get install -y --no-install-recommends openjdk-17-jdk-headless || true
 
 dpkg --configure -a || true
 

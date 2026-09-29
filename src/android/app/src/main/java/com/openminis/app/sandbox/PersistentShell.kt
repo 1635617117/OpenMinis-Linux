@@ -6,6 +6,7 @@ import com.openminis.app.sandbox.kernel.BudgetClassifier
 import com.openminis.app.sandbox.kernel.GuardianScript
 import com.openminis.app.sandbox.kernel.TokenBucket
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -73,9 +74,18 @@ class PersistentShell(
         var onComplete: ((String, Int) -> Unit)? = null,
     ) {
         val framer = MarkerFramer(marker)
+        val heartbeat = SilentOutputHeartbeat()
         fun appendOutput(text: String) {
+            if (text.isNotEmpty()) heartbeat.onOutput()
             output.append(text)
         }
+    }
+
+    /** lineCallback may come from the reader thread and the heartbeat job. */
+    private val lineCallbackLock = Any()
+
+    private fun emitLine(callback: (String) -> Unit, line: String) {
+        synchronized(lineCallbackLock) { callback(line) }
     }
 
     /**
@@ -465,12 +475,14 @@ class PersistentShell(
         if (!lineBudget.tryTake(System.currentTimeMillis())) return
         val lines = text.split('\n')
         for (i in lines.indices) {
-            val line = lines[i].replace("\r", "")
+            // CR overwrites a progress meter. Keep the latest non-empty
+            // segment so "50%\r51%\r" becomes "51%", not "5051".
+            val line = lines[i].split('\r').lastOrNull { it.isNotEmpty() }.orEmpty()
             if (line.isNotEmpty() && (i < lines.size - 1 || text.endsWith('\n'))) {
-                callback(line)
+                emitLine(callback, line)
             } else if (line.isNotEmpty() && i == lines.size - 1) {
                 // Partial line — still feed it for real-time updates
-                callback(line)
+                emitLine(callback, line)
             }
         }
     }
@@ -582,12 +594,24 @@ class PersistentShell(
             SandboxWorkload.armDeadline(process, armed)
             try {
             val result = withTimeoutOrNull(armed) {
+                coroutineScope {
+                val cb = CommandCallback(
+                    marker = marker,
+                    lineCallback = lineCallback,
+                )
+                pendingCallback = cb
+                val beat = if (lineCallback != null) {
+                    launchSilentHeartbeat(
+                        cb.heartbeat,
+                        { pendingCallback === cb },
+                    ) { line -> emitLine(lineCallback, line) }
+                } else {
+                    null
+                }
+                try {
                 suspendCancellableCoroutine { cont ->
-                    val cb = CommandCallback(
-                        marker = marker,
-                        lineCallback = lineCallback,
-                    )
                     cb.onComplete = { output, exitCode ->
+                        beat?.cancel()
                         if (cb.output.truncated) {
                             Log.w(TAG, "output truncated, dropped ${cb.output.dropped} chars")
                         }
@@ -595,9 +619,9 @@ class PersistentShell(
                             cont.resume(Pair(output, exitCode))
                         }
                     }
-                    pendingCallback = cb
 
                     cont.invokeOnCancellation {
+                        beat?.cancel()
                         if (pendingCallback === cb) pendingCallback = null
                         // Parent cancel has the same serialization bug as timeout.
                         stop()
@@ -607,11 +631,16 @@ class PersistentShell(
                         writer.write(wrappedCommand)
                         writer.flush()
                     } catch (e: Exception) {
+                        beat?.cancel()
                         pendingCallback = null
                         if (cont.isActive) {
                             cont.resume(Pair("[Write error: ${e.message}]", -1))
                         }
                     }
+                }
+                } finally {
+                    beat?.cancel()
+                }
                 }
             }
 

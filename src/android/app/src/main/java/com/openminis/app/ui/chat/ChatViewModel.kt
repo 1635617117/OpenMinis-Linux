@@ -50,6 +50,7 @@ import com.openminis.app.data.repository.ProviderRepository
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.data.repository.MultiAgentSettingsRepository
 import com.openminis.app.data.model.ModelEntry
+import com.openminis.app.tools.GroupChat
 import com.openminis.app.provider.ImageBudget
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
@@ -2108,6 +2109,7 @@ class ChatViewModel(
         groupChatPrefs().edit().putBoolean(groupChatKey(), enabled).apply()
         _groupChatEnabled.value = enabled
         if (!enabled) groupChatCloseRequested = false
+        dismissMentionMenu()
     }
 
     /**
@@ -2226,6 +2228,30 @@ class ChatViewModel(
         _mentionFilter,
     ) { _, filter -> fileMentionIndex.matches(filter, limit = 50) }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * Group-chat @ candidates. File mentions stay available only when group
+     * chat is off; an open group must not offer skill paths, because those
+     * tokens do not address a speaker and every model would answer.
+     */
+    val groupMentions: StateFlow<List<GroupChat.MentionCandidate>> = combine(
+        _groupChatEnabled,
+        _activeEntryId,
+        providerRepository.config,
+        multiAgentSettings.selectedModelEntryIds,
+        _mentionFilter,
+    ) { enabled, _, _, _, filter ->
+        if (!enabled) emptyList()
+        else GroupChat.filterMentions(currentGroupMentions(), filter)
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        if (_groupChatEnabled.value) {
+            GroupChat.filterMentions(currentGroupMentions(), _mentionFilter.value)
+        } else {
+            emptyList()
+        },
+    )
 
     val isMentionScanning: StateFlow<Boolean>
         get() = fileMentionIndex.isScanning

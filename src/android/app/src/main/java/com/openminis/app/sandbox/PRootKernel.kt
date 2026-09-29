@@ -120,6 +120,9 @@ object PRootKernel {
                 "/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin",
         )
         customEnvironment.putIfAbsent("DEBIAN_FRONTEND", "noninteractive")
+        // pip/python block-buffer on a pipe. Without this, a package install
+        // prints nothing until the process exits.
+        customEnvironment.putIfAbsent("PYTHONUNBUFFERED", "1")
         customEnvironment.putIfAbsent("SHELL", "/bin/bash")
         customEnvironment.putIfAbsent("ANDROID_HOME", "/opt/android-sdk")
         customEnvironment.putIfAbsent("ANDROID_SDK_ROOT", "/opt/android-sdk")

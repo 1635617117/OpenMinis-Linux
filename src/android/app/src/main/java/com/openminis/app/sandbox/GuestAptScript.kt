@@ -17,13 +17,15 @@ internal object GuestAptScript {
             append("mkdir -p /tmp /var/tmp /var/lock; ")
             append("[ -f /usr/local/lib/minis/apt-lock.sh ] && . /usr/local/lib/minis/apt-lock.sh; ")
             append("minis_acquire_apt_lock 120 || exit 1; ")
-            append("if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then ")
+            append("echo 'apt: 正在更新软件源…'; ")
+            append("if ! DEBIAN_FRONTEND=noninteractive apt-get update; then ")
             append("minis_release_apt_lock || true; ")
             append("[ -x /usr/local/bin/minis-mirror ] && /usr/local/bin/minis-mirror auto || true; ")
             append("minis_acquire_apt_lock 120 || exit 1; ")
-            append("DEBIAN_FRONTEND=noninteractive apt-get update -qq || true; ")
+            append("DEBIAN_FRONTEND=noninteractive apt-get update || true; ")
             append("fi; ")
-            append("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-upgrade --no-install-recommends ")
+            append("echo 'apt: 正在安装软件包…'; ")
+            append("DEBIAN_FRONTEND=noninteractive apt-get install -y --no-upgrade --no-install-recommends ")
             append(joined)
         }
     }

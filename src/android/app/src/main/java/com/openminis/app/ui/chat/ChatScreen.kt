@@ -5101,6 +5101,8 @@ fun ChatScreen(
                 val mentionEntries by viewModel.mentionEntries.collectAsState()
                 val isMentionScanning by viewModel.isMentionScanning.collectAsState()
                 val mentionSelectedIndex by viewModel.mentionSelectedIndex.collectAsState()
+                val groupChatMentioning by viewModel.groupChatEnabled.collectAsState()
+                val groupMentions by viewModel.groupMentions.collectAsState()
                 if (showMentionMenu) {
                     androidx.compose.ui.window.Popup(
                         popupPositionProvider = remember {
@@ -5152,7 +5154,124 @@ fun ChatScreen(
                                 .background(ChatColors.inputBg, RoundedCornerShape(10.dp))
                                 .border(0.5.dp, ChatColors.toolBorder, RoundedCornerShape(10.dp)),
                         ) {
-                            if (mentionEntries.isEmpty()) {
+                            if (groupChatMentioning) {
+                                Text(
+                                    text = stringResource(R.string.mention_model_caption),
+                                    fontSize = 11.sp,
+                                    color = ChatColors.secondaryText,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                )
+                                if (groupMentions.isEmpty()) {
+                                    Text(
+                                        text = stringResource(R.string.mention_no_model),
+                                        fontSize = 13.sp,
+                                        color = ChatColors.secondaryText,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    )
+                                } else {
+                                    val modelListState = androidx.compose.foundation.lazy.rememberLazyListState()
+                                    LaunchedEffect(mentionSelectedIndex, groupMentions.size) {
+                                        val idx = mentionSelectedIndex
+                                        if (idx in groupMentions.indices) {
+                                            modelListState.animateScrollToItem(idx)
+                                        }
+                                    }
+                                    LazyColumn(
+                                        state = modelListState,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(
+                                                slashPickerHeight(
+                                                    titleSp = 13.sp,
+                                                    subtitleSp = 11.sp,
+                                                    verticalPadding = 8.dp,
+                                                    iconSize = 16.dp,
+                                                ),
+                                            )
+                                            .verticalScrollbar(modelListState),
+                                    ) {
+                                        itemsIndexed(
+                                            groupMentions,
+                                            key = { _, e -> "${e.host}|${e.modelId}|${e.name}" },
+                                        ) { i, entry ->
+                                            val isSelected = i == mentionSelectedIndex
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(
+                                                        if (isSelected) {
+                                                            MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                                        } else {
+                                                            Color.Transparent
+                                                        },
+                                                    )
+                                                    .clickable {
+                                                        val (newText, newCaret) = viewModel.selectGroupMention(
+                                                            entry,
+                                                            currentText = inputFieldValue.text,
+                                                            currentCaret = inputFieldValue.selection.end,
+                                                        )
+                                                        viewModel.setInputText(newText)
+                                                        inputFieldValue = androidx.compose.ui.text.input.TextFieldValue(
+                                                            text = newText,
+                                                            selection = androidx.compose.ui.text.TextRange(newCaret),
+                                                        )
+                                                    }
+                                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                            ) {
+                                                VendorMark(
+                                                    vendor = entry.vendor,
+                                                    fallbackName = entry.name,
+                                                    size = 16.dp,
+                                                )
+                                                Spacer(modifier = Modifier.width(10.dp))
+                                                Column(modifier = Modifier.weight(1f)) {
+                                                    Text(
+                                                        text = entry.name,
+                                                        fontSize = 13.sp,
+                                                        fontWeight = FontWeight.Medium,
+                                                        color = ChatColors.primaryText,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                    Text(
+                                                        text = when {
+                                                            entry.host &&
+                                                                entry.extra.isNotBlank() &&
+                                                                entry.extra != entry.name ->
+                                                                entry.extra + " · " + entry.modelId.ifBlank { entry.name }
+                                                            entry.modelId.isNotBlank() &&
+                                                                entry.modelId != entry.name -> entry.modelId
+                                                            else -> stringResource(R.string.mention_model_only)
+                                                        },
+                                                        fontSize = 11.sp,
+                                                        color = ChatColors.secondaryText,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = stringResource(
+                                                        if (entry.host) R.string.group_chat_host_suffix
+                                                        else R.string.mention_model_badge
+                                                    ),
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Medium,
+                                                    color = ChatColors.secondaryText,
+                                                    modifier = Modifier
+                                                        .background(
+                                                            ChatColors.toolCapsuleBg,
+                                                            RoundedCornerShape(8.dp),
+                                                        )
+                                                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (mentionEntries.isEmpty()) {
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -6153,6 +6272,16 @@ fun ChatScreen(
                                         // here live.
                                         val soulName by com.openminis.app.agent.SoulStore
                                             .cachedMetadata.collectAsState()
+                                        val groupChatOn by viewModel.groupChatEnabled.collectAsState()
+                                        if (groupChatOn) {
+                                            Text(
+                                                stringResource(R.string.chat_input_placeholder_group),
+                                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
+                                                fontSize = 16.5.sp * chatInputFontScale,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        } else {
                                         // [T-android-composer-placeholder-rotation]
                                         // Crossfade between hints. Reduce-motion
                                         // (animator scale 0) skips the fade and
@@ -6171,6 +6300,7 @@ fun ChatScreen(
                                                 maxLines = 1,
                                                 overflow = TextOverflow.Ellipsis,
                                             )
+                                        }
                                         }
                                     },
                                     colors = OutlinedTextFieldDefaults.colors(
