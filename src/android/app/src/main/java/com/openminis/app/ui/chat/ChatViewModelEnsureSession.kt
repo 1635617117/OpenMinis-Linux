@@ -15,6 +15,7 @@ internal suspend fun ChatViewModel.ensureSession(): String {
         permissionMode = _permissionMode.value.name,
     )
     realSessionId = session.id
+    migrateGroupChatPrefs(fromId = sessionId, toId = session.id)
     // "New Chat in Group": file the just-promoted draft into its folder.
     // Unconditional (vs iOS setFolderIfUnfiled) — the session is seconds
     // old and nothing else can have filed it yet.

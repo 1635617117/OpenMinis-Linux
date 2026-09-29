@@ -2066,9 +2066,18 @@ class ChatViewModel(
     internal fun groupChatPrefs() =
         context.getSharedPreferences("minis_group_chat", android.content.Context.MODE_PRIVATE)
 
-    internal fun groupChatKey() = "enabled:${realSessionId.ifEmpty { sessionId }}"
+    /**
+     * Prefs must not read [realSessionId] while properties above it initialize.
+     * That field is still a JVM null, and `ifEmpty` is inlined to `String.length()`.
+     * That is the session-open crash. Promotion copies these keys and retargets
+     * [groupChatPrefsId].
+     */
+    @Volatile
+    internal var groupChatPrefsId: String = sessionId
 
-    internal fun closedKey() = "closed:${realSessionId.ifEmpty { sessionId }}"
+    internal fun groupChatKey() = "enabled:$groupChatPrefsId"
+
+    internal fun closedKey() = "closed:$groupChatPrefsId"
 
     private val _groupChatEnabled = MutableStateFlow(groupChatPrefs().getBoolean(groupChatKey(), false))
     val groupChatEnabled: StateFlow<Boolean> = _groupChatEnabled.asStateFlow()
@@ -2078,6 +2087,22 @@ class ChatViewModel(
 
     @Volatile
     internal var groupChatClosedAfterId: String? = groupChatPrefs().getString(closedKey(), null)
+
+    internal fun migrateGroupChatPrefs(fromId: String, toId: String) {
+        if (fromId == toId || fromId.isEmpty() || toId.isEmpty()) return
+        val prefs = groupChatPrefs()
+        val editor = prefs.edit()
+        if (prefs.contains("enabled:$fromId")) {
+            editor.putBoolean("enabled:$toId", prefs.getBoolean("enabled:$fromId", false))
+            editor.remove("enabled:$fromId")
+        }
+        prefs.getString("closed:$fromId", null)?.let { closed ->
+            editor.putString("closed:$toId", closed)
+            editor.remove("closed:$fromId")
+        }
+        editor.apply()
+        groupChatPrefsId = toId
+    }
 
     fun setGroupChatEnabled(enabled: Boolean) {
         groupChatPrefs().edit().putBoolean(groupChatKey(), enabled).apply()
