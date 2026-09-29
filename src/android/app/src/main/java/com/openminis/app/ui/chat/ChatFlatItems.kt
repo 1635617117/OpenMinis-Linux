@@ -401,7 +401,14 @@ internal fun buildFlatChatItems(
         val prevNonSystem = (idx - 1 downTo 0).asSequence()
             .map { messages[it] }
             .firstOrNull { it.role != "system" }
-        val isResumeContinuation = prevNonSystem?.role == "assistant"
+        // Resume reuses the previous assistant turn, so a second unnamed bubble
+        // must not grow a second soul header. A different group-chat speaker
+        // is a new person and always gets their own mark. Same name means the
+        // same model continued, not a new participant.
+        val prevSpeaker = prevNonSystem?.speakerName?.trim().orEmpty()
+        val thisSpeaker = message.speakerName?.trim().orEmpty()
+        val isResumeContinuation = prevNonSystem?.role == "assistant" &&
+            prevSpeaker == thisSpeaker
 
         val blocks = message.toolBlocks
         val toolPillBlocks = blocks.filter { it.kind == "tool_use" }

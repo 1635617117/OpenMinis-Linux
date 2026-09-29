@@ -2236,11 +2236,14 @@
     <string name="execution_idle_help">只回收确认空闲的 Shell。后台进程受保护，进程状态不确定时不自动回收。回收后 Shell 内临时变量和工作目录会重置。</string>
     <string name="chat_menu_group_chat">AI 群聊</string>
     <string name="chat_menu_end_group_chat">结束讨论</string>
-    <string name="group_chat_banner">AI 群聊已开启。模型按不同立场直接讨论；@模型名只叫一个人。点结束，或发送「总结一下」，才出汇报。</string>
+    <string name="group_chat_banner">AI 群聊已开启。每个模型单独头像、分段发言；@模型名只叫一个人。点结束，或发送「总结一下」，出汇报并退出群聊。</string>
     <string name="group_chat_analyzing">正在分析…</string>
     <string name="group_chat_framing">正在整理问题…</string>
     <string name="group_chat_summarizing">正在汇总讨论…</string>
     <string name="group_chat_host_suffix">主持</string>
     <string name="group_chat_need_models">AI 群聊需要至少两个不同模型。请先到设置 → 多智能体，为团队模型选择其他模型。</string>
     <string name="group_chat_nothing_to_close">当前没有可结束的讨论。</string>
+    <string name="group_chat_no_provider">结束讨论失败：当前没有可用模型。</string>
+    <string name="group_chat_passed">本轮不补充。</string>
+    <string name="group_chat_member_failed">%1$s 没说上：%2$s</string>
 </resources>

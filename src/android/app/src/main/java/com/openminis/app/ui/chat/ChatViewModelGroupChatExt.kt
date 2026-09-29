@@ -49,10 +49,21 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         mainEntry?.model?.displayName ?: currentModel?.displayName,
         hostSnapshot?.providerTypeRaw,
     )
-    val members = groupMembers(config.modelEntries, mainEntry?.id)
+    val slotMembers = groupMembers(config.modelEntries, mainEntry?.id)
     val hostPlain = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "Host"
+    val hostMember = GroupMember(
+        name = hostPlain,
+        vendor = hostVendor,
+        provider = provider,
+        snapshot = hostSnapshot,
+        maxTokens = (mainEntry?.model?.maxOutputTokens ?: 1024).coerceIn(256, 2048),
+        temperature = mainEntry?.overrides?.temperature,
+        thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
+            ?: com.openminis.app.data.model.ThinkingLevel.OFF,
+    )
+    val members = listOf(hostMember) + slotMembers.filter { it.name != hostPlain }
     val wantsClose = closing || GroupChat.isCloseRequest(userText)
-    if (!wantsClose && members.isEmpty()) {
+    if (!wantsClose && members.size < 2) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
         return
     }
@@ -123,15 +134,24 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         if (summary.isNotBlank()) {
             groupChatClosedAfterId = _messages.value.lastOrNull { it.speakerName == hostName }?.id
             groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
+            setGroupChatEnabled(false)
         }
     }
     groupChatCloseRequested = false
 }
 
 internal fun ChatViewModel.endGroupChat() {
+    if (_isStreaming.value) {
+        groupChatCloseRequested = true
+        return
+    }
+    val provider = currentProvider ?: idleGroupProvider()
+    if (provider == null) {
+        appendSystemInfo(context.getString(com.openminis.app.R.string.group_chat_no_provider), "info")
+        return
+    }
+    currentProvider = provider
     groupChatCloseRequested = true
-    if (isStreaming.value) return
-    val provider = currentProvider ?: return
     _isStreaming.value = true
     streamJob = viewModelScope.launchActiveRun(
         activeSessionId,
@@ -162,6 +182,13 @@ private data class GroupMember(
     val thinkingLevel: com.openminis.app.data.model.ThinkingLevel,
 )
 
+private fun ChatViewModel.idleGroupProvider(): LLMProvider? {
+    val config = providerRepository.config.value
+    val entry = _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
+        ?: config.modelEntries.firstOrNull()
+    return entry?.let { providerForModelEntry(it) }
+}
+
 private fun ChatViewModel.groupMembers(
     entries: List<ModelEntry>,
     hostEntryId: String?,
@@ -172,7 +199,7 @@ private fun ChatViewModel.groupMembers(
         multiAgentSettings.maxConcurrent.value,
     )
     return ids.mapNotNull { id ->
-        if (id == hostEntryId) return@mapNotNull null
+        if (id.isBlank() || id == hostEntryId) return@mapNotNull null
         val entry = entries.find { it.id == id } ?: return@mapNotNull null
         val provider = providerForModelEntry(entry) ?: return@mapNotNull null
         GroupMember(
@@ -210,7 +237,8 @@ private suspend fun ChatViewModel.speakMembers(
     members.map { member ->
         async {
             if (groupChatCloseRequested) return@async null
-            val text = speakVisible(
+            val text = try {
+                speakVisible(
                 speaker = member.name,
                 snapshot = member.snapshot,
                 provider = member.provider,
@@ -224,6 +252,22 @@ private suspend fun ChatViewModel.speakMembers(
                 vendor = member.vendor,
                 deferBubble = deferBubble,
             )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                upsertGroupBubble(
+                    UUID.randomUUID().toString(),
+                    member.name,
+                    context.getString(
+                        com.openminis.app.R.string.group_chat_member_failed,
+                        member.name,
+                        e.message ?: e.javaClass.simpleName,
+                    ),
+                    analyzing = false,
+                    vendor = member.vendor,
+                )
+                return@async null
+            }
             text.takeIf { it.isNotBlank() }?.let { GroupChat.Line(member.name, it) }
         }
     }.awaitAll().filterNotNull()
@@ -256,7 +300,17 @@ private suspend fun ChatViewModel.speakVisible(
         throw e
     }
     if (text.isBlank() || (allowPass && GroupChat.isPass(text))) {
-        if (!deferBubble) removeGroupBubble(id)
+        if (allowPass && !deferBubble) {
+            upsertGroupBubble(
+                id,
+                speaker,
+                context.getString(com.openminis.app.R.string.group_chat_passed),
+                analyzing = false,
+                vendor = vendor,
+            )
+        } else if (!deferBubble) {
+            removeGroupBubble(id)
+        }
         return ""
     }
     if (deferBubble) upsertGroupBubble(id, speaker, text, analyzing = false, vendor = vendor)
@@ -352,7 +406,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
                     content = text,
                     speakerName = speaker,
                     speakerVendor = vendor,
-                    isStreaming = true,
+                    isStreaming = analyzing,
                     isAwaitingModelResponse = analyzing,
                 ) else it
             }
@@ -363,7 +417,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
                 content = text,
                 speakerName = speaker,
                 speakerVendor = vendor,
-                isStreaming = true,
+                isStreaming = analyzing,
                 isAwaitingModelResponse = analyzing,
             )
         }

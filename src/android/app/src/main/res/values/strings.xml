@@ -2413,11 +2413,14 @@
     <string name="execution_idle_help">Only shells confirmed idle are reclaimed. Background processes are protected; uncertain process state prevents automatic reclamation. Shell-local variables and working directory reset after reclamation.</string>
     <string name="chat_menu_group_chat">AI group chat</string>
     <string name="chat_menu_end_group_chat">End discussion</string>
-    <string name="group_chat_banner">AI group chat is on. Models speak from different stances. @Name asks one model. End discussion, or send “总结一下”, for the report.</string>
+    <string name="group_chat_banner">AI group chat is on. Each model keeps its own mark. @Name asks one model. End discussion, or send “总结一下”, for the report. The switch turns off after the report.</string>
     <string name="group_chat_analyzing">Analyzing…</string>
     <string name="group_chat_framing">Framing the question…</string>
     <string name="group_chat_summarizing">Summarizing the discussion…</string>
     <string name="group_chat_host_suffix">Host</string>
     <string name="group_chat_need_models">AI group chat needs at least two different models. Choose teammates in Settings → Multi-agent.</string>
     <string name="group_chat_nothing_to_close">There is no discussion to end.</string>
+    <string name="group_chat_no_provider">Can’t end the discussion: no model is available.</string>
+    <string name="group_chat_passed">Nothing to add this round.</string>
+    <string name="group_chat_member_failed">%1$s could not speak: %2$s</string>
 </resources>
