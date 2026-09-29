@@ -2226,7 +2226,10 @@ class ChatViewModel(
     val mentionEntries: StateFlow<List<FileMentionIndex.Entry>> = combine(
         fileMentionIndex.entries,
         _mentionFilter,
-    ) { _, filter -> fileMentionIndex.matches(filter, limit = 50) }
+    ) { _, filter ->
+        fileMentionIndex.matches(filter, limit = 50)
+            .filterNot { it.linuxPath == "/var/minis/skills" || it.linuxPath.startsWith("/var/minis/skills/") }
+    }
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
@@ -2234,6 +2237,21 @@ class ChatViewModel(
      * chat is off; an open group must not offer skill paths, because those
      * tokens do not address a speaker and every model would answer.
      */
+    val mentionListsModels: StateFlow<Boolean> = combine(
+        _groupChatEnabled,
+        _mentionFilter,
+        _activeEntryId,
+        providerRepository.config,
+        multiAgentSettings.selectedModelEntryIds,
+    ) { enabled, filter, _, _, _ ->
+        if (enabled) true
+        else currentGroupMentions().any { !it.host } && !looksLikeFileMention(filter)
+    }.stateIn(
+        viewModelScope,
+        SharingStarted.Eagerly,
+        _groupChatEnabled.value || currentGroupMentions().any { !it.host },
+    )
+
     val groupMentions: StateFlow<List<GroupChat.MentionCandidate>> = combine(
         _groupChatEnabled,
         _activeEntryId,
@@ -2241,15 +2259,18 @@ class ChatViewModel(
         multiAgentSettings.selectedModelEntryIds,
         _mentionFilter,
     ) { enabled, _, _, _, filter ->
-        if (!enabled) emptyList()
-        else GroupChat.filterMentions(currentGroupMentions(), filter)
+        val roster = currentGroupMentions()
+        val show = enabled || (roster.any { !it.host } && !looksLikeFileMention(filter))
+        if (!show) emptyList() else GroupChat.filterMentions(roster, filter)
     }.stateIn(
         viewModelScope,
         SharingStarted.Eagerly,
-        if (_groupChatEnabled.value) {
-            GroupChat.filterMentions(currentGroupMentions(), _mentionFilter.value)
-        } else {
-            emptyList()
+        run {
+            val roster = currentGroupMentions()
+            val filter = _mentionFilter.value
+            val show = _groupChatEnabled.value ||
+                (roster.any { !it.host } && !looksLikeFileMention(filter))
+            if (!show) emptyList() else GroupChat.filterMentions(roster, filter)
         },
     )
 

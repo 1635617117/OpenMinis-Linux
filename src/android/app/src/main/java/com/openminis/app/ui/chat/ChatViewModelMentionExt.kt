@@ -91,13 +91,24 @@ import java.io.ByteArrayOutputStream
  * substituting the full-width form still trigger the picker — same
  * convention as slash commands accepting `／`.
  */
-internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
-    // The slash and mention pickers are mutually exclusive (iOS does
-    // the same). Slash takes priority.
-    if (_showSlashMenu.value) {
-        if (_showMentionMenu.value) dismissMentionMenu()
-        return
+internal fun looksLikeFileMention(filter: String): Boolean =
+    filter.contains('/') || filter.contains('\\') || filter.startsWith(".")
+
+/**
+ * `@` addresses models when group chat is on, and also when a team roster
+ * exists. Skill paths were winning that second case: the switch looked off
+ * after a restart, so the file picker opened and ranked `skills/` first.
+ * A path-shaped filter still means a file, but only while group chat is off.
+ */
+internal fun ChatViewModel.shouldListGroupModels(filter: String): Boolean {
+    if (!_groupChatEnabled.value && groupChatPrefs().getBoolean(groupChatKey(), false)) {
+        _groupChatEnabled.value = true
     }
+    if (_groupChatEnabled.value) return true
+    return currentGroupMentions().any { !it.host } && !looksLikeFileMention(filter)
+}
+
+internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
     val safeCaret = caret.coerceIn(0, text.length)
     // Walk back from caret to find an `@` that opens the active token.
     var anchor = -1
@@ -122,6 +133,18 @@ internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
     }
     val filter = text.substring(anchor + 1, safeCaret)
     val filterChanged = _mentionFilter.value != filter
+    val listModels = shouldListGroupModels(filter)
+    // Skill commands (`/`) must not stay on top of an @ that addresses a model.
+    // Slash still wins for a plain file mention.
+    if (listModels) {
+        if (_showSlashMenu.value) {
+            _showSlashMenu.value = false
+            _slashMenuSelectedIndex.value = -1
+        }
+    } else if (_showSlashMenu.value) {
+        if (_showMentionMenu.value) dismissMentionMenu()
+        return
+    }
     _mentionAnchor.value = anchor
     _mentionFilter.value = filter
     if (!_showMentionMenu.value) {
@@ -129,14 +152,13 @@ internal fun ChatViewModel.updateMentionMenuState(text: String, caret: Int) {
         // Mirror iOS: pre-select row 0 so a hardware-keyboard Return
         // commits the top match without an extra Down press.
         _mentionSelectedIndex.value = 0
-        // Group chat @ lists speakers. Scanning files here is what made the
-        // popup fill with skills/… paths that do not address anyone.
-        if (!groupChatEnabled.value) {
+        // Scanning files is what filled the popup with skills/… paths.
+        if (!listModels) {
             val sid = realSessionId.ifEmpty { sessionId }
             if (sid.isNotEmpty()) fileMentionIndex.refreshIfNeeded(sid)
         }
-        Log.i(ChatViewModel.TAG, "mention menu open anchor=$anchor filter=\"$filter\" group=${groupChatEnabled.value}")
-    } else if (groupChatEnabled.value && filterChanged) {
+        Log.i(ChatViewModel.TAG, "mention menu open anchor=$anchor filter=\"$filter\" models=$listModels")
+    } else if (listModels && filterChanged) {
         // The top row is the match Enter will insert. Don't keep a highlight
         // that belonged to the previous, longer list.
         _mentionSelectedIndex.value = 0
@@ -182,7 +204,7 @@ internal fun ChatViewModel.executeSelectedMention(
     currentText: String,
     currentCaret: Int,
 ): Pair<String, Int>? {
-    if (groupChatEnabled.value) {
+    if (shouldListGroupModels(_mentionFilter.value)) {
         val models = groupMentions.value
         if (models.isEmpty()) return null
         val idx = _mentionSelectedIndex.value.let {
@@ -255,7 +277,7 @@ internal fun ChatViewModel.currentGroupMentions(): List<GroupChat.MentionCandida
 }
 
 private fun ChatViewModel.activeMentionCount(): Int =
-    if (groupChatEnabled.value) groupMentions.value.size else mentionEntries.value.size
+    if (shouldListGroupModels(_mentionFilter.value)) groupMentions.value.size else mentionEntries.value.size
 
 /**
  * Replace the active `@<token>` in [currentText] with `@<linuxPath> ` and
@@ -273,7 +295,10 @@ internal fun ChatViewModel.selectMention(
     currentCaret: Int,
 ): Pair<String, Int> {
     val anchor = _mentionAnchor.value
-    if (anchor < 0 || anchor > currentText.length) {
+    if (anchor < 0 || anchor > currentText.length ||
+        entry.linuxPath == "/var/minis/skills" ||
+        entry.linuxPath.startsWith("/var/minis/skills/")
+    ) {
         dismissMentionMenu()
         return currentText to currentCaret
     }

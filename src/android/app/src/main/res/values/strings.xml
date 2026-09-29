@@ -93,7 +93,7 @@
     <string name="mention_no_model">No matching model</string>
     <string name="mention_model_badge">Model</string>
     <string name="mention_model_only">Only this one replies</string>
-    <string name="mention_model_caption">Pick one model. The others stay quiet.</string>
+    <string name="mention_model_caption">Models in this group. With group chat on, pick one and the others stay quiet.</string>
     <string name="chat_input_placeholder_group">Message the group, @ a model to call just one</string>
 
     <!-- T13: Resume banner (shown at the bottom of the message list when an interrupted agent loop can be resumed) -->

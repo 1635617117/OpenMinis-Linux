@@ -85,7 +85,7 @@
     <string name="mention_no_model">没有匹配的模型</string>
     <string name="mention_model_badge">模型</string>
     <string name="mention_model_only">只叫这一个</string>
-    <string name="mention_model_caption">点一个模型，其他人这轮不发言</string>
+    <string name="mention_model_caption">群里的模型。群聊开着时，点一个，其他人这轮不发言</string>
     <string name="chat_input_placeholder_group">发消息，@模型名只叫一个人</string>
     <string name="resume_banner_title">已中断 - 点击「继续」以恢复</string>
     <string name="resume_action">继续</string>

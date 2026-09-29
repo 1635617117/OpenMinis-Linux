@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.12-linux
+
+- versionCode **212**
+- `@` 不再列出技能。技能只从 `/` 进入。群聊开着，或已经选了其他模型时，`@` 只列出群里的模型；点名后只有那一个发言。
+
+---
+
 # OpenMinis-Linux 2.0.10-linux
 
 - versionCode **210**

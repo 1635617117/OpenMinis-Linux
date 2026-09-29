@@ -2929,9 +2929,12 @@ fun ChatScreen(
                                 onClick = { viewModel.setGroupChatEnabled(!groupChatOn) },
                                 leadingIcon = { Icon(Icons.Default.Forum, contentDescription = null) },
                                 trailingIcon = {
+                                    // The row already toggles. A live switch here
+                                    // also consumes the tap and flips the flag
+                                    // back off, so @ keeps opening skill files.
                                     SettingsSwitch(
                                         checked = groupChatOn,
-                                        onCheckedChange = { viewModel.setGroupChatEnabled(it) },
+                                        onCheckedChange = null,
                                     )
                                 },
                             )
@@ -5101,7 +5104,7 @@ fun ChatScreen(
                 val mentionEntries by viewModel.mentionEntries.collectAsState()
                 val isMentionScanning by viewModel.isMentionScanning.collectAsState()
                 val mentionSelectedIndex by viewModel.mentionSelectedIndex.collectAsState()
-                val groupChatMentioning by viewModel.groupChatEnabled.collectAsState()
+                val groupChatMentioning by viewModel.mentionListsModels.collectAsState()
                 val groupMentions by viewModel.groupMentions.collectAsState()
                 if (showMentionMenu) {
                     androidx.compose.ui.window.Popup(

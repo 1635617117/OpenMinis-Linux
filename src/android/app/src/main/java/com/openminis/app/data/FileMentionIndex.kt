@@ -21,7 +21,8 @@ import java.util.UUID
  *
  * ### Layers
  *   1. **Session roots** — `workspace/<sid>` + `attachments/<sid>`.
- *   2. **Shared roots** — `shared/`, `skills/`. Session `memory/` is layer 1.
+ *   2. **Shared roots** — `shared/` only. Session `memory/` is layer 1.
+ *      Skills are not an @ target; `/` is the skill picker.
  *   3. **Mount roots** — each entry in [mountsProvider] (e.g. SAF-attached
  *      folders). Each mount always gets a self-entry so `@<mountName>` works.
  *
@@ -49,8 +50,8 @@ class FileMentionIndex(
      * Scope priorities — `order` doubles as the empty-query default sort key
      * (lower wins) AND drives `rankBoost`'s scope tiebreaker on top of the
      * name-match score. The case order here mirrors the iOS counterpart in
-     * `FileMentionIndex.swift`:
-     *   skills > attachments > mount > shared > workspace > memory.
+     * `FileMentionIndex.swift`, except skills are omitted from @ entirely:
+     *   attachments > mount > shared > workspace > memory.
      *
      * `rankBoost` is added to the per-name score with a max delta (600) that
      * is smaller than the gap between adjacent name-match tiers (1000), so a
@@ -58,12 +59,11 @@ class FileMentionIndex(
      * higher-priority scope.
      */
     enum class Scope(val displayLabel: String, val order: Int, val rankBoost: Int) {
-        SKILLS("skills", 0, 600),
-        ATTACHMENTS("attachments", 1, 500),
-        MOUNT("mount", 2, 400),
-        SHARED("shared", 3, 300),
-        WORKSPACE("workspace", 4, 200),
-        MEMORY("memory", 5, 100),
+        ATTACHMENTS("attachments", 0, 500),
+        MOUNT("mount", 1, 400),
+        SHARED("shared", 2, 300),
+        WORKSPACE("workspace", 3, 200),
+        MEMORY("memory", 4, 100),
     }
 
     data class MountEntry(val name: String, val root: File)
@@ -137,14 +137,13 @@ class FileMentionIndex(
                 publish(token, collected)
             }
 
-            // Layer 2: tools shared by every chat (not session memory).
+            // Layer 2: shared files only. skills/ is invoked with `/`, never `@`.
             // filesDir here IS minis-global (see the Context constructor), which
-            // is where the shell bind actually mounts skills/ and shared/.
+            // is where the shell bind actually mounts shared/.
             layerEntries(
                 sessionId = sessionId,
                 layers = listOf(
                     File(filesDir, "shared") to Scope.SHARED,
-                    File(filesDir, "skills") to Scope.SKILLS,
                 ),
                 linuxRootFor = { scope -> "/var/minis/${scope.displayLabel}" },
             ).let { newBatch ->
@@ -259,7 +258,10 @@ class FileMentionIndex(
     private suspend fun publish(token: UUID, collected: List<Entry>) {
         if (currentScanToken != token) return
         // Deduplicate by linuxPath (later scans may revisit) and sort per defaultOrdering.
-        val deduped = collected.associateBy { it.linuxPath }.values
+        val deduped = collected
+            .filterNot { isSkillPath(it.linuxPath) }
+            .associateBy { it.linuxPath }
+            .values
         val sorted = deduped.sortedWith(defaultOrdering)
         withContext(Dispatchers.Main) {
             if (currentScanToken != token) return@withContext
@@ -283,7 +285,7 @@ class FileMentionIndex(
      * stronger name match always wins regardless of scope.
      */
     fun matches(query: String, limit: Int = DEFAULT_MATCH_LIMIT): List<Entry> {
-        val all = _entries.value
+        val all = _entries.value.filterNot { isSkillPath(it.linuxPath) }
         if (query.isBlank()) return all.take(limit)
         val q = query.lowercase()
 
@@ -312,8 +314,8 @@ class FileMentionIndex(
             // Scope priority (max 600 — well below the 1000 tier gap).
             val scopeScore = entry.scope.rankBoost
 
-            // Top-level scope-root bonus: typing `@codex` should surface the
-            // whole `skills/codex-image` directory above its children.
+            // Top-level scope-root bonus: typing `@photos` should surface the
+            // whole mount or shared directory above its children.
             val topLevelBonus = if (isTopLevelScopeRoot(entry)) 50 else 0
 
             // Recency micro-bonus (≤ 80). Linear decay over 8 weeks.
@@ -370,15 +372,14 @@ class FileMentionIndex(
 
     /**
      * Is this entry the immediate child of a scope root? e.g.
-     * `/var/minis/skills/foo`, `/var/minis/mounts/bar`,
-     * `/var/minis/shared/baz`. These first-class `@`-targets get a +50
-     * ranking bonus so typing `@foo` surfaces the whole skill directory
-     * above its individual files (mirrors iOS).
+     * `/var/minis/mounts/bar`, `/var/minis/shared/baz`. These first-class
+     * `@`-targets get a +50 ranking bonus so typing `@foo` surfaces the
+     * directory above its individual files. Skill directories are not
+     * `@` targets.
      */
     private fun isTopLevelScopeRoot(entry: Entry): Boolean {
         if (!entry.isDirectory) return false
         val tops = listOf(
-            "/var/minis/skills/",
             "/var/minis/mounts/",
             "/var/minis/shared/",
         )
@@ -391,6 +392,9 @@ class FileMentionIndex(
         }
         return false
     }
+
+    private fun isSkillPath(linuxPath: String): Boolean =
+        linuxPath == "/var/minis/skills" || linuxPath.startsWith("/var/minis/skills/")
 
     private val defaultOrdering: Comparator<Entry> = compareBy<Entry> { it.scope.order }
         .thenByDescending { isTopLevelScopeRoot(it) }
