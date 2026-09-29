@@ -56,12 +56,12 @@ PRoot 会在客户机里**假装** uid 0。那不是主机 root。主机 root �
 ```
 apt-get update && apt-get install -y python3
 minis-dev-setup              # bash, gcc, python3, git, ffmpeg, openjdk-21, gradle, golang-go
-minis-android-sdk-setup      # aarch64 aapt2 + platforms 36/35 + CMake 3.31.6 (fallback 3.22.1) + NDK r29 (fallback r28c/r28b/r28)
+minis-android-sdk-setup      # aarch64 aapt2 + platforms 36/35 + CMake 3.31.6 (fallback 3.22.1) + NDK r29 (29.0.14206865)
 yum install python3          # → apt-get install -y python3
 ```
 
 `aapt2` / `zipalign` / `adb` 以 **aarch64** 静态二进制打进 APK（AOSP，来自 lzhiyong/android-sdk-tools 35.0.2），解压到 `/opt/android-sdk`。
-`sdkmanager`（Google cmdline-tools 12.0，Java）也捆绑了——精简到 sdkmanager 的 classpath（约 20MB，丢掉 lint/R8/kotlin-compiler）。它跑在 aarch64 OpenJDK 上，**只用来拉** `platforms;android-36` 和 `platforms;android-35`。CMake 默认 3.31.6（失败则 3.22.1），NDK 默认 r29（失败则 r28c/r28b/r28），均走 aarch64 构建（Kitware / lzhiyong termux-ndk）。不要用 sdkmanager 装 Google 的 linux x86_64 宿主包。
+`sdkmanager`（Google cmdline-tools 12.0，Java）也捆绑了——精简到 sdkmanager 的 classpath（约 20MB，丢掉 lint/R8/kotlin-compiler）。它跑在 aarch64 OpenJDK 上，**只用来拉** `platforms;android-36` 和 `platforms;android-35`。CMake 默认 3.31.6（失败则 3.22.1）。NDK 只装 r29（`29.0.14206865`，lzhiyong/termux-ndk 的 `android-ndk-r29-aarch64.tar.xz`）。已有 r28 会留下，但不算安装成功，失败也不回退 r28。不要用 sdkmanager 装 Google 的 linux x86_64 宿主包。
 
 **严禁**在客户机里安装 Google 的 linux build-tools / cmake / ndk：那是 x86_64，会把 aapt2 覆盖成无法执行的 ELF，或留下不能跑的 clang。完整镜像清单见内置技能 `android-sdk-mirrors` 和 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
 

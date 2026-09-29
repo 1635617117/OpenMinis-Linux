@@ -21,14 +21,27 @@ if [[ -x "$ROOT/scripts/prepare_android_sandbox.sh" ]]; then
   "$ROOT/scripts/prepare_android_sandbox.sh" || true
 fi
 
-# Resolve NDK before CMake/Gradle so crash_handler can link _Unwind_*.
+# Resolve the pinned NDK before CMake/Gradle so crash_handler can link _Unwind_*.
+# Do not pick an existing r28 tree or "the highest" side-by-side install.
+PINNED_NDK_REV="29.0.14206865"
 NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
 if [[ -z "$NDK" ]]; then
   local_sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-  NDK=$(ls -d "$local_sdk"/ndk/* 2>/dev/null | sort -V | tail -n 1 || true)
+  if [[ -d "$local_sdk/ndk/$PINNED_NDK_REV" ]]; then
+    NDK="$local_sdk/ndk/$PINNED_NDK_REV"
+  fi
 fi
 if [[ -z "$NDK" || ! -d "$NDK" ]]; then
-  echo "ERROR: Android NDK not found (set ANDROID_NDK_HOME or install ndk under ANDROID_HOME)" >&2
+  echo "ERROR: Android NDK $PINNED_NDK_REV not found (set ANDROID_NDK_HOME or sdkmanager \"ndk;$PINNED_NDK_REV\")" >&2
+  exit 1
+fi
+ndk_rev=""
+if [[ -f "$NDK/source.properties" ]]; then
+  ndk_rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$NDK/source.properties")
+fi
+[[ -n "$ndk_rev" ]] || ndk_rev=$(basename "$NDK")
+if [[ "$ndk_rev" != "$PINNED_NDK_REV" ]]; then
+  echo "ERROR: refusing NDK $NDK (revision ${ndk_rev:-unknown}); need $PINNED_NDK_REV" >&2
   exit 1
 fi
 

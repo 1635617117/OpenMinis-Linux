@@ -32,7 +32,7 @@ in a local `gradle-wrapper.properties` if `services.gradle.org` is blocked.
 - SDK 根目录默认 `/opt/android-sdk`
 - `sdkmanager` **只用来拉** `platforms;android-36` 和 `platforms;android-35`（android.jar）
 - CMake 3.22.1：Kitware `cmake-3.22.1-linux-aarch64.tar.gz` → `/opt/android-sdk/cmake/3.22.1`
-- NDK r28+：[lzhiyong/termux-ndk](https://github.com/lzhiyong/termux-ndk/releases) aarch64 zip（约 1GB；`MINIS_SKIP_NDK=1` 可跳过）
+- NDK r29（`29.0.14206865`）：[lzhiyong/termux-ndk](https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.tar.xz) 的 aarch64 `tar.xz`（tag `android-ndk`，约 1GB；`MINIS_SKIP_NDK=1` 可跳过）。`releases/download/r29/*.zip` 是 404。已有 r28 不算可用，也不再回退安装 r28
 
 ```
 minis-android-sdk-setup
@@ -86,8 +86,8 @@ https://mirrors.cloud.tencent.com/android/repository/platform-35_r02.zip
 
 - `ubuntu-base.tar.gz` 太大，不进 git；CI 必须现拉
 - 不要 vendor 完整 Google cmdline-tools（约 146MB）；只要精简 sdkmanager
-- NDK / CMake / platforms 在 **x86_64 编译主机** 上用官方 sdkmanager 安装是安全的
-- 客户机里永远不要装 Google linux build-tools / cmake / ndk
+- NDK / CMake / platforms 在 **x86_64 编译主机** 上用官方 sdkmanager 安装是安全的。云端 workflow 钉 `ndk;29.0.14206865`，与 Gradle `ndkVersion` 同一修订号
+- 客户机里永远不要装 Google linux build-tools / cmake / ndk。客户机 NDK 只接受 r29 `29.0.14206865` 的 linux-aarch64 clang
 - 客户机：先 `minis-dev-setup`（TMPDIR=/tmp、ca-certificates、apt -f）再 `minis-android-sdk-setup`
 
 ## 验收
@@ -95,4 +95,4 @@ https://mirrors.cloud.tencent.com/android/repository/platform-35_r02.zip
 - `file /opt/android-sdk/build-tools/*/aapt2` 必须是 **ARM aarch64**，不是 x86-64
 - `aapt2 version` 能运行
 - 只有在镜像或直连成功后才去拉 `android.jar` / platforms
-- `file /opt/android-sdk/cmake/3.22.1/bin/cmake` 与 NDK `linux-aarch64/bin/clang` 必须是 ARM aarch64
+- `file /opt/android-sdk/cmake/3.22.1/bin/cmake` 与 `/opt/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-aarch64/bin/clang` 必须是 ARM aarch64。旁边的 r28 目录不算已安装

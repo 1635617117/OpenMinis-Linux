@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# 为 NDK r27/r28+ 交叉编译 LLVM libunwind 静态库，安装进
+# 为钉死的 NDK r29（29.0.14206865）交叉编译 LLVM libunwind 静态库，安装进
 #   $NDK/toolchains/llvm/prebuilt/*/sysroot/usr/lib/aarch64-linux-android/
 #
-# NDK r28 起 sysroot 不再提供 libunwind.so；crash_handler.cpp 仍调用
-# _Unwind_Backtrace / _Unwind_GetIP，且链接带 -Wl,--no-undefined。
+# NDK r28 起 sysroot 不再提供 libunwind.so；r29 同样没有可用的 host
+# libunwind.so。crash_handler.cpp 仍调用 _Unwind_Backtrace / _Unwind_GetIP，
+# 且链接带 -Wl,--no-undefined。只接受修订号 29.0.14206865，不把已有 r28 当成目标。
 # 链接期需要静态库 + -lunwind（由 build_apk_aarch64.sh 给包装 clang++ 追加）。
 #
 # 用法:
 #   scripts/build_libunwind_aarch64.sh [ndk_path ...]
-# 无参数时使用 ANDROID_NDK_HOME / ANDROID_NDK_ROOT / $ANDROID_HOME/ndk/*
+# 无参数时使用 ANDROID_NDK_HOME / ANDROID_NDK_ROOT / $ANDROID_HOME/ndk/29.0.14206865
 #
 # 环境变量:
 #   LLVM_SRC      源码目录，默认 /opt/llvm-project（已存在则跳过 clone）
@@ -36,27 +37,48 @@ SPARSE_DIRS=(
   compiler-rt/cmake
 )
 
+PINNED_NDK_REV="29.0.14206865"
+
+ndk_pkg_revision() {
+  local dir="$1" rev=""
+  if [[ -f "$dir/source.properties" ]]; then
+    rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$dir/source.properties")
+  fi
+  if [[ -z "$rev" ]]; then
+    rev=$(basename "$dir")
+  fi
+  printf '%s\n' "$rev"
+}
+
+require_pinned_ndk() {
+  local dir="$1" rev
+  [[ -d "$dir" ]] || die "NDK 不存在: $dir"
+  rev=$(ndk_pkg_revision "$dir")
+  [[ "$rev" == "$PINNED_NDK_REV" ]] || die "需要 NDK $PINNED_NDK_REV，拒绝 $dir（revision ${rev:-unknown}）。不要用 r28。"
+}
+
 collect_ndks() {
   local -a out=()
-  local p
+  local p sdk
   if [[ "$#" -gt 0 ]]; then
     for p in "$@"; do
-      [[ -d "$p" ]] || die "NDK 不存在: $p"
+      require_pinned_ndk "$p"
       out+=("$p")
     done
   else
     for p in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
-      [[ -n "$p" && -d "$p" ]] && out+=("$p")
+      if [[ -n "$p" && -d "$p" ]]; then
+        require_pinned_ndk "$p"
+        out+=("$p")
+      fi
     done
-    local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-    if [[ -n "$sdk" && -d "$sdk/ndk" ]]; then
-      while IFS= read -r p; do
-        [[ -n "$p" ]] && out+=("$p")
-      done < <(ls -d "$sdk"/ndk/* 2>/dev/null || true)
+    sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+    if [[ -d "$sdk/ndk/$PINNED_NDK_REV" ]]; then
+      out+=("$sdk/ndk/$PINNED_NDK_REV")
     fi
   fi
   if [[ "${#out[@]}" -eq 0 ]]; then
-    die "未找到 NDK。传入路径，或设置 ANDROID_NDK_HOME / ANDROID_HOME"
+    die "未找到 NDK $PINNED_NDK_REV。传入路径，或设置 ANDROID_NDK_HOME / ANDROID_HOME"
   fi
   # 去重
   printf '%s\n' "${out[@]}" | awk 'NF && !seen[$0]++'

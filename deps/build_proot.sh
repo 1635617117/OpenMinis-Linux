@@ -27,8 +27,9 @@ set -e
 # Repository: https://github.com/OpenMinis/proot (fork of termux/proot)
 #
 # Prerequisites:
-#   - Android NDK r28+ (default path: ~/Library/Android/sdk/ndk/28.0.12433566,
-#     or set $ANDROID_NDK_HOME)
+#   - Android NDK r29 (29.0.14206865). Set $ANDROID_NDK_HOME to that
+#     revision, or install it with sdkmanager "ndk;29.0.14206865".
+#     An existing r28 tree is not accepted.
 #   - curl, tar, make, awk, sed
 #
 # Usage:
@@ -45,8 +46,9 @@ set -e
 # Note on reproducibility: these artifacts are NOT byte-identical across NDK
 # releases — the loader's .text differs between toolchain generations (the
 # binaries this repo shipped before they were untracked were built with
-# clang 21; NDK r28 carries clang 19). Functionally equivalent; do not expect
-# checksums to match an older build.
+# clang 21; NDK r28 carries clang 19). This repo now pins NDK r29
+# (29.0.14206865). Functionally equivalent across those toolchains; do not
+# expect checksums to match an older build.
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,18 +90,31 @@ log_error()   { echo -e "${RED}[build_proot] $1${NC}" >&2; exit 1; }
 # ----------------------------------------------------------------------------
 # Locate NDK + clang
 # ----------------------------------------------------------------------------
-resolve_ndk() {
-    if [ -n "$ANDROID_NDK_HOME" ] && [ -d "$ANDROID_NDK_HOME" ]; then
-        echo "$ANDROID_NDK_HOME"
-        return
-    fi
-    if [ -n "$ANDROID_NDK_ROOT" ] && [ -d "$ANDROID_NDK_ROOT" ]; then
-        echo "$ANDROID_NDK_ROOT"
-        return
-    fi
+PINNED_NDK_REV="29.0.14206865"
 
-    # Auto-detect highest available NDK in the SDK folder
-    local base latest
+ndk_pkg_revision() {
+    local dir="$1" rev=""
+    if [ -f "$dir/source.properties" ]; then
+        rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$dir/source.properties")
+    fi
+    if [ -z "$rev" ]; then
+        rev=$(basename "$dir")
+    fi
+    printf '%s\n' "$rev"
+}
+
+resolve_ndk() {
+    local candidate base
+    for candidate in "${ANDROID_NDK_HOME:-}" "${ANDROID_NDK_ROOT:-}"; do
+        if [ -n "$candidate" ] && [ -d "$candidate" ]; then
+            if [ "$(ndk_pkg_revision "$candidate")" = "$PINNED_NDK_REV" ]; then
+                echo "$candidate"
+                return
+            fi
+            log_error "Refusing NDK $candidate (revision $(ndk_pkg_revision "$candidate")). This tree pins $PINNED_NDK_REV."
+        fi
+    done
+
     for base in \
         "${ANDROID_SDK_ROOT:-}/ndk" \
         "${ANDROID_HOME:-}/ndk" \
@@ -107,15 +122,12 @@ resolve_ndk() {
         "$HOME/Android/Sdk/ndk" \
         "/opt/android-sdk/ndk"
     do
-        [ -n "$base" ] && [ -d "$base" ] || continue
-        latest=$(ls "$base" 2>/dev/null | sort -V | tail -n 1)
-        if [ -n "$latest" ]; then
-            echo "$base/$latest"
-            return
-        fi
+        [ -n "$base" ] && [ -d "$base/$PINNED_NDK_REV" ] || continue
+        echo "$base/$PINNED_NDK_REV"
+        return
     done
 
-    log_error "Android NDK not found. Set \$ANDROID_NDK_HOME or run minis-android-sdk-setup in the guest."
+    log_error "Android NDK $PINNED_NDK_REV not found. Set \$ANDROID_NDK_HOME to that revision (sdkmanager \"ndk;$PINNED_NDK_REV\")."
 }
 
 setup_toolchain() {

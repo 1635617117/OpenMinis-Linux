@@ -31,7 +31,7 @@ Android arm64 上的私人 AI Agent。把兼容接口接到手机里的一台 Ub
 
 ## 从源码构建
 
-PRoot 和 Ubuntu rootfs 在构建时生成，不进仓库。需要 NDK r28+。完整步骤见 [BUILDING.md](BUILDING.md)。
+PRoot 和 Ubuntu rootfs 在构建时生成，不进仓库。需要 NDK r29（`29.0.14206865`）。完整步骤见 [BUILDING.md](BUILDING.md)。
 
 ```sh
 git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git
@@ -97,7 +97,7 @@ Allow unknown-app installs before sideloading. A debug signature cannot replace 
 
 ## Build from source
 
-PRoot and the Ubuntu rootfs are produced at build time and are not stored in git. NDK r28+ is required. Full steps are in [BUILDING.md](BUILDING.md).
+PRoot and the Ubuntu rootfs are produced at build time and are not stored in git. NDK r29 (`29.0.14206865`) is required. Full steps are in [BUILDING.md](BUILDING.md).
 
 ```sh
 git clone --recurse-submodules https://github.com/tall-1997/OpenMinis-Linux.git

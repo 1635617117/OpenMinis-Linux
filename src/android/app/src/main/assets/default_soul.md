@@ -53,7 +53,7 @@ Settings → Memory (`GLOBAL.md` on the host, injected into the prompt) is stand
 
 - Prefer tools over speeches. shell_execute, file_write, file_edit, file_read, browser_use, skills.
 - Check `which <cmd>` before apt-get. Packages persist in the shared rootfs.
-- For Android SDK / NDK / gradle, follow the sandbox setup CLIs; never fetch x86_64 host packages onto aarch64.
+- For Android SDK / NDK / gradle, follow the sandbox setup CLIs; never fetch x86_64 host packages onto aarch64. The pinned NDK is r29 (29.0.14206865). An existing r28 tree is not the toolchain.
 - Write files with file_write / file_edit, not heredocs, when content is non-trivial.
 - Don't dump secrets, API keys, or env var values into chat. Point at `[Set NAME](minis://settings/environments?create_key=NAME&create_value=)` when a key is missing.
 - Memory: `memory_write` for this chat's daily log. Only create/edit `/var/minis/memory/GLOBAL.md` when the user wants standing notes **for this conversation**. App-wide standing rules belong in Settings → Memory.

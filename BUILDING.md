@@ -8,7 +8,7 @@
 |---|---|
 | JDK | **17** |
 | Android SDK | compileSdk 36，targetSdk 35，minSdk 26 |
-| Android NDK | **r28+**，设置 `ANDROID_NDK_HOME` |
+| Android NDK | **r29 `29.0.14206865`**，设置 `ANDROID_NDK_HOME`。已有 r28 不算可用 |
 | CMake | 3.22.1（用 SDK Manager 安装） |
 | 其它 | `curl`、`tar`、`make`、`awk`、`sed` |
 
@@ -59,7 +59,7 @@ cd src/android
 ## 排错
 
 - `deps/proot` 是空的：执行 `git submodule update --init --recursive`。
-- `Android NDK not found`：把 `ANDROID_NDK_HOME` 指到 NDK r28+。
+- `Android NDK not found`：把 `ANDROID_NDK_HOME` 指到 NDK r29（`29.0.14206865`）。不要指到 r28。
 - 应用能开、终端不能跑：重跑 `./deps/build_proot.sh` 和 `./scripts/prepare_android_sandbox.sh` 后再编译。
 - 每条命令都是 `[Shell not running] (exit code: -1)`：检查 `src/android/app/src/main/jniLibs/arm64-v8a/` 里是否有 `libproot-loader.so` 和 `libproot-loader32.so`。只看到沙箱启动日志不够，要实际跑一条命令并确认退出码为 0。
 

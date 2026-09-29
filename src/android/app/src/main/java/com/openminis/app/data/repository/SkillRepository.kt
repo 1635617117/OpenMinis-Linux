@@ -1259,7 +1259,7 @@ class SkillRepository(private val context: Context) {
 
     private fun installBundledSkills() {
         installOrUpgradeBundled("skill-creator", "2.0.0", SKILL_CREATOR_CONTENT)
-        installOrUpgradeBundled("android-sdk-mirrors", "1.1.0", ANDROID_SDK_MIRRORS_CONTENT)
+        installOrUpgradeBundled("android-sdk-mirrors", "1.2.0", ANDROID_SDK_MIRRORS_CONTENT)
         installOrUpgradeBundled(
             ANDROID_DEVICE_OPS_SKILL_ID,
             ANDROID_DEVICE_OPS_SKILL_VERSION,
@@ -1996,7 +1996,7 @@ Do not create extraneous files: README.md, INSTALLATION_GUIDE.md, CHANGELOG.md, 
 private val ANDROID_SDK_MIRRORS_CONTENT = """
 ---
 name: android-sdk-mirrors
-version: 1.1.0
+version: 1.2.0
 description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 注意事项。当用户需要安装 Android SDK、sdkmanager、build-tools、platforms，或遇到 Google dl.google.com 无法访问、aapt2 被 x86_64 覆盖时使用本技能。
 ---
 
@@ -2012,7 +2012,7 @@ description: Android SDK 在中国大陆的下载、镜像源与 aarch64 aapt2 �
 - SDK 根目录默认 `/opt/android-sdk`
 - `sdkmanager` **只用来拉** `platforms;android-36` 和 `platforms;android-35`（android.jar）
 - CMake 3.22.1 用 Kitware **linux-aarch64** 包，放到 `/opt/android-sdk/cmake/3.22.1`
-- NDK r28+ 用 [lzhiyong/termux-ndk](https://github.com/lzhiyong/termux-ndk/releases) 的 **aarch64** 包
+- NDK r29（`29.0.14206865`）用 [lzhiyong/termux-ndk](https://github.com/lzhiyong/termux-ndk/releases/download/android-ndk/android-ndk-r29-aarch64.tar.xz) 的 **aarch64** `tar.xz`（tag `android-ndk`）。已有 r28 不算可用，失败不回退 r28。`releases/download/r29/*.zip` 是 404
 
 ```
 minis-android-sdk-setup
@@ -2093,7 +2093,7 @@ sdkmanager --sdk_root="${'$'}{ANDROID_SDK_ROOT:-/opt/android-sdk}" \
 
 - `ubuntu-base.tar.gz` 太大，不进 git；CI 必须现拉
 - 不要 vendor 完整 Google cmdline-tools（约 146MB）；只要精简 sdkmanager
-- NDK / CMake / platforms 在 **x86_64 的 GitHub-hosted runner** 上用官方 sdkmanager 安装是安全的（那是编译主机，不是 aarch64 客户机）
+- NDK / CMake / platforms 在 **x86_64 的 GitHub-hosted runner** 上用官方 sdkmanager 安装是安全的（那是编译主机，不是 aarch64 客户机）。云端钉 `ndk;29.0.14206865`，与 Gradle `ndkVersion` 同一修订号
 - 客户机里永远不要装 Google linux build-tools / cmake / ndk
 - 客户机补工具链：`minis-dev-setup`（先修 TMPDIR=/tmp 与 ca-certificates）然后 `minis-android-sdk-setup`
 
@@ -2103,7 +2103,7 @@ sdkmanager --sdk_root="${'$'}{ANDROID_SDK_ROOT:-/opt/android-sdk}" \
 - `aapt2 version` 能运行
 - 只有在镜像或直连成功后才去拉 `android.jar` / platforms
 - `file /opt/android-sdk/cmake/3.22.1/bin/cmake` 必须是 ARM aarch64
-- `file /opt/android-sdk/ndk/*/toolchains/llvm/prebuilt/linux-aarch64/bin/clang` 存在且为 ARM aarch64
+- `file /opt/android-sdk/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-aarch64/bin/clang` 存在且为 ARM aarch64。旁边的 r28 目录不算已安装
 """.trimIndent()
 
 internal object SkillEnableMigration {

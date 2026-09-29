@@ -22,7 +22,12 @@ CMAKE_VER="${MINIS_CMAKE_VER:-3.31.6}"
 CMAKE_FALLBACK=3.22.1
 AAPT2="$SDK_ROOT/build-tools/$BUILD_TOOLS_REV/aapt2"
 SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-NDK_TAG="${MINIS_NDK_TAG:-r29}"
+# Same revision as ndkVersion and CI ANDROID_NDK. Do not accept r28.
+NDK_REV=29.0.14206865
+NDK_TAG=r29
+if [ -n "${MINIS_NDK_TAG:-}" ] && [ "$MINIS_NDK_TAG" != "$NDK_TAG" ]; then
+  echo "MINIS_NDK_TAG=$MINIS_NDK_TAG ignored; this setup only installs NDK $NDK_TAG ($NDK_REV)." >&2
+fi
 
 echo "minis-android-sdk-setup: ANDROID_HOME=$SDK_ROOT"
 
@@ -236,19 +241,56 @@ ndk_clang_ok() {
   [ -x "$dir/toolchains/llvm/prebuilt/linux-aarch64/bin/clang" ]
 }
 
+# Pkg.Revision when present; otherwise the sdkmanager directory name.
+# Empty means the tree has no revision we can trust.
+ndk_revision() {
+  dir=$1
+  rev=""
+  if [ -f "$dir/source.properties" ]; then
+    rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$dir/source.properties")
+  fi
+  if [ -z "$rev" ]; then
+    base=$(basename "$dir")
+    case "$base" in
+      [0-9]*.[0-9]*.[0-9]*) rev=$base ;;
+    esac
+  fi
+  printf '%s\n' "$rev"
+}
+
+# Ready only when linux-aarch64 clang and the pinned r29 revision match.
+# An existing r28 tree is not success and is not deleted.
+ndk_is_pinned() {
+  dir=$1
+  ndk_clang_ok "$dir" || return 1
+  rev=$(ndk_revision "$dir")
+  [ "$rev" = "$NDK_REV" ]
+}
+
+note_unpinned_ndk() {
+  dir=$1
+  [ -d "$dir" ] || return 0
+  ndk_clang_ok "$dir" || return 0
+  if ndk_is_pinned "$dir"; then
+    return 0
+  fi
+  rev=$(ndk_revision "$dir")
+  echo "Ignoring $dir (revision ${rev:-unknown}); need linux-aarch64 NDK $NDK_REV. Leaving it installed." >&2
+}
+
 find_aarch64_ndk() {
-  if [ -n "${ANDROID_NDK_HOME:-}" ] && ndk_clang_ok "$ANDROID_NDK_HOME"; then
+  if [ -n "${ANDROID_NDK_HOME:-}" ] && ndk_is_pinned "$ANDROID_NDK_HOME"; then
     echo "$ANDROID_NDK_HOME"
     return 0
   fi
   if [ -d /var/minis/mounts/android-sdk/ndk ]; then
     for d in /var/minis/mounts/android-sdk/ndk/*; do
-      if ndk_clang_ok "$d"; then echo "$d"; return 0; fi
+      if ndk_is_pinned "$d"; then echo "$d"; return 0; fi
     done
   fi
   if [ -d "$SDK_ROOT/ndk" ]; then
     for d in "$SDK_ROOT"/ndk/*; do
-      if ndk_clang_ok "$d"; then echo "$d"; return 0; fi
+      if ndk_is_pinned "$d"; then echo "$d"; return 0; fi
     done
   fi
   return 1
@@ -291,23 +333,38 @@ extract_sdk_archive() {
 
 install_ndk() {
   if [ "${MINIS_SKIP_NDK:-0}" = "1" ]; then
-    echo "MINIS_SKIP_NDK=1 — skipping NDK r28+"
+    echo "MINIS_SKIP_NDK=1 — skipping NDK $NDK_TAG ($NDK_REV)"
     return 0
   fi
   existing=$(find_aarch64_ndk || true)
   if [ -n "$existing" ]; then
-    echo "NDK aarch64 already present: $existing"
+    echo "NDK $NDK_REV aarch64 already present: $existing"
     export ANDROID_NDK_HOME=$existing
     export ANDROID_NDK_ROOT=$existing
     return 0
   fi
+  if [ -n "${ANDROID_NDK_HOME:-}" ]; then
+    note_unpinned_ndk "$ANDROID_NDK_HOME"
+  fi
+  if [ -d "$SDK_ROOT/ndk" ]; then
+    for d in "$SDK_ROOT"/ndk/*; do
+      note_unpinned_ndk "$d"
+    done
+  fi
   warn_x86_ndk
   if [ "$GUEST_AARCH64" != 1 ]; then
-    echo "Non-aarch64 host: installing ndk;28.2.13676358 via sdkmanager"
-    if [ -f "$SDKMANAGER" ]; then
-      "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.2.13676358" || \
-        "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;28.0.12433566" || true
+    echo "Non-aarch64 host: installing ndk;$NDK_REV via sdkmanager"
+    if [ ! -f "$SDKMANAGER" ]; then
+      echo "sdkmanager missing; cannot install ndk;$NDK_REV" >&2
+      return 1
     fi
+    "$SDKMANAGER" --sdk_root="$SDK_ROOT" "ndk;$NDK_REV" || return 1
+    if [ ! -d "$SDK_ROOT/ndk/$NDK_REV" ]; then
+      echo "sdkmanager finished but $SDK_ROOT/ndk/$NDK_REV is missing" >&2
+      return 1
+    fi
+    export ANDROID_NDK_HOME=$SDK_ROOT/ndk/$NDK_REV
+    export ANDROID_NDK_ROOT=$SDK_ROOT/ndk/$NDK_REV
     return 0
   fi
 
@@ -356,11 +413,24 @@ install_ndk() {
     rm -rf "$stage" "$archive"
     return 1
   fi
-  rev=""
-  if [ -f "$inner/source.properties" ]; then
-    rev=$(awk -F= '/Pkg.Revision/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$inner/source.properties")
+  rev=$(ndk_revision "$inner")
+  case "$rev" in
+    29.*) ;;
+    "")
+      echo "source.properties missing; installing as pinned $NDK_REV" >&2
+      rev=$NDK_REV
+      ;;
+    *)
+      echo "Downloaded NDK revision $rev is not r29; refusing to install it." >&2
+      rm -rf "$stage" "$archive"
+      return 1
+      ;;
+  esac
+  if [ "$rev" != "$NDK_REV" ]; then
+    echo "Downloaded NDK revision $rev does not match pinned $NDK_REV." >&2
+    rm -rf "$stage" "$archive"
+    return 1
   fi
-  [ -n "$rev" ] || rev=28.2.13676358
   mkdir -p "$SDK_ROOT/ndk"
   dest="$SDK_ROOT/ndk/$rev"
   rm -rf "$dest"
@@ -420,7 +490,13 @@ else
   echo "$LINE" >> "$PROP"
 fi
 
-NDK_HOME_NOW=$(find_aarch64_ndk || true)
+if [ "$GUEST_AARCH64" = 1 ]; then
+  NDK_HOME_NOW=$(find_aarch64_ndk || true)
+elif [ -d "$SDK_ROOT/ndk/$NDK_REV" ]; then
+  NDK_HOME_NOW=$SDK_ROOT/ndk/$NDK_REV
+else
+  NDK_HOME_NOW=""
+fi
 NDK_PATH_LINE=""
 NDK_EXPORT=""
 if [ -n "$NDK_HOME_NOW" ]; then
@@ -461,15 +537,23 @@ if [ -x "$SDK_ROOT/cmake/$CMAKE_VER/bin/cmake" ]; then
 else
   echo "CMake $CMAKE_VER: MISSING"
 fi
-if [ -n "$NDK_HOME_NOW" ]; then
-  echo "NDK r28+ aarch64: $NDK_HOME_NOW"
+if [ "$GUEST_AARCH64" = 1 ]; then
+  ndk_label="NDK r29 ($NDK_REV) aarch64"
 else
-  echo "NDK r28+ aarch64: MISSING"
+  ndk_label="NDK r29 ($NDK_REV)"
+fi
+if [ -n "$NDK_HOME_NOW" ]; then
+  echo "$ndk_label: $NDK_HOME_NOW"
+elif [ "${MINIS_SKIP_NDK:-0}" = "1" ]; then
+  echo "$ndk_label: SKIPPED"
+else
+  echo "$ndk_label: MISSING"
+  ndk_ok=0
 fi
 echo "Re-open the shell (or: . /etc/profile.d/minis-android-sdk.sh) to pick up PATH."
 echo "To compile an APK: cd <project> && gradle assembleDebug"
 echo "Never: sdkmanager \"build-tools;…\" / \"cmake;…\" / \"ndk;…\" on this aarch64 guest."
 
-if [ "$plat_ok" -ne 1 ] || [ "$cmake_ok" -ne 1 ]; then
+if [ "$plat_ok" -ne 1 ] || [ "$cmake_ok" -ne 1 ] || [ "$ndk_ok" -ne 1 ]; then
   exit 1
 fi

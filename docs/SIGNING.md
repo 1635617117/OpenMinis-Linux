@@ -35,7 +35,7 @@ GitHub Actions secrets `MINIS_UPLOAD_KEYSTORE_BASE64` /
 
 ## libunwind
 
-NDK r28+ no longer ships shared `libunwind.so`. `crash_handler.cpp` still
+NDK r28 and later, including the pinned r29 (`29.0.14206865`), no longer ship shared `libunwind.so`. `crash_handler.cpp` still
 calls `_Unwind_Backtrace`, so `scripts/build_libunwind_aarch64.sh` cross-
 compiles LLVM `libunwind.a` into the NDK sysroot. `scripts/build_apk_aarch64.sh`
 and CI run that script before Gradle.
@@ -43,8 +43,7 @@ and CI run that script before Gradle.
 CMake must link the **aarch64** `libunwind.a` by absolute path. Never pass
 bare `-lunwind`: NDK llvm prebuilt ships a *host* `libunwind.so` under
 `toolchains/llvm/prebuilt/<host>/lib/`, which 1.20-linux CI linked by
-mistake (`incompatible with aarch64linux`). Pin `ndkVersion` to the same
-r28 folder CI installs. LLVM libunwind.a may embed a pthread dependent-libraries tag; Bionic has no libpthread, so crash_handler links with -Wl,--no-dependent-libraries.
+mistake (`incompatible with aarch64linux`). Pin `ndkVersion` to `29.0.14206865`, the same folder CI installs. LLVM libunwind.a may embed a pthread dependent-libraries tag; Bionic has no libpthread, so crash_handler links with `-Wl,--no-dependent-libraries`.
 
 CI also copies `libunwind.a` (and `libunwind.so` if the NDK still has it
 under an aarch64 sysroot path) next to the APK as a **release asset**,

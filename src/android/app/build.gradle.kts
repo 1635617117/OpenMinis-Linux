@@ -31,10 +31,11 @@ android {
     // Android 16 behavior changes; the Live Updates path is runtime-gated on
     // Build.VERSION.SDK_INT >= 36 (see DynamicIslandSupport / AgentForegroundService).
     compileSdk = 36
-    // Pin the same NDK CI installs (ANDROID_NDK=28.0.13004108). Unpinned AGP
-    // on GitHub-hosted runners picked 27.0.12077973, so libunwind.a landed in
-    // r28 while crash_handler linked r27's host libunwind.so.
-    ndkVersion = "28.0.13004108"
+    // Pin the same NDK CI installs (ANDROID_NDK=29.0.14206865). Unpinned AGP
+    // on GitHub-hosted runners picked 27.0.12077973 and linked the host
+    // libunwind.so. r29 still has no usable host libunwind.so; CMake links
+    // aarch64 libunwind.a by absolute path. Do not fall back to r28.
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "com.openminis.linux"
