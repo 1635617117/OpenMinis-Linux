@@ -347,7 +347,10 @@ internal fun buildFlatChatItems(
     }
     for (idx in fromIndex until messages.size) {
         val rawMessage = messages[idx]
-        val hideSpeakerTools = !rawMessage.speakerName.isNullOrBlank()
+        // Finished group utterances drop their tool cards. A live speaker still
+        // shows the current thinking block or tool card.
+        val hideSpeakerTools = !rawMessage.speakerName.isNullOrBlank() &&
+            !rawMessage.isStreaming && !rawMessage.isAwaitingModelResponse
         val message = if (
             (!hideSubAgentCards || rawMessage.toolBlocks.none(::isSubAgentTranscriptCard)) &&
             !hideSpeakerTools

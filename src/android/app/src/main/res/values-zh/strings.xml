@@ -2238,6 +2238,7 @@
     <string name="chat_menu_end_group_chat">结束讨论</string>
     <string name="group_chat_banner">AI 群聊已开启。每个模型单独头像、分段发言；@模型名只叫一个人。点结束，或发送「总结一下」，出汇报并退出群聊。</string>
     <string name="group_chat_analyzing">正在分析…</string>
+    <string name="group_chat_thinking">正在思考…</string>
     <string name="group_chat_framing">正在整理问题…</string>
     <string name="group_chat_summarizing">正在汇总讨论…</string>
     <string name="group_chat_host_suffix">主持</string>
@@ -2246,4 +2247,5 @@
     <string name="group_chat_no_provider">结束讨论失败：当前没有可用模型。</string>
     <string name="group_chat_passed">本轮不补充。</string>
     <string name="group_chat_member_failed">%1$s 没说上：%2$s</string>
+    <string name="group_chat_summary_failed">讨论已结束，但主持人没有写出汇报。</string>
 </resources>

@@ -31,8 +31,9 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     if (closing) groupChatCloseRequested = true
     val analyzing = context.getString(com.openminis.app.R.string.group_chat_analyzing)
     val userText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
-    val prior = groupTranscript()
-    if (closing && prior.isEmpty()) {
+    val closingNow = closing || GroupChat.isCloseRequest(userText)
+    val prior = if (closingNow) closeRecord() else groupTranscript()
+    if (closingNow && prior.isEmpty()) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_nothing_to_close))
         groupChatCloseRequested = false
         return
@@ -62,17 +63,11 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
             ?: com.openminis.app.data.model.ThinkingLevel.OFF,
     )
     val members = listOf(hostMember) + slotMembers.filter { it.name != hostPlain }
-    val wantsClose = closing || GroupChat.isCloseRequest(userText)
+    val wantsClose = closingNow
     if (!wantsClose && members.size < 2) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
         return
     }
-    if (wantsClose && prior.isEmpty()) {
-        publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_nothing_to_close))
-        groupChatCloseRequested = false
-        return
-    }
-
     val spoken = prior.toMutableList()
     val contextText = recentContext()
     val addressed = if (!wantsClose) {
@@ -134,7 +129,13 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         if (summary.isNotBlank()) {
             groupChatClosedAfterId = _messages.value.lastOrNull { it.speakerName == hostName }?.id
             groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
+            withContext(Dispatchers.Main) {
+                _promptQueue.value = emptyList()
+                _messages.value = _messages.value.filterNot { it.isQueued }
+            }
             setGroupChatEnabled(false)
+        } else {
+            publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_summary_failed))
         }
     }
     groupChatCloseRequested = false
@@ -292,15 +293,15 @@ private suspend fun ChatViewModel.speakVisible(
     val id = UUID.randomUUID().toString()
     if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
-        speakModel(provider, system, user, tools, toolGate, thinkingLevel) {
-            if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
+        speakModel(provider, system, user, tools, toolGate, thinkingLevel, stopWhenClosing = allowPass) { block ->
+            showGroupStatus(id, speaker, vendor, block)
         }
     } catch (e: CancellationException) {
         removeGroupBubble(id)
         throw e
     }
     if (text.isBlank() || (allowPass && GroupChat.isPass(text))) {
-        if (allowPass && !deferBubble) {
+        if (allowPass) {
             upsertGroupBubble(
                 id,
                 speaker,
@@ -319,6 +320,7 @@ private suspend fun ChatViewModel.speakVisible(
         _messages.value = _messages.value.map { message ->
             if (message.id == id) message.copy(
                 content = text,
+                toolBlocks = emptyList(),
                 speakerName = speaker,
                 speakerVendor = vendor,
                 isStreaming = false,
@@ -337,14 +339,17 @@ private suspend fun ChatViewModel.speakModel(
     tools: List<com.openminis.app.data.model.AgentToolDefinition>,
     toolGate: Mutex?,
     thinkingLevel: com.openminis.app.data.model.ThinkingLevel,
-    onTool: suspend () -> Unit,
+    stopWhenClosing: Boolean,
+    onStatus: suspend (AssistantBlock) -> Unit,
 ): String {
     val history = mutableListOf(LLMMessage(role = LLMMessage.Role.USER, content = user))
     val report = StringBuilder()
     repeat(3) {
-        if (groupChatCloseRequested) return report.toString().trim()
+        if (stopWhenClosing && groupChatCloseRequested) return report.toString().trim()
         val textSb = StringBuilder()
+        val thinking = StringBuilder()
         val calls = mutableListOf<Triple<String, String, JSONObject>>()
+        var lastStatusAt = 0L
         provider.streamMessage(
             messages = history,
             systemPrompt = system,
@@ -354,11 +359,31 @@ private suspend fun ChatViewModel.speakModel(
             thinkingLevel = thinkingLevel,
         ).collect { chunk ->
             when (chunk) {
+                is LLMStreamChunk.Started -> onStatus(
+                    AssistantBlock(
+                        id = "group-status",
+                        kind = "info",
+                        content = context.getString(com.openminis.app.R.string.group_chat_thinking),
+                    ),
+                )
+                is LLMStreamChunk.ThinkingDelta -> {
+                    thinking.append(chunk.text)
+                    val now = android.os.SystemClock.elapsedRealtime()
+                    if (now - lastStatusAt >= 120L) {
+                        lastStatusAt = now
+                        onStatus(thinkingStatus(thinking))
+                    }
+                }
                 is LLMStreamChunk.Text -> textSb.append(chunk.text)
-                is LLMStreamChunk.ToolCallComplete -> calls += Triple(chunk.id, chunk.name, chunk.args)
+                is LLMStreamChunk.ToolUseStart -> onStatus(toolStatus(chunk.id, chunk.name, ToolBlockStatus.RUNNING, ""))
+                is LLMStreamChunk.ToolCallComplete -> {
+                    calls += Triple(chunk.id, chunk.name, chunk.args)
+                    onStatus(toolStatus(chunk.id, chunk.name, ToolBlockStatus.RUNNING, chunk.args.toString()))
+                }
                 else -> Unit
             }
         }
+        if (thinking.isNotEmpty()) onStatus(thinkingStatus(thinking))
         val text = textSb.toString().trim()
         if (calls.isEmpty() || tools.isEmpty()) {
             if (text.isNotEmpty()) {
@@ -367,7 +392,6 @@ private suspend fun ChatViewModel.speakModel(
             }
             return report.toString().trim()
         }
-        onTool()
         val assistantParts = mutableListOf<AgentContentPart>()
         if (text.isNotEmpty()) assistantParts += AgentContentPart.Text(text)
         calls.forEach { (callId, name, args) ->
@@ -376,6 +400,7 @@ private suspend fun ChatViewModel.speakModel(
         history += LLMMessage(role = LLMMessage.Role.ASSISTANT, content = text, contentParts = assistantParts)
         val results = mutableListOf<AgentContentPart>()
         for ((callId, name, args) in calls) {
+            onStatus(toolStatus(callId, name, ToolBlockStatus.RUNNING, args.toString()))
             val denied = DiscussionGraph.denyExecution(name, args.toString())
             val result = if (denied != null) {
                 ToolExecutionResult(denied, false)
@@ -391,6 +416,77 @@ private suspend fun ChatViewModel.speakModel(
     return report.toString().trim()
 }
 
+private fun thinkingStatus(thinking: StringBuilder) = AssistantBlock(
+    id = "group-thinking",
+    kind = "thinking",
+    content = thinking.toString().takeLast(600),
+    toolTitle = "Thinking",
+)
+
+private fun toolStatus(
+    id: String,
+    name: String,
+    status: ToolBlockStatus,
+    args: String,
+) = AssistantBlock(
+    id = id.ifBlank { "group-tool" },
+    kind = "tool_use",
+    toolName = name,
+    toolTitle = name,
+    toolArgs = args.take(240),
+    toolStatus = status,
+    content = name,
+)
+
+private suspend fun ChatViewModel.showGroupStatus(
+    id: String,
+    speaker: String,
+    vendor: String,
+    block: AssistantBlock,
+) {
+    withContext(Dispatchers.Main) {
+        val current = _messages.value
+        val status = ChatMessage(
+            id = id,
+            role = "assistant",
+            content = "",
+            speakerName = speaker,
+            speakerVendor = vendor,
+            isStreaming = true,
+            isAwaitingModelResponse = false,
+            toolBlocks = listOf(block),
+        )
+        val next = if (current.any { it.id == id }) {
+            current.map { if (it.id == id) status else it }
+        } else {
+            current + status
+        }
+        _messages.value = trimLoadedWindow(next)
+    }
+}
+
+private fun ChatViewModel.closeRecord(): List<GroupChat.Line> {
+    val windowed = groupTranscript()
+    if (windowed.isNotEmpty()) return windowed
+    val lastTopic = _messages.value.indexOfLast { message ->
+        message.role == "user" && !message.isQueued && !GroupChat.isCloseRequest(message.content)
+    }
+    val slice = if (lastTopic >= 0) _messages.value.drop(lastTopic + 1) else _messages.value
+    return slice.mapNotNull { message ->
+        if (message.role != "assistant") return@mapNotNull null
+        val speaker = message.speakerName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        val text = message.content.trim().ifBlank {
+            message.toolBlocks
+                .filter { it.kind == "text" || it.kind == "thinking" }
+                .joinToString("\n") { it.content }
+                .trim()
+        }
+        val placeholder = context.getString(com.openminis.app.R.string.group_chat_analyzing)
+        if (text.isBlank() || text == placeholder || message.isAwaitingModelResponse) null
+        else GroupChat.Line(speaker, text)
+    }
+}
+
 private suspend fun ChatViewModel.upsertGroupBubble(
     id: String,
     speaker: String,
@@ -404,6 +500,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
             current.map {
                 if (it.id == id) it.copy(
                     content = text,
+                    toolBlocks = if (analyzing) it.toolBlocks else emptyList(),
                     speakerName = speaker,
                     speakerVendor = vendor,
                     isStreaming = analyzing,

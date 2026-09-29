@@ -26,6 +26,35 @@ class ChatFlatItemsGroupSpeakerTest {
     }
 
     @Test
+    fun `live group speaker keeps the current tool card`() {
+        val running = ChatMessage(
+            id = "live",
+            role = "assistant",
+            content = "",
+            speakerName = "glm-5.3",
+            speakerVendor = "zhipu",
+            isStreaming = true,
+            toolBlocks = listOf(
+                AssistantBlock(
+                    id = "t1",
+                    kind = "tool_use",
+                    toolName = "bash",
+                    toolTitle = "bash",
+                    toolStatus = ToolBlockStatus.RUNNING,
+                ),
+            ),
+        )
+        val live = buildFlatChatItems(listOf(running), foldAiProcess = true)
+        assertEquals(true, live.any { it is FlatChatItem.AssistantToolUse })
+
+        val done = buildFlatChatItems(
+            listOf(running.copy(isStreaming = false, content = "结论", toolBlocks = emptyList())),
+        )
+        assertEquals(false, done.any { it is FlatChatItem.AssistantToolUse })
+        assertEquals(true, done.any { it is FlatChatItem.AssistantLegacyContent })
+    }
+
+    @Test
     fun `same unnamed assistant continuation still shares one header`() {
         val items = buildFlatChatItems(
             listOf(

@@ -2415,6 +2415,7 @@
     <string name="chat_menu_end_group_chat">End discussion</string>
     <string name="group_chat_banner">AI group chat is on. Each model keeps its own mark. @Name asks one model. End discussion, or send “总结一下”, for the report. The switch turns off after the report.</string>
     <string name="group_chat_analyzing">Analyzing…</string>
+    <string name="group_chat_thinking">Thinking…</string>
     <string name="group_chat_framing">Framing the question…</string>
     <string name="group_chat_summarizing">Summarizing the discussion…</string>
     <string name="group_chat_host_suffix">Host</string>
@@ -2423,4 +2424,5 @@
     <string name="group_chat_no_provider">Can’t end the discussion: no model is available.</string>
     <string name="group_chat_passed">Nothing to add this round.</string>
     <string name="group_chat_member_failed">%1$s could not speak: %2$s</string>
+    <string name="group_chat_summary_failed">The discussion ended, but the host did not write a report.</string>
 </resources>
