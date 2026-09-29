@@ -35,6 +35,7 @@ import com.openminis.app.accessibility.RestrictedSettingsManager
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.offload.HostSuManager
 import com.openminis.app.offload.OffloadPermissionManager
+import com.openminis.app.offload.PrivacyPermissionPolicy
 import com.openminis.app.offload.ShizukuManager
 import com.openminis.app.ui.components.MinisMenu
 import com.openminis.app.ui.components.MinisTextButton
@@ -59,10 +60,13 @@ fun OffloadPermissionScreen(
         .filter { it.key != OffloadPermissionManager.PermissionCategory.INTEGRATIONS }
 
     var showResetConfirm by remember { mutableStateOf(false) }
-
-    val configEnabled by com.openminis.app.config.MinisConfigPermissionStore.enabled.collectAsState()
+    var privacyMenuOpen by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val configEnabled by com.openminis.app.config.MinisConfigPermissionStore.enabled.collectAsState()
+    val privacyVersion by PrivacyPermissionPolicy.version.collectAsState()
+    val privacyLevel = PrivacyPermissionPolicy.get(context)
+    privacyVersion
 
     var a11yEnabled by remember { mutableStateOf(isA11yServiceEnabled(context)) }
     // [T-android-restricted-settings] Android 13+ refuses to arm the
@@ -112,6 +116,29 @@ fun OffloadPermissionScreen(
                 },
                 showDivider = false,
             )
+        }
+
+        SettingsSection(
+            header = stringResource(R.string.perm_privacy_global_title),
+            footer = stringResource(R.string.perm_privacy_global_desc),
+        ) {
+            SettingsValueRow(
+                title = stringResource(R.string.perm_privacy_global_level),
+                value = levelDisplayName(privacyLevel),
+                onClick = { privacyMenuOpen = true },
+                showDivider = false,
+            )
+            MinisMenu(expanded = privacyMenuOpen, onDismissRequest = { privacyMenuOpen = false }, alignEnd = true) {
+                for (level in OffloadPermissionManager.PermissionLevel.entries) {
+                    DropdownMenuItem(
+                        text = { Text(levelDisplayName(level), color = levelColor(level)) },
+                        onClick = {
+                            PrivacyPermissionPolicy.set(context, level)
+                            privacyMenuOpen = false
+                        },
+                    )
+                }
+            }
         }
 
         autoCategories.forEach { (category, tools) ->
@@ -251,6 +278,7 @@ fun OffloadPermissionScreen(
             confirmButton = {
                 MinisTextButton(onClick = {
                     OffloadPermissionManager.resetAll()
+                    PrivacyPermissionPolicy.set(context, OffloadPermissionManager.PermissionLevel.ASK_ONCE)
                     com.openminis.app.config.MinisConfigPermissionStore.setEnabled(true)
                     AppLogger.info("PermissionsScreen", "user confirmed Reset All — all tool permissions cleared, minis-config switch reset to default")
                     showResetConfirm = false

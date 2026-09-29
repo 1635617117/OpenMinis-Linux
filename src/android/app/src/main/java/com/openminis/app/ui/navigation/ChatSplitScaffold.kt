@@ -429,6 +429,10 @@ fun ChatSplitScaffold(
         val currentSessionId = navigator.currentDestination
             ?.takeIf { it.pane == ListDetailPaneScaffoldRole.Detail }
             ?.contentKey
+            // Navigation can briefly expose no detail destination while a
+            // rapid session swipe is settling. Keep the selected chat mounted
+            // until the navigator publishes the replacement destination.
+            ?: selectedSessionId
 
         // [T-android-new-chat-shortcut] Open a fresh draft in the detail pane.
         // Hoisted out of the detailPane call below so the keyboard shortcut and
@@ -545,6 +549,7 @@ fun ChatSplitScaffold(
                 val sessionId = navigator.currentDestination
                     ?.takeIf { it.pane == ListDetailPaneScaffoldRole.Detail }
                     ?.contentKey
+                    ?: selectedSessionId
                 Row(Modifier.fillMaxSize()) {
                     // [T-android-tablet-sidebar-collapse] No seam to draw when
                     // the list is collapsed — the chat then owns the full width

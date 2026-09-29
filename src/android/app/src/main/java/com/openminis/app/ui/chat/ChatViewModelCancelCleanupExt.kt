@@ -72,9 +72,11 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
         // suppress the re-stamp here.
         markLiveInterruption()
         _canResume.value = true
-        return
     }
 
+    // Preserve assistant text even when cancellation happened during a tool.
+    // Tool blocks and their matching tool_result rows are handled above; the
+    // text part is a separate assistant turn and must also survive reload.
     // Case 2: cancel during text streaming. If partial assistant text
     // exists and agentHistory does not already end with the assistant
     // turn we're on, commit the partial text + truncation marker so the
@@ -132,9 +134,9 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
         // suppress the re-stamp here.
         markLiveInterruption()
         _canResume.value = true
-    } else if (historyEndsWithAssistant) {
-        // Already committed (tool cancel path above handled or prior turn
-        // wrote an assistant row). Still allow resume.
+    } else if (historyEndsWithAssistant || hadInflightTools) {
+        // Already committed or represented by the assistant tool-call turn;
+        // still mark the live run as resumable.
         // [T-android-group-pause-badge-restamp] A LIVE interruption just
         // happened: this is a real entry into the paused state, so the
         // badge's 24h freshness stamp must be refreshed. Cancel any

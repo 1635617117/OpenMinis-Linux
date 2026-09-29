@@ -57,7 +57,7 @@ object ShellTimeoutPolicy {
     fun minimumMs(command: String): Long {
         val lower = command.lowercase()
         return when {
-            "minis-dev-setup-full" in lower -> LONG_RUNNING_TIMEOUT_MS
+            "minis-dev-setup-full" in lower || "minis-build-env" in lower -> LONG_RUNNING_TIMEOUT_MS
             "minis-android-sdk-setup" in lower -> LONG_RUNNING_TIMEOUT_MS
             "minis-self-build" in lower -> LONG_RUNNING_TIMEOUT_MS
             else -> 0L

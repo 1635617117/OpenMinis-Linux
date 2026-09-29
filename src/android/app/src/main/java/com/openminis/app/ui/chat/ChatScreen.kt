@@ -520,12 +520,24 @@ fun ChatScreen(
     // continue to read viewModel.messages directly inside the VM.
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
+    val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
     val pendingApprovals by viewModel.pendingApprovals.collectAsState()
     val interceptEvents by InterceptFeedback.events.collectAsState()
+    // Intercepts are transient notices. Approval requests remain visible
+    // until the user decides; only completed denial/rejection notices expire.
+    LaunchedEffect(interceptEvents.map { it.id }) {
+        interceptEvents.forEach { event ->
+            launch {
+                val remaining = 8_000L - (System.currentTimeMillis() - event.timestamp)
+                if (remaining > 0) kotlinx.coroutines.delay(remaining)
+                InterceptFeedback.dismiss(event.id)
+            }
+        }
+    }
     val error by viewModel.error.collectAsState()
     val modelName by viewModel.modelName.collectAsState()
     val sessionTitle by viewModel.sessionTitle.collectAsState()
@@ -2916,6 +2928,14 @@ fun ChatScreen(
                                 },
                             )
                             MinisMenuDivider()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_new_chat)) },
+                                onClick = {
+                                    showChatMenu = false
+                                    if (isStreaming) showNewChatStopDialog = true else onNewChat()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
+                            )
                             // Clear Chat (iOS parity, red)
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.chat_menu_clear_chat), color = MaterialTheme.colorScheme.error) },
@@ -3180,8 +3200,23 @@ fun ChatScreen(
         Column(
             modifier = Modifier.fillMaxSize(),
         ) {
+            val subAgentMembers by com.openminis.app.service.SubAgentActivityTracker.members.collectAsState()
+            val activeSubAgentToolIds = remember(subAgentMembers, sessionId, showSubAgentBar) {
+                if (!showSubAgentBar) emptySet()
+                else subAgentMembers.filter { it.parentSessionId == sessionId }
+                    .flatMap { member ->
+                        listOfNotNull(
+                            member.parentToolId.takeIf(String::isNotBlank),
+                            member.detailToolId.takeIf(String::isNotBlank),
+                        )
+                    }
+                    .toSet()
+            }
             if (showSubAgentBar) {
-                SubAgentLiveBar(sessionId = sessionId)
+                SubAgentLiveBar(
+                    sessionId = sessionId,
+                    onStop = com.openminis.app.service.SubAgentActivityTracker::stop,
+                )
             }
             ChatGateBanners(
                 approvals = pendingApprovals,
@@ -3407,7 +3442,7 @@ fun ChatScreen(
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
                 var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
-                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds) {
+                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds, activeSubAgentToolIds) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
                     // `messages` is CONSTANT within this effect (the effect is
@@ -3501,6 +3536,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
+                                        suppressToolIds = activeSubAgentToolIds,
                                     )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
@@ -3587,6 +3623,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
+                                        suppressToolIds = activeSubAgentToolIds,
                                     )
                                 }
                             }
@@ -4402,37 +4439,40 @@ fun ChatScreen(
                         }
                         } // Box (alpha wrapper)
                     }
-                    // [T-android-larky-longsession-followup] "Load older
-                    // messages" header — placed AFTER items() so under
-                    // reverseLayout it sits at the VISUAL TOP of the list.
-                    // Only emitted when the session has trimmed older messages
-                    // behind the window; tapping bumps the cap by
-                    // VISIBLE_MESSAGE_CAP_STEP and the FlatChat pipeline
-                    // rebuilds with the wider slice. The item key is stable so
-                    // LazyListState's anchor (firstVisibleItem) survives the
-                    // re-emission and the user keeps their scroll position
-                    // relative to the message they were reading.
-                    if (hasOlderMessages) {
-                        item(key = "__load_older_messages__", contentType = "load_older") {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 12.dp)
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .clickable { viewModel.loadOlderMessages() }
-                                    .padding(vertical = 8.dp, horizontal = 12.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    text = stringResource(R.string.chat_load_older_messages),
-                                    color = ChatColors.secondaryText,
-                                    style = MaterialTheme.typography.bodySmall,
-                                )
-                            }
-                        }
-                    }
                 }
                 } // AlwaysStretchOverscrollBox
+                if (hasOlderMessages) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 4.dp,
+                        onClick = { viewModel.loadOlderMessages() },
+                    ) {
+                        Text(
+                            text = stringResource(R.string.chat_load_older_messages),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+                if (hasNewerMessages) {
+                    Surface(
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        tonalElevation = 4.dp,
+                        onClick = { viewModel.loadNewerMessages() },
+                    ) {
+                        Text(
+                            text = stringResource(R.string.chat_load_newer_messages),
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
                 // SelectionDragTracker bridges gesture-published dragIntent
                 // with listState scroll observation — that's what keeps the
                 // selection extending across newly-scrolled-in shards when
@@ -4529,20 +4569,28 @@ fun ChatScreen(
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 var detailToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
-                LaunchedEffect(messages, foldAiProcess) {
+                LaunchedEffect(messages, foldAiProcess, activeSubAgentToolIds) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
+                        // Keep live spawn cards in the unified detail index even while
+                        // their inline rows are suppressed; chips can open this one sheet.
                         val all = assistantToolUseBlocks(merged)
-                        all to all.filter { isFloatingProcessTool(it, foldAiProcess) }
+                        // The floating strip belongs to the latest assistant
+                        // reply, not to every tool in the session. Keep the
+                        // complete list separately for historical details.
+                        val latestReply = merged.lastOrNull { it.role == "assistant" }
+                        val overlay = latestReply?.toolBlocks.orEmpty()
+                            .filter { isFloatingProcessTool(it, foldAiProcess) }
+                        all to overlay
                     }.collect { (all, overlay) ->
                         detailToolBlocks = all
                         lastToolBlocks = overlay
                     }
                 }
-                if (showFloatingToolBar && lastToolBlocks.isNotEmpty()) {
+                if (showFloatingToolBar && isStreaming && lastToolBlocks.isNotEmpty()) {
                     Box(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)

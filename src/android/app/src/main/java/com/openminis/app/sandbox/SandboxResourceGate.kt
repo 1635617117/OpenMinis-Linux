@@ -51,7 +51,7 @@ object SandboxResourceGate {
         val c = command.lowercase()
         return c.contains("apt-get") || c.contains("apt ") ||
             c.contains("dpkg") || c.contains("sdkmanager") ||
-            c.contains("minis-dev-setup") || c.contains("minis-android-sdk-setup") ||
+            c.contains("minis-dev-setup") || c.contains("minis-build-env") || c.contains("minis-android-sdk-setup") ||
             c.contains("minis-mirror")
     }
 

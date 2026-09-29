@@ -116,6 +116,7 @@ object OffloadPermissionManager {
     const val OFFLOAD_GLOBAL_SESSION_ID = "offload-global"
 
     private var prefsRef: SharedPreferences? = null
+    private var contextRef: Context? = null
     private val prefs: SharedPreferences get() = checkNotNull(prefsRef) { "OffloadPermissionManager.init must be called first" }
 
     /** Session-scoped grants for ASK_ONCE tools. Populated by the
@@ -343,19 +344,23 @@ object OffloadPermissionManager {
     }
 
     fun init(context: Context) {
+        contextRef = context.applicationContext
         prefsRef = context.getSharedPreferences("offload_permissions", Context.MODE_PRIVATE)
     }
 
-    fun getLevel(toolName: String): PermissionLevel {
+    internal fun configuredLevel(toolName: String): PermissionLevel {
         val info = toolRegistry.find { it.toolName == toolName }
-            ?: return PermissionLevel.BYPASS // Unknown tools are bypassed
-
+            ?: return PermissionLevel.BYPASS
         val stored = prefs.getString("level_$toolName", null)
-        return if (stored != null) {
-            try { PermissionLevel.valueOf(stored) } catch (_: Exception) { info.defaultLevel }
-        } else {
-            info.defaultLevel
+        return stored?.let { runCatching { PermissionLevel.valueOf(it) }.getOrNull() } ?: info.defaultLevel
+    }
+
+    fun getLevel(toolName: String): PermissionLevel {
+        val context = contextRef
+        if (context != null && toolName in PrivacyPermissionPolicy.toolNames) {
+            return PrivacyPermissionPolicy.effective(toolName, PrivacyPermissionPolicy.get(context), configuredLevel(toolName))
         }
+        return configuredLevel(toolName)
     }
 
     fun setLevel(toolName: String, level: PermissionLevel) {

@@ -5,6 +5,8 @@ import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
 import com.openminis.app.provider.LLMProvider
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Drain queued prompts after an agent loop finishes. Each queued prompt is
@@ -75,7 +77,13 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
             prepared.attachedFilesXml,
             bodyPartsJson = drainPaste?.partsJson,
         )
-        chatRepository.appendMessage(sid, "user", userPartsJson)
+        val persistedUser = chatRepository.appendMessage(sid, "user", userPartsJson)
+        val queuedUiId = withContext(Dispatchers.Main.immediate) {
+            _messages.value.firstOrNull { it.isQueued && it.content == userText }?.id
+        }
+        withContext(Dispatchers.Main.immediate) {
+            notePersistedUiRow(queuedUiId, persistedUser.id)
+        }
 
         appendBoundedHistory(LLMMessage(
             role = LLMMessage.Role.USER,
@@ -85,6 +93,7 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
                 val bodyCount = combinedParts.takeWhile { it is AgentContentPart.Text }.size
                 listOf(AgentContentPart.Text(p.modelText)) + combinedParts.drop(bodyCount)
             } ?: combinedParts,
+            dbMessageId = persistedUser.id,
         ))
 
         try {
@@ -102,7 +111,9 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
             throw e
         } catch (e: Exception) {
             Log.e(ChatViewModel.TAG, "Agent loop (queued-drain) error", e)
-            setInlineError(e.message ?: "Unknown error")
+            if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                setInlineError(e.message ?: "Unknown error")
+            }
             break
         }
     }

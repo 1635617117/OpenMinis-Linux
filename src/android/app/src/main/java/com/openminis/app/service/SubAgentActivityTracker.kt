@@ -3,6 +3,7 @@ package com.openminis.app.service
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.Job
 import java.util.UUID
 
 /**
@@ -20,6 +21,7 @@ object SubAgentActivityTracker {
     data class Member(
         val id: String,
         val parentSessionId: String,
+        val parentToolId: String,
         val title: String,
         val role: String?,
         val model: String?,
@@ -35,7 +37,13 @@ object SubAgentActivityTracker {
         /** 思考中 / 回复中 / 调用工具 / 执行中. Empty until the runner reports one. */
         val phase: String = "",
         val steps: List<Step> = emptyList(),
-    )
+    ) {
+        val detailToolId: String get() = when {
+            parentToolId.isBlank() -> ""
+            total > 1 -> "$parentToolId#sub-$index"
+            else -> parentToolId
+        }
+    }
 
     /**
      * One row in the live detail page. Same three kinds the session page
@@ -55,6 +63,8 @@ object SubAgentActivityTracker {
 
     private val _members = MutableStateFlow<List<Member>>(emptyList())
     val members: StateFlow<List<Member>> = _members.asStateFlow()
+    private val jobs = java.util.concurrent.ConcurrentHashMap<String, Job>()
+    private val userStopped = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     fun start(
         parentSessionId: String,
@@ -65,11 +75,13 @@ object SubAgentActivityTracker {
         total: Int = 0,
         kind: String? = role,
         turnCap: Int = 0,
+        parentToolId: String = "",
     ): String {
         val id = UUID.randomUUID().toString()
         val member = Member(
             id = id,
             parentSessionId = parentSessionId,
+            parentToolId = parentToolId,
             title = title,
             role = role,
             model = model,
@@ -81,6 +93,22 @@ object SubAgentActivityTracker {
         _members.value = _members.value + member
         return id
     }
+
+    fun attachJob(id: String, job: Job?) {
+        if (job != null) jobs[id] = job
+    }
+
+    fun stop(id: String): Boolean {
+        val job = jobs.remove(id) ?: return false
+        userStopped += id
+        job.cancel()
+        return true
+    }
+
+    fun wasUserStopped(id: String): Boolean = id in userStopped
+
+    fun isParentToolActive(parentToolId: String): Boolean =
+        parentToolId.isNotBlank() && _members.value.any { it.parentToolId == parentToolId }
 
     fun updateStep(id: String, step: String) {
         _members.value = _members.value.map { m ->
@@ -129,6 +157,8 @@ object SubAgentActivityTracker {
      * look meaningful and change nothing.
      */
     fun finish(id: String, success: Boolean, error: String? = null) {
+        jobs.remove(id)
+        userStopped.remove(id)
         _members.value = _members.value.filterNot { it.id == id }
     }
 
@@ -308,6 +338,10 @@ object SubAgentActivityTracker {
     }
 
     fun clearSession(parentSessionId: String) {
+        _members.value.filter { it.parentSessionId == parentSessionId }.forEach { id ->
+            jobs.remove(id.id)?.cancel()
+            userStopped.remove(id.id)
+        }
         _members.value = _members.value.filter { it.parentSessionId != parentSessionId }
     }
 

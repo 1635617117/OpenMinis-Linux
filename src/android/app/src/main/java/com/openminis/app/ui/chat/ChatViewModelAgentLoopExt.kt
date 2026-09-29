@@ -22,6 +22,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
@@ -32,6 +34,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     systemPrompt: String?,
     fallbackProviders: List<ChatViewModel.FallbackCandidate> = emptyList(),
     fallbackStrategy: com.openminis.app.data.model.FallbackStrategy = com.openminis.app.data.model.FallbackStrategy.default,
+    goalExecutionRun: Boolean = false,
 ) {
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-android-mem-probe-trust] Send-path context shape. The existing
@@ -102,6 +105,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
     val toolInputChunkRings: MutableMap<String, MutableList<String>> = mutableMapOf()
     var accumulatedText = ""
     var lastContextTokens = 0  // updated each turn from API usage
+    val activeRun = com.openminis.app.service.ActiveRunContext.current()
+    activeRun?.associateSession(activeSessionId)
+    activeRun?.attachAssistantMessage(assistantId)
 
     // T94 fix 2: throttle text-delta UI updates to ~20fps (50ms).
     // Pre-T94 the LLMStreamChunk.Text branch hopped to Dispatchers.Main
@@ -154,6 +160,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
 
     // Accumulate tool inputs across all turns (so persist includes all, not just current turn)
     val allToolInputs = mutableMapOf<String, String>()
+    val goalManager = com.openminis.app.goal.GoalManager(chatRepository)
+    val goalSessionId = activeSessionId
+    var goalContinuations = 0
+    val goalRunRequested = goalExecutionRun
+
 
     // Add placeholder assistant message (once). Mark as awaiting so the
     // "Minis is thinking" indicator shows during the initial request gap
@@ -198,6 +209,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // its own speech mid-sentence.
     var didStopStaleReadAloud = false
     for (turn in 0 until ChatViewModel.MAX_AGENT_TURNS) {
+        currentCoroutineContext().ensureActive()
         // Sanitize history before each API call (mirrors iOS pre-API validation)
         sanitizeAgentHistory()
 
@@ -273,7 +285,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // per-turn accumulators, and point `assistantId` at a fresh
                 // placeholder so subsequent writes target it.
                 val sealedId = assistantId
-                val freshAssistantId = "assistant_${System.currentTimeMillis()}"
+                val freshAssistantId = "assistant_${System.currentTimeMillis()}_${turn}"
                 withContext(Dispatchers.Main) {
                     // Flush whatever the sealed bubble accumulated and stop
                     // it streaming, so it renders as finished history.
@@ -396,6 +408,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // Mark where this turn's blocks start in allToolBlocks so we can persist
         // only the NEW parts from this turn (not the full accumulated history).
         // Matches iOS's per-turn RawMessage persistence.
+        val turnStartedAtMs = System.currentTimeMillis()
         val turnStartBlockIndex = allToolBlocks.size
         // T307: per-delta StringBuilder for the running turn text + the
         // currently-open trailing text block. `turnText` snapshots are
@@ -540,8 +553,27 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // [_compactSummary] is prepended as a `<context-summary>`
                 // user message. Falls through to the raw agentHistory when
                 // no compact has happened, so the common path stays zero-copy.
+                val requestGoalState = if (goalRunRequested) {
+                    withContext(Dispatchers.IO) { goalManager.get(goalSessionId) }
+                } else null
+                val goalCanContinue = requestGoalState?.let {
+                    com.openminis.app.goal.GoalStateMachine.canContinue(it, usefulActivity = true)
+                } == true
+                if (goalRunRequested && !goalCanContinue) {
+                    withContext(Dispatchers.Main) {
+                        updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
+                    }
+                    loopExitedNormally = true
+                    break
+                }
+                val requestGoalPrompt = requestGoalState?.let(goalManager::continuationPrompt)
+                val requestHistory = com.openminis.app.goal.withGoalContext(
+                    effectiveAgentHistory(),
+                    requestGoalPrompt,
+                    appendNewUser = goalExecutionRun && turn == 0,
+                )
                 currentProvider.streamMessage(
-                    applyRequestImageBudget(effectiveAgentHistory()),
+                    applyRequestImageBudget(requestHistory),
                     systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
                     temperature = samplingTemperature(_activeEntryId.value),
                     tools = agentTools,
@@ -595,6 +627,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     // T307: append-only on the StringBuilder; .toString()
                     // is taken once below at flush time, not per delta.
                     turnTextSb.append(chunk.text)
+                    activeRun?.updateAssistantText(accumulatedText + turnTextSb.toString())
                     // Append to the trailing text block — or open a new one if the last
                     // block isn't a text block (i.e. a tool call or thinking was in between).
                     // This preserves the chronological interleaving of text and tool calls
@@ -1178,6 +1211,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
         val turnText = turnTextSb.toString()
         // Accumulate text across turns
         accumulatedText += turnText
+        activeRun?.updateAssistantText(accumulatedText)
 
         // Build assistant contentParts for history
         val assistantParts = mutableListOf<AgentContentPart>()
@@ -1207,7 +1241,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
             contentParts = assistantParts,
             reasoningContent = turnReasoningContent,
         ))
-
+        if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
         // T321: empty-turn diagnostic — fires when GPT-5.5 (or any other
         // provider) returns a turn with no visible text AND no tool calls.
         // Log only; UI behavior unchanged. Pair with OpenAIProvider SSE
@@ -1221,7 +1255,47 @@ internal suspend fun ChatViewModel.runAgentLoop(
             )
         }
 
-        // If no tool calls, we're done
+        var goalAccountingSucceeded = true
+        if (toolCalls.isEmpty()) {
+            val turnUsageTokens = (lastUsage?.inputTokens ?: 0).toLong() + (lastUsage?.outputTokens ?: 0).toLong()
+            goalAccountingSucceeded = runCatching {
+                goalManager.recordUsage(
+                    goalSessionId,
+                    turnUsageTokens,
+                    (System.currentTimeMillis() - turnStartedAtMs).coerceAtLeast(0),
+                )
+            }.onFailure { AppLogger.warning(ChatViewModel.TAG_STREAM, "Goal usage accounting failed: ${it.message}") }.isSuccess
+        }
+
+        if (toolCalls.isEmpty() && turnFinishReason != null && turnFinishReason in setOf("stop", "end_turn") &&
+            turnText.isNotBlank() && goalAccountingSucceeded && goalRunRequested &&
+            goalContinuations < ChatViewModel.MAX_GOAL_CONTINUATIONS &&
+            activeRun?.isStopped != true &&
+            com.openminis.app.service.SessionActivityTracker.isActive(goalSessionId)
+        ) {
+            val goal = runCatching { goalManager.get(goalSessionId) }.getOrNull()
+            if (goal != null && goalManager.mayContinue(goalSessionId, usefulActivity = true)) {
+                val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, allToolInputs)
+                val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
+                val persistedId = persistAssistantTurnForRun(
+                    checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+                )
+                if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
+                val steering = goalManager.continuationPrompt(goal)
+                appendBoundedHistory(
+                    LLMMessage(
+                        role = LLMMessage.Role.USER,
+                        content = steering,
+                        contentParts = listOf(AgentContentPart.Text(steering)),
+                    ),
+                )
+                goalContinuations++
+                AppLogger.info(ChatViewModel.TAG_STREAM, "Goal auto-continuation $goalContinuations/${ChatViewModel.MAX_GOAL_CONTINUATIONS} (session=$goalSessionId)")
+                continue
+            }
+        }
+
+        // If no tool calls and no Goal continuation, we're done.
         if (toolCalls.isEmpty()) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop turn=$turn no tool calls → break (finishReason=$turnFinishReason)")
             withContext(Dispatchers.Main) {
@@ -1229,7 +1303,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
             }
             val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
             val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-            persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta)
+            val persistedId = persistAssistantTurnForRun(
+                checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+            )
+            if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
             // [T-error-persist-android] Empty-response hint: the model ended a
             // turn (finish=stop/end_turn) with no visible text anywhere in the
             // reply and no tool blocks — the user just sees a blank bubble.
@@ -1262,10 +1339,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     "stream closed without a finish reason after ${accumulatedText.length} chars — " +
                         "surfacing as an interrupted reply (turn=$turn)",
                 )
-                withContext(Dispatchers.Main) {
-                    setInlineError(
-                        context.getString(R.string.chat_error_stream_dropped_partial),
-                    )
+                if (activeRun?.isStopped != true) {
+                    withContext(Dispatchers.Main) {
+                        setInlineError(
+                            context.getString(R.string.chat_error_stream_dropped_partial),
+                        )
+                    }
                 }
                 // [T-android-group-pause-badge-restamp] A LIVE interruption just
                 // happened: this is a real entry into the paused state, so the
@@ -1336,7 +1415,9 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     else ->
                         context.getString(R.string.error_empty_response_generic)
                 }
-                withContext(Dispatchers.Main) { setInlineError(hint) }
+                if (activeRun?.isStopped != true) {
+                    withContext(Dispatchers.Main) { setInlineError(hint) }
+                }
             }
             // Auto-title after first exchange
             if (turn == 0) generateSessionTitleIfNeeded()
@@ -1371,6 +1452,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
         val parallelSubResults = mutableMapOf<String, ToolExecutionResult>()
         var didFanOutSubAgents = false
         for ((id, name, args) in toolCalls) {
+            currentCoroutineContext().ensureActive()
             // [T-android-overlay-tool-title] Pull tool_title uniformly
             // from args for ALL tools — without this browser_use's
             // tool_title never reached the overlay (only shell_execute
@@ -1380,6 +1462,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
             val dispatchToolTitle = try {
                 args.optString("tool_title", "").takeIf { it.isNotBlank() }
             } catch (_: Exception) { null }
+            activeRun?.associateSession(activeSessionId)
+            activeRun?.setCurrentTool(id, name, args.toString())
             SessionActivityTracker.updateToolStatus(
                 status = "Running: $name",
                 toolName = name,
@@ -1550,6 +1634,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 continue
             }
 
+            currentCoroutineContext().ensureActive()
             android.util.Log.d("ToolChain[VM]", "[turn=$turn] executeTool START name=$name args=${argsStr.take(200)}")
             if (SubAgentKind.isSpawnTool(name) && !didFanOutSubAgents) {
                 didFanOutSubAgents = true
@@ -1584,6 +1669,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
             } else {
                 executeTool(name, argsStr, id, allToolBlocks, assistantId, accumulatedText)
             }
+            currentCoroutineContext().ensureActive()
             android.util.Log.d("ToolChain[VM]", "[turn=$turn] executeTool END name=$name success=${result.success} title=${result.toolTitle} outputLen=${result.output.length} output=${result.output.take(200)}")
 
             // Record post-execution. WARNING text is appended to the tool
@@ -1637,6 +1723,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // silence is the reported bug. Show it with the same weight
                 // as the blocked path. Mirrors iOS ConcurrentTools.
                 val finalStatus = when {
+                    activeRun?.isStopped == true -> ToolBlockStatus.CANCELLED
                     result.success && truncationRepairTag != null -> ToolBlockStatus.FAILED
                     result.success -> ToolBlockStatus.SUCCESS
                     result.timedOut -> ToolBlockStatus.TIMEOUT
@@ -1673,6 +1760,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
             // above); this covers the tools we still run repaired, where the
             // model would otherwise assume the args it emitted were the args
             // that ran. Mirrors iOS ConcurrentTools.
+            currentCoroutineContext().ensureActive()
             val outputForLLMWithNote = if (truncationRepairTag != null) {
                 outputForLLM + "\n\n<system-reminder>The argument stream for this call was " +
                     "truncated in transit and auto-closed by the client (repair strategy: " +
@@ -1701,6 +1789,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
             ))
         }
 
+        currentCoroutineContext().ensureActive()
+        if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
         // Update UI with tool statuses. Mark as awaiting the next model
         // response so "Minis is thinking" shows during the network gap
         // between tool results being sent and the next turn's first chunk.
@@ -1717,7 +1807,10 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // assistant entry — compact-marker boundary resolution depends on it.
         val turnParts = buildTurnParts(allToolBlocks, turnStartBlockIndex, toolInputMap)
         val blockMeta = allToolBlocks.filter { it.kind == "tool_use" }.associateBy { it.id }
-        val assistantDbId = persistAssistantTurn(turnParts, lastUsage, turnReasoningContent, blockMeta)
+        val assistantDbId = persistAssistantTurnForRun(
+            checkNotNull(activeRun) { "Agent loop has no persistence owner" }, turnParts, lastUsage, turnReasoningContent, blockMeta, accumulatedText,
+        )
+        if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
         if (assistantDbId != null) {
             val lastIdx = agentHistory.indexOfLast { it.role == LLMMessage.Role.ASSISTANT && it.dbMessageId == null }
             if (lastIdx >= 0) {
@@ -1726,7 +1819,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
         }
 
         // Persist tool results as user-role message (mirrors iOS)
-        val toolResultDbId = persistToolResultMessage(resultParts)
+        val toolResultDbId = persistToolResultMessageForRun(
+            checkNotNull(activeRun) { "Agent loop has no persistence owner" },
+            resultParts,
+            uiMessageId = assistantId,
+        )
+        if (activeRun?.isStopped == true) { loopExitedNormally = true; break }
 
         // Add tool results to history
         appendBoundedHistory(LLMMessage(
@@ -1735,6 +1833,28 @@ internal suspend fun ChatViewModel.runAgentLoop(
             contentParts = resultParts,
             dbMessageId = toolResultDbId,
         ))
+        val turnUsageTokens = (lastUsage?.inputTokens ?: 0).toLong() + (lastUsage?.outputTokens ?: 0).toLong()
+        val goalUsageResult = runCatching {
+            goalManager.recordUsage(
+                goalSessionId,
+                turnUsageTokens,
+                (System.currentTimeMillis() - turnStartedAtMs).coerceAtLeast(0),
+            )
+        }.onFailure { AppLogger.warning(ChatViewModel.TAG_STREAM, "Goal usage accounting failed: ${it.message}") }
+        val goalAfterTurn = goalUsageResult.getOrNull()
+        if (goalUsageResult.isFailure || goalAfterTurn?.status in setOf(
+                com.openminis.app.data.db.GoalStatus.COMPLETE,
+                com.openminis.app.data.db.GoalStatus.BLOCKED,
+                com.openminis.app.data.db.GoalStatus.PAUSED,
+                com.openminis.app.data.db.GoalStatus.BUDGET_LIMITED,
+            )
+        ) {
+            withContext(Dispatchers.Main) {
+                updateAssistantMessage(assistantId, accumulatedText, false, allToolBlocks)
+            }
+            loopExitedNormally = true
+            break
+        }
 
         // Auto-title after first exchange (mirrors iOS generateSessionTitleIfNeeded)
         if (turn == 0) {

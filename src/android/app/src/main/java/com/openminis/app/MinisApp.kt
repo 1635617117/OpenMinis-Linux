@@ -445,7 +445,7 @@ class MinisApp : Application(), ImageLoaderFactory {
             )
         }
         appContainer.database = AppDatabase.getInstance(this)
-        appContainer.chatRepository = ChatRepository(database.chatDao(), filesDir)
+        appContainer.chatRepository = ChatRepository(database.chatDao(), database.goalDao(), filesDir)
         // Must finish before the first file tool or shell. A filed session's
         // folder id is what makes both sides share minis-workspaces/<folder>.
         runCatching {

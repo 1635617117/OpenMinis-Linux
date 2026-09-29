@@ -296,6 +296,7 @@ internal fun buildFlatChatItems(
     showCompletedToolCards: Boolean = true,
     foldAiProcess: Boolean = false,
     expandedProcessIds: Set<String> = emptySet(),
+    suppressToolIds: Set<String> = emptySet(),
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
@@ -341,7 +342,14 @@ internal fun buildFlatChatItems(
         }
     }
     for (idx in fromIndex until messages.size) {
-        val message = messages[idx]
+        val message = messages[idx].let { message ->
+            if (suppressToolIds.isEmpty() || message.toolBlocks.none { block ->
+                    suppressToolIds.any { id -> block.id == id || block.id.startsWith("$id#sub-") }
+                }) message
+            else message.copy(toolBlocks = message.toolBlocks.filterNot { block ->
+                suppressToolIds.any { id -> block.id == id || block.id.startsWith("$id#sub-") }
+            })
+        }
         // [T-android-perf-logging] Per-100-message progress breadcrumb.
         // `out.size` is the running row count, so a sudden jump between two
         // progress lines localizes the heavy batch. Only fires on the

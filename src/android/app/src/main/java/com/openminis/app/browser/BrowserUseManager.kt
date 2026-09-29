@@ -690,6 +690,23 @@ class BrowserUseManager(
 
     // -- Execute Action --
 
+    /** Immediately stop page navigation and complete any waiter. */
+    fun stopActiveAction() {
+        webView.post {
+            navigationDeferred?.let { deferred ->
+                navigationDeferred = null
+                _isLoading.value = false
+                deferred.complete(Unit)
+            }
+            asyncJsDeferred?.let { deferred ->
+                asyncJsDeferred = null
+                deferred.complete("{\"error\":\"Browser action stopped by user\"}")
+            }
+            webView.stopLoading()
+            webView.evaluateJavascript("window.stop();", null)
+        }
+    }
+
     suspend fun execute(input: BrowserActionInput): BrowserActionResult {
         if (isDisposed) return BrowserActionResult.error("Browser tab is closed")
         val prevUrl = withContext(Dispatchers.Main) { webView.url }

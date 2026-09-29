@@ -154,7 +154,7 @@ internal fun ChatViewModel.loadSession() {
             val tail = chatRepository.loadSessionTail(sessionId)
             val totalMessages = tail.totalMessages
             val rows = tail.messages
-            val firstMessageOffset = (totalMessages - rows.size).coerceAtLeast(0)
+            val firstMessageOffset = tail.firstMessageOffset
             val tIoAfterLoad = System.currentTimeMillis()
             com.openminis.app.diagnostics.PerfLongCtx.step(
                 sessionId,
@@ -214,6 +214,7 @@ internal fun ChatViewModel.loadSession() {
         val ordered = loaded.ordered
         loadedMessageTotal = loaded.totalMessages
         loadedMessageOffset = loaded.firstMessageOffset
+        unrepresentedLoadedRows = 0
         // [T-android-coldopen-window-parse] agentHistory covers only the
         // newest INITIAL_VISIBLE_MESSAGE_CAP DB rows; the skipped prefix
         // of the tail (if any) is parsed lazily by loadOlderMessages.
@@ -350,6 +351,7 @@ internal fun ChatViewModel.loadSession() {
             }
             applyCompactMarkerGraying(ordered, marker, loaded.messages, historyDbIds)
         }
+        refreshHasOlderMessages()
 
         // Cold-start interrupt detection: an agent loop that was killed by
         // the OS (or app force-quit) leaves agentHistory in one of four
@@ -456,6 +458,25 @@ internal fun ChatViewModel.loadSession() {
                 }
                 Log.i(ChatViewModel.TAG, "loadSession: detected interrupted agent loop, canResume=true (lastRole=${lastEntry.role} shape=$shape)")
             }
+        }
+
+        // Restore the last provider-reported context size on cold open. Without
+        // this, the menu ring stays `?` until the next model call even though
+        // the session has persisted an exact latestContextTokens value.
+        if (!isDraft) {
+            val sid = realSessionId.ifEmpty { sessionId }
+            val restoredContext = withContext(Dispatchers.IO) {
+                chatRepository.sessionTokenUsages(sid).asReversed().firstNotNullOfOrNull { json ->
+                    runCatching {
+                        org.json.JSONObject(json).optLong("latestContextTokens", 0L)
+                    }.getOrNull()?.takeIf { it > 0L }
+                }
+            }
+            if (restoredContext != null) {
+                _lastTurnContextTokens.value = restoredContext
+                    .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            }
+            refreshContextUsage()
         }
         } finally {
             // T201: open the gate even on early `return@launch` (draft path,

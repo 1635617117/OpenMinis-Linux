@@ -93,6 +93,11 @@ internal suspend fun ChatViewModel.executeTool(
             toolId, toolBlocks, assistantId, currentText,
         )
         com.openminis.app.tools.AgentPlanTool.NAME -> com.openminis.app.tools.AgentPlanTool.execute(argsJson)
+        com.openminis.app.tools.GoalTool.NAME -> com.openminis.app.tools.GoalTool.execute(
+            argsJson,
+            activeSessionId,
+            com.openminis.app.goal.GoalManager(chatRepository),
+        )
         com.openminis.app.tools.InvokeSkillTool.NAME ->
             com.openminis.app.tools.InvokeSkillTool.execute(argsJson, skillRepository, activeSessionId)
         com.openminis.app.tools.SkillManageTool.NAME ->

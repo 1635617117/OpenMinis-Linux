@@ -47,6 +47,13 @@ class MultiAgentSettingsRepository(context: Context) {
     )
     val subagentMaxAttempts: StateFlow<Int> = _subagentMaxAttempts.asStateFlow()
 
+    // Deliberately in-memory: slot thinking depth applies to the next dispatch
+    // only and must not become a model/session preference.
+    private val _selectedThinkingLevels = MutableStateFlow(
+        MultiAgentSettings.resizeSlots(emptyList(), _maxConcurrent.value),
+    )
+    val selectedThinkingLevels: StateFlow<List<String>> = _selectedThinkingLevels.asStateFlow()
+
     fun setEnabled(value: Boolean) {
         prefs.edit().putBoolean(KEY_ENABLED, value).apply()
         _enabled.value = value
@@ -57,9 +64,11 @@ class MultiAgentSettingsRepository(context: Context) {
         prefs.edit().putInt(KEY_MAX_CONCURRENT, clamped).apply()
         _maxConcurrent.value = clamped
         val resized = MultiAgentSettings.resizeSlots(_selectedModelEntryIds.value, clamped)
-        if (resized != _selectedModelEntryIds.value) {
-            writeSelectedIds(resized)
-        }
+        if (resized != _selectedModelEntryIds.value) writeSelectedIds(resized)
+        _selectedThinkingLevels.value = MultiAgentSettings.resizeSlots(
+            _selectedThinkingLevels.value,
+            clamped,
+        )
     }
 
     fun setSubagentMaxTurns(value: Int) {
@@ -86,6 +95,28 @@ class MultiAgentSettingsRepository(context: Context) {
                 id,
                 _maxConcurrent.value,
             ),
+        )
+        // Thinking depth is a one-task slot choice, not a model-global override.
+        // Switching a slot to another model starts at that model's own maximum.
+        setSlotThinkingLevel(index, null)
+    }
+
+    fun setSlotThinkingLevel(index: Int, level: String?) {
+        val levels = MultiAgentSettings.resizeSlots(
+            _selectedThinkingLevels.value,
+            _maxConcurrent.value,
+        ).toMutableList()
+        if (index !in levels.indices) return
+        levels[index] = level.orEmpty()
+        _selectedThinkingLevels.value = levels
+    }
+
+    fun slotThinkingLevel(index: Int): String? =
+        _selectedThinkingLevels.value.getOrNull(index)?.takeIf { it.isNotBlank() }
+
+    fun clearSlotThinkingLevels() {
+        _selectedThinkingLevels.value = MultiAgentSettings.resizeSlots(
+            emptyList(), _maxConcurrent.value,
         )
     }
 
@@ -124,7 +155,13 @@ class MultiAgentSettingsRepository(context: Context) {
         ids.forEach { arr.put(it) }
         prefs.edit().putString(KEY_MODEL_IDS, arr.toString()).apply()
         _selectedModelEntryIds.value = ids
+        val resizedThinking = MultiAgentSettings.resizeSlots(
+            _selectedThinkingLevels.value,
+            _maxConcurrent.value,
+        )
+        if (resizedThinking != _selectedThinkingLevels.value) _selectedThinkingLevels.value = resizedThinking
     }
+
 
     companion object {
         private const val PREFS_NAME = "multi_agent_settings"

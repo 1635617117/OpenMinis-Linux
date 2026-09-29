@@ -51,6 +51,7 @@ fun ChatViewModel.executeSlashCommand(cmd: SlashCommand, currentInput: String = 
         "compact" -> compactAll()
         "memory" -> toggleMemoryEnabled()
         "thinking" -> toggleThinking()
+        "goal" -> appendSystemInfo("Use /goal create <objective> [--budget tokens], /goal pause, /goal resume, or /goal show.", "info")
         "clear" -> _clearChatConfirmRequested.value = true
         else -> AppLogger.info(ChatViewModel.TAG, "[Slash] unrecognized id=${cmd.id} — no dispatch")
     }

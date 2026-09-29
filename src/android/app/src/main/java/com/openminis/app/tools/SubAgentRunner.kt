@@ -66,6 +66,7 @@ object SubAgentRunner {
         roleContext: Context? = null,
         temperature: Double? = null,
         tokenBudget: SubAgentTokenBudget? = null,
+        thinkingLevel: ThinkingLevel = ThinkingLevel.ULTRA,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
         val history = mutableListOf(
@@ -114,7 +115,7 @@ object SubAgentRunner {
                     maxTokens = maxTokens.coerceAtLeast(256),
                     temperature = temperature,
                     tools = tools,
-                    thinkingLevel = ThinkingLevel.OFF,
+                    thinkingLevel = thinkingLevel,
                 ).collect { chunk ->
                     when (chunk) {
                         is LLMStreamChunk.Text -> {

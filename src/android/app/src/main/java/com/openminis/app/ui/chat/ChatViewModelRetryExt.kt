@@ -170,7 +170,7 @@ fun ChatViewModel.retryLast() {
 
         // _isStreaming was already set synchronously at the top.
         streamLaunched = true
-        streamJob = launch(Dispatchers.IO) {
+        streamJob = launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast streamJob ENTER sid=$activeSessionId")
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
@@ -191,17 +191,21 @@ fun ChatViewModel.retryLast() {
                         fallbackStrategy = activeFallbackStrategy,
                     )
                     AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast runAgentLoop RETURN normal")
-                    drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast drainQueuedPrompts RETURN")
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast drainQueuedPrompts RETURN")
+                    }
                 } catch (e: CancellationException) {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast runAgentLoop CANCELLED")
                     Log.d(ChatViewModel.TAG, "Agent loop cancelled")
                 } catch (e: Exception) {
                     AppLogger.error(ChatViewModel.TAG_STREAM, "retryLast runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(ChatViewModel.TAG, "Agent loop error (retryLast)", e)
-                    setInlineError(e.message ?: "Unknown error")
-                    // T298: completion notifier should show the ❌ variant.
-                    SessionActivityTracker.markStreamError(activeSessionId)
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        setInlineError(e.message ?: "Unknown error")
+                        // T298: completion notifier should show the ❌ variant.
+                        SessionActivityTracker.markStreamError(activeSessionId)
+                    }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast streamJob FINALLY enter")
                     // [T-android-overlay-reply-status-34599] Surface
@@ -217,7 +221,9 @@ fun ChatViewModel.retryLast() {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast streamJob FINALLY exit")
                 }
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
-                setInlineError(e.message ?: "会话排队超时，名额已释放")
+                if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                    setInlineError(e.message ?: "会话排队超时，名额已释放")
+                }
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "retryLast streamJob CANCELLED waiting for slot")
                 Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")

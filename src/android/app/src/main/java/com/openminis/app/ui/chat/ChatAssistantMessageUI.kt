@@ -277,6 +277,7 @@ internal fun InlineErrorBanner(error: String, onRetry: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .widthIn(min = 200.dp)
             .padding(top = 4.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(Color(0xFFFF3B30).copy(alpha = 0.12f))

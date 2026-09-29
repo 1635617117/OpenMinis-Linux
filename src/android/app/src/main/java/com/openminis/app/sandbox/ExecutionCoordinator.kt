@@ -273,6 +273,8 @@ object ExecutionCoordinator {
 
     fun sessionBindMounts(sessionId: String): Map<String, String> = buildSessionBindMounts(sessionId)
 
+    internal fun hasLiveShell(sessionId: String): Boolean = shells[sessionId]?.isAlive == true
+
     private fun shellMountsStale(shell: PersistentShell, sessionId: String): Boolean {
         // Compare the whole argv, not only /sdcard. A user mount named sdcard,
         // a new /var/minis/mounts entry, or a filed-session hostDir change is

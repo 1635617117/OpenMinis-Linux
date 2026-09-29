@@ -14,39 +14,57 @@ object OnlinePluginStore {
     private const val FLAGS = "plugin_online_flags"
     private const val KEYS_FILE = "plugin_online_keys"
 
-    fun isInstalled(context: Context, pluginId: String): Boolean =
-        context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE)
-            .getBoolean(pluginId, false)
+    private fun fingerprintKey(pluginId: String) = "fingerprint_$pluginId"
+
+    fun isInstalled(context: Context, plugin: PluginRegistry.RemotePlugin): Boolean {
+        val prefs = context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE)
+        return prefs.getBoolean(plugin.id, false) &&
+            prefs.getString(fingerprintKey(plugin.id), null) == plugin.configurationKey()
+    }
 
     fun installedIds(context: Context): Set<String> {
-        val all = context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE).all
-        return all.filter { it.value == true }.keys
+        val registry = PluginRegistry.cached(context)
+        return registry.filter { isInstalled(context, it) }.mapTo(mutableSetOf()) { it.id }
     }
 
-    fun setInstalled(context: Context, pluginId: String, installed: Boolean) {
-        context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE)
-            .edit()
-            .putBoolean(pluginId, installed)
+    fun setInstalled(context: Context, plugin: PluginRegistry.RemotePlugin, installed: Boolean) {
+        val prefs = context.getSharedPreferences(FLAGS, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean(plugin.id, installed)
+            .apply {
+                if (installed) putString(fingerprintKey(plugin.id), plugin.configurationKey())
+                else remove(fingerprintKey(plugin.id))
+            }
             .apply()
-        if (!installed) setApiKey(context, pluginId, null)
+        if (!installed) {
+            val keys = EncryptedPrefsFactory.safeCreate(context, KEYS_FILE)
+            val prefix = connectorScopePrefix(plugin.id)
+            keys.edit().apply {
+                remove(plugin.id)
+                keys.all.keys.filter { it.startsWith(prefix) }.forEach(::remove)
+            }.apply()
+            ConnectorNetworkPolicy.clearPluginConfigurations(context, plugin.id)
+            OnlineApiTool.evictNetworkClient(plugin)
+        }
     }
 
-    fun apiKey(context: Context, pluginId: String): String? {
+    fun apiKey(context: Context, plugin: PluginRegistry.RemotePlugin): String? {
+        if (!isInstalled(context, plugin)) return null
         val prefs = EncryptedPrefsFactory.safeCreate(context, KEYS_FILE)
-        return prefs.getString(pluginId, null)?.takeIf { it.isNotBlank() }
+        return prefs.getString(plugin.configurationKey(), null)?.takeIf { it.isNotBlank() }
     }
 
-    fun setApiKey(context: Context, pluginId: String, key: String?) {
+    fun setApiKey(context: Context, plugin: PluginRegistry.RemotePlugin, key: String?) {
         val prefs = EncryptedPrefsFactory.safeCreate(context, KEYS_FILE)
-        if (key.isNullOrBlank()) prefs.edit().remove(pluginId).apply()
-        else prefs.edit().putString(pluginId, key.trim()).apply()
+        val storageKey = plugin.configurationKey()
+        if (key.isNullOrBlank()) prefs.edit().remove(storageKey).apply()
+        else prefs.edit().putString(storageKey, key.trim()).apply()
     }
 
     fun toolDefinitions(context: Context): List<AgentToolDefinition> {
         val installed = installedIds(context)
         if (installed.isEmpty()) return emptyList()
         return PluginRegistry.cached(context)
-            .filter { it.id in installed }
+            .filter { it.id in installed && isInstalled(context, it) }
             .flatMap { plugin -> plugin.tools.map { OnlineApiTool.definition(plugin, it) } }
     }
 

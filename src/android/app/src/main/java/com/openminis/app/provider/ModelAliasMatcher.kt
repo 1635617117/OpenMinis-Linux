@@ -57,6 +57,25 @@ internal object ModelAliasMatcher {
         return out.toList()
     }
 
+    fun <T> resolveBest(
+        query: String?,
+        candidates: List<T>,
+        idOf: (T) -> String,
+        nameOf: (T) -> String,
+    ): T? {
+        val normalized = query?.trim()?.takeIf(String::isNotEmpty) ?: return null
+        candidates.firstOrNull {
+            idOf(it).equals(normalized, ignoreCase = true) || nameOf(it).equals(normalized, ignoreCase = true)
+        }?.let { return it }
+        return pickBest(
+            queryId = normalized,
+            queryName = normalized,
+            candidates = candidates,
+            tokensOf = { tokens("${idOf(it)} ${nameOf(it)}").toSet() },
+            idOf = idOf,
+        )
+    }
+
     fun <T> pickBest(
         queryId: String,
         queryName: String,

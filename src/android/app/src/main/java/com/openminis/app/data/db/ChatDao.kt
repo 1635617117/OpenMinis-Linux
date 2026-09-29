@@ -450,6 +450,9 @@ interface ChatDao {
     @Query("UPDATE messages SET error_info = :errorInfo WHERE id = :messageId")
     suspend fun updateMessageErrorInfo(messageId: String, errorInfo: String?)
 
+    @Query("SELECT id FROM messages WHERE session_id = :sessionId AND role = 'assistant' ORDER BY sort_order DESC LIMIT 1")
+    suspend fun lastAssistantMessageId(sessionId: String): String?
+
     /**
      * [T-error-persist-android] Stamp the error sticker onto the LAST assistant
      * row of a session (max sort_order among role='assistant'). The agent loop

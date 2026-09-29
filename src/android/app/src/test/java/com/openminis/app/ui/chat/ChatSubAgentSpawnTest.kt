@@ -1,5 +1,6 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.tools.SubAgentKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -58,6 +59,13 @@ class ChatSubAgentSpawnTest {
         assertEquals(1, batch.size)
         assertEquals(SubAgentKind.EXPLORE, batch[0].kind)
         assertEquals(10, batch[0].maxTurns)
+    }
+
+    @Test
+    fun thinkingDefaultsToModelResolutionAndAcceptsExplicitOff() {
+        assertNull(parseSubAgentSpawn("{\"prompt\":\"inspect\"}", 20)?.thinkingLevel)
+        assertEquals(ThinkingLevel.OFF, parseSubAgentSpawn("{\"prompt\":\"inspect\",\"thinking_level\":\"off\"}", 20)?.thinkingLevel)
+        assertNull(parseSubAgentSpawn("{\"prompt\":\"inspect\",\"thinking_level\":\"supreme\"}", 20)?.thinkingLevel)
     }
 
     @Test

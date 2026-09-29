@@ -8,6 +8,8 @@ import com.openminis.app.sandbox.NativeOffloadHandler
 import com.openminis.app.sandbox.NativeOffloadRequest
 import com.openminis.app.sandbox.NativeOffloadResult
 import com.openminis.app.sandbox.SandboxWorkload
+import com.openminis.app.service.ActiveRunContext
+import com.openminis.app.service.ActiveRunRegistry
 import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -42,7 +44,7 @@ class SuOffloadHandler : NativeOffloadHandler {
                         .toString()
                     return NativeOffloadResult(126, body + "\n")
                 }
-                exec(parsed.command!!, parsed.timeoutMs)
+                exec(parsed.command!!, parsed.timeoutMs, request)
             }
         }
     }
@@ -84,7 +86,7 @@ class SuOffloadHandler : NativeOffloadHandler {
         return NativeOffloadResult(0, data.toString(2) + "\n")
     }
 
-    private fun exec(command: String, timeoutMs: Long): NativeOffloadResult {
+    private fun exec(command: String, timeoutMs: Long, request: NativeOffloadRequest): NativeOffloadResult {
         GuestWorkloadPolicy.hostRefusal(command)?.let {
             return NativeOffloadResult(126, it + "\n")
         }
@@ -93,7 +95,7 @@ class SuOffloadHandler : NativeOffloadHandler {
         val su = SuCommand.findSuBinary()
         if (su != null) {
             try {
-                val (code, output) = SuCommand.runHost(listOf(su, "-c", confined), armed)
+                val (code, output) = SuCommand.runHost(listOf(su, "-c", confined), armed, request.sessionId)
                 if (!SuCommand.looksLikeElevationFailure(code, output)) {
                     return NativeOffloadResult(code, output)
                 }
@@ -254,11 +256,14 @@ internal object SuCommand {
         )
     }
 
-    fun runHost(argv: List<String>, timeoutMs: Long): Pair<Int, String> {
+    fun runHost(argv: List<String>, timeoutMs: Long, sessionId: String? = null): Pair<Int, String> {
         val pb = ProcessBuilder(argv)
         pb.redirectErrorStream(true)
         val proc = pb.start()
         SandboxWorkload.track(proc, "host-su")
+        ActiveRunRegistry.registerProcess(sessionId, proc)
+        val activeRun = ActiveRunContext.current()
+        activeRun?.registerProcess(proc)
         SandboxWorkload.armDeadline(proc, timeoutMs)
         val buf = BoundedOutputBuffer(headChars = 32 * 1024, tailChars = 32 * 1024)
         val reader = Thread {
@@ -279,11 +284,15 @@ internal object SuCommand {
         val finished = proc.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
         if (!finished) {
             SandboxWorkload.release(proc, kill = true, reason = "host-su-timeout")
+            ActiveRunRegistry.unregisterProcess(sessionId, proc)
+            activeRun?.unregisterProcess(proc)
             reader.join(1_000)
             return 124 to "android-su: timed out after ${timeoutMs}ms; process group killed\n${buf}"
         }
         reader.join(1_000)
         SandboxWorkload.release(proc, kill = false, reason = "host-su-done")
+        ActiveRunRegistry.unregisterProcess(sessionId, proc)
+        activeRun?.unregisterProcess(proc)
         return proc.exitValue() to buf.toString()
     }
 

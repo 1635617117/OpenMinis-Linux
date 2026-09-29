@@ -26,6 +26,15 @@ class ModelAliasMatcherTest {
     }
 
     @Test
+    fun `resolveBest handles dirty coordinator model labels`() {
+        val candidates = listOf(Cand("gpt-6-astra-pro", "GPT-6 Astra Pro"), Cand("gpt-6-astra", "GPT-6 Astra"))
+        assertEquals(
+            "gpt-6-astra",
+            ModelAliasMatcher.resolveBest("relay-name · 免费GPT-6 Astra", candidates, { it.id }, { it.name })?.id,
+        )
+    }
+
+    @Test
     fun `stripNoise drops 免费 and free`() {
         assertEquals("GPT-6 Astra", ModelAliasMatcher.stripNoise("免费GPT-6 Astra"))
         assertEquals("GPT-6", ModelAliasMatcher.stripNoise("GPT-6免费"))

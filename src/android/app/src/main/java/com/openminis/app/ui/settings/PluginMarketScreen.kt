@@ -75,7 +75,8 @@ fun PluginMarketScreen(
 
         SettingsSection(
             header = stringResource(R.string.plugin_market_section_online),
-            footer = stringResource(R.string.plugin_market_footer_online),
+            footer = stringResource(R.string.plugin_market_footer_online) + "\n" +
+                stringResource(R.string.plugin_market_config_trust_note),
         ) {
             if (plugins.isEmpty()) {
                 Text(
@@ -87,7 +88,7 @@ fun PluginMarketScreen(
                 )
             }
             plugins.forEachIndexed { index, plugin ->
-                val on = OnlinePluginStore.isInstalled(context, plugin.id)
+                val on = OnlinePluginStore.isInstalled(context, plugin)
                 SettingsSwitchRow(
                     title = plugin.name,
                     subtitle = buildString {
@@ -98,21 +99,33 @@ fun PluginMarketScreen(
                     checked = on,
                     onCheckedChange = { checked ->
                         if (checked) {
-                            FetchUrlGuard.blockedReason(plugin.baseUrl)?.let {
+                            com.openminis.app.plugins.ConnectorNetworkPolicy.configurationBlockedReason(plugin.baseUrl)?.let {
                                 status = it
                                 return@SettingsSwitchRow
                             }
                             if (plugin.authType == "api_key" &&
-                                OnlinePluginStore.apiKey(context, plugin.id).isNullOrBlank()
+                                OnlinePluginStore.apiKey(context, plugin).isNullOrBlank()
                             ) {
                                 keyDraft = ""
                                 keyTarget = plugin
                                 return@SettingsSwitchRow
                             }
-                            OnlinePluginStore.setInstalled(context, plugin.id, true)
+                            OnlinePluginStore.setInstalled(context, plugin, true)
                         } else {
-                            OnlinePluginStore.setInstalled(context, plugin.id, false)
+                            OnlinePluginStore.setInstalled(context, plugin, false)
                         }
+                        installedTick++
+                    },
+                    showDivider = index < plugins.lastIndex,
+                )
+                SettingsSwitchRow(
+                    title = stringResource(R.string.plugin_market_allow_private),
+                    subtitle = stringResource(R.string.plugin_market_allow_private_desc),
+                    checked = com.openminis.app.plugins.ConnectorNetworkPolicy.allowsPrivate(context, plugin),
+                    enabled = on,
+                    onCheckedChange = { checked ->
+                        com.openminis.app.plugins.ConnectorNetworkPolicy.setAllowsPrivate(context, plugin, checked)
+                        com.openminis.app.plugins.OnlineApiTool.evictNetworkClient(plugin)
                         installedTick++
                     },
                     showDivider = index < plugins.lastIndex,
@@ -146,8 +159,8 @@ fun PluginMarketScreen(
                     TextButton(
                         onClick = {
                             if (keyDraft.isBlank()) return@TextButton
-                            OnlinePluginStore.setApiKey(context, pending.id, keyDraft)
-                            OnlinePluginStore.setInstalled(context, pending.id, true)
+                            OnlinePluginStore.setApiKey(context, pending, keyDraft)
+                            OnlinePluginStore.setInstalled(context, pending, true)
                             keyTarget = null
                             installedTick++
                         },

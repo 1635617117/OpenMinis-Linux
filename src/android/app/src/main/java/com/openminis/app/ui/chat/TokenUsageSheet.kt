@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,8 +52,9 @@ fun TokenUsageSheet(
     onDismiss: () -> Unit,
 ) {
     var stats by remember { mutableStateOf<ChatViewModel.SessionTokenStats?>(null) }
-    val contextWindow = remember { viewModel.currentModelContextWindow }
-    val maxOutput = remember { viewModel.currentModelMaxOutputTokens }
+    val contextUsage by viewModel.contextUsage.collectAsState()
+    val contextWindow = viewModel.currentModelContextWindow
+    val maxOutput = viewModel.currentModelMaxOutputTokens
     val thinking = remember { viewModel.thinkingInfo() }
 
     LaunchedEffect(Unit) {
@@ -82,8 +84,19 @@ fun TokenUsageSheet(
             val yesText = stringResource(R.string.common_yes)
             val noText = stringResource(R.string.common_no)
             StatSection(title = stringResource(R.string.token_usage_section_context)) {
-                StatRow(stringResource(R.string.token_usage_context_used), formatTokens(s?.context ?: 0))
+                StatRow(
+                    stringResource(R.string.token_usage_context_used),
+                    formatTokens(
+                        if (contextUsage.known) {
+                            contextUsage.usedTokens.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                        } else s?.context ?: 0,
+                    ),
+                )
                 contextWindow?.let { StatRow(stringResource(R.string.token_usage_context_window), formatTokens(it)) }
+                StatRow(
+                    stringResource(R.string.token_usage_context_percent),
+                    if (contextUsage.known) "${(contextUsage.ratio * 100).toInt()}%" else "?",
+                )
                 maxOutput?.let { StatRow(stringResource(R.string.token_usage_max_output), formatTokens(it)) }
             }
 

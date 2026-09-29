@@ -29,6 +29,7 @@ object PlanDiscussionOrchestrator {
         val maxTokens: Int,
         val temperature: Double? = null,
         val role: String = "",
+        val thinkingLevel: ThinkingLevel = ThinkingLevel.ULTRA,
     )
 
     data class Result(
@@ -238,7 +239,7 @@ object PlanDiscussionOrchestrator {
                     maxTokens = member.maxTokens.coerceIn(256, 8192),
                     temperature = member.temperature,
                     tools = tools,
-                    thinkingLevel = ThinkingLevel.OFF,
+                    thinkingLevel = member.thinkingLevel,
                 ).collect { chunk ->
                     when (chunk) {
                         is LLMStreamChunk.Text -> textSb.append(chunk.text)

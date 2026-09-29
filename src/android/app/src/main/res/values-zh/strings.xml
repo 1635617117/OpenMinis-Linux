@@ -201,6 +201,9 @@
     <string name="plugin_market_empty">没有远程插件。请检查网络后重试。</string>
     <string name="plugin_market_api_key">API 密钥</string>
     <string name="plugin_market_install">安装</string>
+    <string name="plugin_market_allow_private">允许访问私网目标</string>
+    <string name="plugin_market_allow_private_desc">仅对当前已安装 connector 生效；云元数据地址仍始终禁止。</string>
+    <string name="plugin_market_config_trust_note">凭据和私网权限绑定到 connector 端点与 API 定义；配置变更后需要重新审核并安装。</string>
     <string name="settings_collab_roles_section">协作角色</string>
     <string name="settings_collab_roles_footer">把这些名字填进 spawn_agent 的 role，会注入盯着/不管/闭嘴/该找谁。点自定义角色可编辑/删除，同名角色覆盖内置；带 * 为自定义。</string>
     <string name="mcp_title">MCP 集成</string>
@@ -471,6 +474,7 @@
     <string name="token_usage_section_context">上下文</string>
     <string name="token_usage_context_used">已用上下文</string>
     <string name="token_usage_context_window">上下文窗口</string>
+    <string name="token_usage_context_percent">上下文占用</string>
     <string name="token_usage_max_output">最大输出</string>
     <string name="token_usage_section_thinking">思考</string>
     <string name="token_usage_thinking_label">思考</string>
@@ -658,6 +662,7 @@
     <string name="browser_reload">重新加载</string>
     <string name="browser_minis_browsing">Minis Ultra 正在浏览</string>
     <string name="chat_typing_indicator">%1$s 正在输入</string>
+    <string name="chat_response_interrupted">已中断</string>
     <string name="read_aloud_unavailable">朗读失败：没有可用的语音引擎。请检查语音输出设置，或安装系统语音引擎。</string>
     <string name="chat_error_stream_dropped_partial">连接中断，此回复可能不完整。点击重试以继续。</string>
     <string name="chat_input_placeholder">发消息给 %1$s（@ 提及文件）</string>
@@ -919,6 +924,9 @@
     <string name="perm_allow_minis_config">允许 minis-config</string>
     <string name="perm_minis_config_desc">禁用后，Agent 将无法通过 minis-config 读取或修改任何设置。日志 → 配置变更 中的变更历史仍可查看。Agent 会收到 permission_denied 错误，并通过深度链接引导你操作。</string>
     <string name="perm_section_privacy">隐私</string>
+    <string name="perm_privacy_global_title">隐私权限总策略</string>
+    <string name="perm_privacy_global_desc">适用于日历、位置、剪贴板、联系人、其他会话和照片。单项拒绝仍然有效。</string>
+    <string name="perm_privacy_global_level">隐私工具默认策略</string>
     <string name="perm_section_media">媒体</string>
     <string name="perm_section_system">系统</string>
     <string name="perm_tool_calendar">日历</string>
@@ -1979,6 +1987,7 @@
     <string name="file_print_failed_toast">打印失败：%1$s</string>
     <string name="debug_trigger_crash_menu">触发闪退 (Debug)</string>
     <string name="chat_load_older_messages">↑ 加载更早的消息</string>
+    <string name="chat_load_newer_messages">↓ 加载更新的消息</string>
     <string name="error_empty_response_generic">模型返回了空响应。请重试或切换模型。</string>
     <string name="error_empty_response_context_large">模型返回了空响应。会话上下文可能过大 —— 请尝试压缩上下文或开启新会话。</string>
     <string name="error_empty_response_after_tool">在工具结果之后，即使经过提醒，模型仍未返回任何响应。它可能已过载 —— 请重试或切换模型。</string>

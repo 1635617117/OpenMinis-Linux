@@ -23,8 +23,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -52,11 +56,11 @@ import com.openminis.app.ui.theme.ChatColors
 fun SubAgentLiveBar(
     sessionId: String,
     modifier: Modifier = Modifier,
+    onStop: (String) -> Unit = {},
 ) {
     val members by SubAgentActivityTracker.members.collectAsState()
     val mine = members.filter { it.parentSessionId == sessionId }
-    var selectedId by remember { mutableStateOf<String?>(null) }
-    val selected = selectedId?.let { id -> members.firstOrNull { it.id == id } }
+    var detailMemberId by remember { mutableStateOf<String?>(null) }
 
     if (mine.isNotEmpty()) {
     Row(
@@ -77,6 +81,12 @@ fun SubAgentLiveBar(
                 m.currentTool.takeIf { it.isNotBlank() }?.let { append(" · ").append(subAgentToolTitle(it, "")) }
                 if (m.turnCap > 0) append(" · ${m.turnIndex.coerceAtLeast(1)}/${m.turnCap}")
             }
+            Row(
+                modifier = Modifier
+                    .background(bg, RoundedCornerShape(999.dp))
+                    .padding(start = 10.dp, end = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             Text(
                 text = label,
                 color = Color.White,
@@ -86,19 +96,22 @@ fun SubAgentLiveBar(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
                     .widthIn(max = 220.dp)
-                    .background(bg, RoundedCornerShape(999.dp))
-                    .clickable { selectedId = m.id }
-                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                    .clickable { detailMemberId = m.id }
+                    .padding(vertical = 4.dp),
             )
+            IconButton(onClick = { onStop(m.id) }, modifier = Modifier.widthIn(min = 28.dp).heightIn(min = 28.dp)) {
+                Icon(Icons.Filled.Stop, contentDescription = "Stop ${m.title}", tint = Color.White)
+            }
+            }
             }
         }
     }
     }
-
-    if (selected != null) {
+    val detailMember = mine.firstOrNull { it.id == detailMemberId }
+    if (detailMember != null) {
         SubAgentDetailSheet(
-            member = selected,
-            onDismiss = { selectedId = null },
+            member = detailMember,
+            onDismiss = { detailMemberId = null },
         )
     }
 }

@@ -32,7 +32,9 @@ import com.openminis.app.R
 import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ProviderInstance
+import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.MultiAgentSettings
+import com.openminis.app.provider.effectiveMaxThinkingLevel
 
 @Composable
 fun MultiAgentSettingsScreen(
@@ -51,6 +53,7 @@ fun MultiAgentSettingsScreen(
     // stepper still reads a repo StateFlow here.
     val subagentMaxAttempts by repo.subagentMaxAttempts.collectAsState()
     val selectedIds by repo.selectedModelEntryIds.collectAsState()
+    val selectedThinkingLevels by repo.selectedThinkingLevels.collectAsState()
     val config by providerRepo.config.collectAsState()
     val configLoaded by providerRepo.configLoaded.collectAsState()
 
@@ -165,11 +168,13 @@ fun MultiAgentSettingsScreen(
                 SubAgentSlotRow(
                     index = index,
                     selectedId = slotId,
+                    thinkingLevel = selectedThinkingLevels.getOrNull(index)?.takeIf { it.isNotBlank() },
                     candidates = candidates,
                     instancesById = instancesById,
                     enabled = enabled && candidates.isNotEmpty(),
                     showDivider = index < slots.lastIndex,
                     onSelect = { repo.setSlotModel(index, it) },
+                    onSelectThinking = { repo.setSlotThinkingLevel(index, it.name) },
                 )
             }
         }
@@ -280,23 +285,38 @@ fun MultiAgentSettingsScreen(
 private fun SubAgentSlotRow(
     index: Int,
     selectedId: String,
+    thinkingLevel: String?,
     candidates: List<ModelEntry>,
     instancesById: Map<String, ProviderInstance>,
     enabled: Boolean,
     showDivider: Boolean,
     onSelect: (String) -> Unit,
+    onSelectThinking: (ThinkingLevel) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selectedEntry = candidates.find { it.id == selectedId }
     val value = selectedEntry?.let { slotModelLabel(it, instancesById) }
         ?: stringResource(R.string.settings_multi_agent_slot_main)
+    val maxThinking = selectedEntry?.effectiveMaxThinkingLevel ?: ThinkingLevel.OFF
+    val selectedThinking = thinkingLevel?.let {
+        runCatching { ThinkingLevel.valueOf(it.uppercase()) }.getOrNull()
+    }?.let { if (it.rank <= maxThinking.rank) it else maxThinking } ?: maxThinking
+    var thinkingExpanded by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxWidth()) {
-        SettingsValueRow(
-            title = stringResource(R.string.settings_multi_agent_slot, index + 1),
-            value = value,
-            onClick = if (enabled) ({ expanded = true }) else null,
-            showDivider = showDivider,
-        )
+        Column {
+            SettingsValueRow(
+                title = stringResource(R.string.settings_multi_agent_slot, index + 1),
+                value = value,
+                onClick = if (enabled) ({ expanded = true }) else null,
+                showDivider = true,
+            )
+            SettingsValueRow(
+                title = "本次思考深度",
+                value = selectedThinking.displayName,
+                onClick = if (enabled && maxThinking != ThinkingLevel.OFF) ({ thinkingExpanded = true }) else null,
+                showDivider = showDivider,
+            )
+        }
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
@@ -317,6 +337,22 @@ private fun SubAgentSlotRow(
                     },
                 )
             }
+        }
+        DropdownMenu(
+            expanded = thinkingExpanded,
+            onDismissRequest = { thinkingExpanded = false },
+        ) {
+            ThinkingLevel.values()
+                .filter { it != ThinkingLevel.OFF && it.rank <= maxThinking.rank }
+                .forEach { level ->
+                    DropdownMenuItem(
+                        text = { Text(level.displayName) },
+                        onClick = {
+                            onSelectThinking(level)
+                            thinkingExpanded = false
+                        },
+                    )
+                }
         }
     }
 }

@@ -6,6 +6,11 @@ import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
 
+object PersistedMessageStatus {
+    const val INTERRUPTED = "minis:interrupted"
+    const val INTERRUPTED_INFO = "run_interrupted"
+}
+
 @Entity(
     tableName = "messages",
     foreignKeys = [

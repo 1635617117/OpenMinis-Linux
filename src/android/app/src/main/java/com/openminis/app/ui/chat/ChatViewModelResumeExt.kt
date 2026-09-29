@@ -11,6 +11,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Resume an interrupted agent loop. Injects a `<system-reminder>` into
@@ -61,7 +62,10 @@ fun ChatViewModel.resume() {
         )
         viewModelScope.launch(Dispatchers.IO) {
             val partsJson = """[{"type":"text","value":${escapeJson(reminder)}}]"""
-            chatRepository.appendMessage(activeSessionId, "user", partsJson)
+            val persisted = chatRepository.appendMessage(activeSessionId, "user", partsJson)
+            withContext(Dispatchers.Main.immediate) {
+                notePersistedUiRow(null, persisted.id)
+            }
         }
     }
 
@@ -76,7 +80,7 @@ fun ChatViewModel.resume() {
 
         AppLogger.info(ChatViewModel.TAG_STREAM, "resume _isStreaming=true (sid=$activeSessionId)")
         _isStreaming.value = true
-        streamJob = launch(Dispatchers.IO) {
+        streamJob = launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "resume streamJob ENTER sid=$activeSessionId")
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
@@ -98,15 +102,19 @@ fun ChatViewModel.resume() {
                         fallbackStrategy = activeFallbackStrategy,
                     )
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resume runAgentLoop RETURN normal")
-                    drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                    AppLogger.info(ChatViewModel.TAG_STREAM, "resume drainQueuedPrompts RETURN")
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        AppLogger.info(ChatViewModel.TAG_STREAM, "resume drainQueuedPrompts RETURN")
+                    }
                 } catch (e: CancellationException) {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resume runAgentLoop CANCELLED")
                     Log.d(ChatViewModel.TAG, "Agent loop cancelled (resume)")
                 } catch (e: Exception) {
                     AppLogger.error(ChatViewModel.TAG_STREAM, "resume runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(ChatViewModel.TAG, "Agent loop error (resume)", e)
-                    setInlineError(e.message ?: "Unknown error")
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        setInlineError(e.message ?: "Unknown error")
+                    }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resume streamJob FINALLY enter")
                     // [T-android-overlay-reply-status-34599] Surface
@@ -122,7 +130,9 @@ fun ChatViewModel.resume() {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resume streamJob FINALLY exit")
                 }
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
-                setInlineError(e.message ?: "会话排队超时，名额已释放")
+                if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                    setInlineError(e.message ?: "会话排队超时，名额已释放")
+                }
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "resume streamJob CANCELLED waiting for slot")
                 Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot (resume)")

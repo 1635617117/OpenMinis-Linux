@@ -52,6 +52,7 @@ object AgentTools {
         add(DispatchAgentsTool.definition())
         add(WolfpackTool.definition())
         add(AgentPlanTool.definition())
+        add(GoalTool.definition())
         add(ExecuteCodeTool.definition())
         add(InvokeSkillTool.definition())
         add(SkillManageTool.definition())
@@ -121,6 +122,11 @@ object AgentTools {
                     "integer",
                     "OPTIONAL shared token cap for this dispatch (weighted: output=1.0, prefill=0.1). Omit for NO token cap — lanes run to their max_turns. When set, the strictest cap among tasks wins; lanes stop with a partial report when the pool is drained.",
                 ),
+                "thinking_level" to AgentToolParam(
+                    "string",
+                    "Per-dispatch reasoning depth. Defaults to ULTRA; the provider clamps it to the selected model ceiling.",
+                    enumValues = listOf("OFF", "LOW", "MEDIUM", "HIGH", "XHIGH", "MAX", "ULTRA"),
+                ),
                 "role" to AgentToolParam("string", "Catalog role (秘书助理, 产品经理, 架构师, 工程师, 前端设计师, 测试工程师, 侦察兵, 拆解工, 分析员) injects focus / do-not / when-silent / who-to-ask and a tool whitelist. Other strings are labels only."),
                 "skills" to AgentToolParam("string", "Comma-separated skill ids the worker should read first."),
                 "model" to AgentToolParam("string", "Optional model-entry id from the configured sub-agent pool. Omit to round-robin."),
@@ -155,10 +161,11 @@ Each task prompt MUST be self-contained with ## Task / ## Expected result / ## C
                 ),
                 "write_paths" to AgentToolParam("string", "Comma-separated Linux path prefixes this worker may modify, or none. Required for parallel workers."),
                 "max_turns" to AgentToolParam("integer", "Omit to auto-size: simple ≈ 10, complex 40–60."),
+                "thinking_level" to AgentToolParam("string", "Default ULTRA; clamped to model ceiling.", enumValues = listOf("OFF", "LOW", "MEDIUM", "HIGH", "XHIGH", "MAX", "ULTRA")),
             ),
             required = emptyList(),
             propertyOrdering = listOf(
-                "tasks", "tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns",
+                "tasks", "tool_title", "prompt", "kind", "write_paths", "role", "skills", "model", "max_turns", "thinking_level",
             ),
         )
     }

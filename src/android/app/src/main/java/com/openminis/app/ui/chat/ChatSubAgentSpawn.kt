@@ -3,6 +3,7 @@ package com.openminis.app.ui.chat
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.WritePathGuard
+import com.openminis.app.data.model.ThinkingLevel
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -16,6 +17,9 @@ internal data class ChatSubAgentSpawn(
     val writePaths: List<String>,
     val maxTurns: Int,
     val tokenBudget: Long? = null,
+    // Null means no per-task override; dispatch resolves the selected model's
+    // effective maximum for this one task.
+    val thinkingLevel: ThinkingLevel? = null,
 )
 
 internal fun parseSubAgentSpawn(argsJson: String, defaultCap: Int): ChatSubAgentSpawn? {
@@ -82,5 +86,7 @@ private fun parseTaskObject(args: JSONObject, defaultCap: Int): ChatSubAgentSpaw
         writePaths = parseWritePathsArg(args),
         maxTurns = SubAgentKind.clampTurns(kind, requested, defaultCap, prompt),
         tokenBudget = budgetRaw?.takeIf { it > 0 },
+        thinkingLevel = args.optString("thinking_level", "").trim().takeIf { it.isNotEmpty() }
+            ?.let { raw -> runCatching { ThinkingLevel.valueOf(raw.uppercase()) }.getOrNull() },
     )
 }

@@ -147,6 +147,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             imageUris = prepared.imageUris,
             attachmentNames = prepared.attachmentNames,
             attachmentUris = prepared.nonImageUris,
+            sourceDbIds = listOf(userEntity.id),
         )
         val nextAssistantMsg = ChatMessage(
             id = newAssistantId,
@@ -157,6 +158,7 @@ internal suspend fun ChatViewModel.injectQueuedPromptsAsNewTurn(
             thinkingLevel = _thinkingLevel.value,
         )
         _messages.value = trimLoadedWindow(_messages.value + queuedUserMsg + nextAssistantMsg)
+        notePersistedUiRow(userEntity.id, userEntity.id)
         // Note: ChatScreen's `lastUserAppendMs` (the trailing-row
         // ScrollPin send-grace window) is updated reactively by
         // ChatScreen's `LaunchedEffect(messages.size)` user-send hook

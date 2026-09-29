@@ -1,6 +1,7 @@
 package com.openminis.app.ui.chat
 
 import android.util.Log
+import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMError
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.hasImageInput
@@ -8,6 +9,8 @@ import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
+import com.openminis.app.provider.effectiveMaxThinkingLevel
+import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.sandbox.ExecutionCoordinator
 import com.openminis.app.tools.AgentTools
 import com.openminis.app.tools.PlanDiscussionOrchestrator
@@ -30,6 +33,13 @@ import kotlin.random.Random
 
 /** Per-retry backoff (seconds). Index 0 = wait before attempt 2, etc. */
 private val SUBAGENT_BACKOFF_S = intArrayOf(2, 5)
+
+private fun parseThinkingLevel(raw: String?, max: ThinkingLevel): ThinkingLevel {
+    val requested = raw?.trim()?.takeIf { it.isNotEmpty() }
+        ?.let { runCatching { ThinkingLevel.valueOf(it.uppercase()) }.getOrNull() }
+        ?: max
+    return if (requested.rank <= max.rank) requested else max
+}
 
 private suspend fun publishSubAgentUi(trackerId: String, event: com.openminis.app.tools.SubAgentRunner.UiEvent) {
     val tracker = com.openminis.app.service.SubAgentActivityTracker
@@ -71,7 +81,12 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
         val mainName = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "main"
         val mainMax = (mainEntry?.model?.maxOutputTokens ?: currentModel?.maxOutputTokens ?: 4096).coerceIn(256, 8192)
         val mainMember = PlanDiscussionOrchestrator.Member(
-            mainName, "facilitator", provider, mainMax, mainEntry?.overrides?.temperature,
+            displayName = mainName,
+            stance = "facilitator",
+            provider = provider,
+            maxTokens = mainMax,
+            temperature = mainEntry?.overrides?.temperature,
+            thinkingLevel = mainEntry?.effectiveMaxThinkingLevel ?: ThinkingLevel.ULTRA,
         )
         val stances = listOf("architect", "skeptic", "implementer", "operator")
         val pool = MultiAgentSettings.retainLive(
@@ -90,6 +105,10 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
                     provider = p,
                     maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 8192),
                     temperature = entry.overrides.temperature,
+                    thinkingLevel = parseThinkingLevel(
+                        multiAgentSettings.slotThinkingLevel(i),
+                        entry.effectiveMaxThinkingLevel,
+                    ),
                 )
             }
         }
@@ -145,13 +164,20 @@ internal suspend fun ChatViewModel.runPlanDiscussion(provider: LLMProvider): Str
             }
             return ""
         }
-        val partsJson = "[{\"type\":\"text\",\"value\":" + escapeJson(result.markdown) + "}]"
-        val persisted = chatRepository.appendMessage(activeSessionId, "assistant", partsJson)
+        val persistedId = persistAssistantTurnForRun(
+            checkNotNull(com.openminis.app.service.ActiveRunContext.current()) {
+                "Plan discussion has no persistence owner"
+            },
+            listOf(AgentContentPart.Text(result.markdown)),
+            usage = null,
+            assistantText = result.markdown,
+            uiMessageId = assistantId,
+        ) ?: throw CancellationException("Plan discussion was stopped before persistence")
         withContext(Dispatchers.Main) {
             SessionActivityTracker.updateToolStatus("", null, false)
             _messages.value = _messages.value.map {
                 if (it.id == assistantId) it.copy(
-                    id = persisted.id,
+                    id = persistedId,
                     content = result.markdown,
                     isStreaming = false,
                     isAwaitingModelResponse = false,
@@ -298,47 +324,20 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
         if (spawns.size == 1) {
             val total = waveSize.coerceAtLeast(1)
             val index = if (total > 1) waveIndex + 1 else 1
-            return supervisorScope {
-                try {
-                    sem.withPermit {
-                        runOneSubAgent(
-                            spawn = spawns[0],
-                            toolId = toolId,
-                            toolBlocks = toolBlocks,
-                            assistantId = assistantId,
-                            currentText = currentText,
-                            parallelWriters = writerTotal,
-                            index = index,
-                            total = total,
-                            cardIndex = null,
-                            tokenBudget = sharedBudget,
-                        )
-                    }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (t: Throwable) {
-                    ToolExecutionResult(
-                        "Sub-agent failed: ${t.javaClass.simpleName}: ${t.message}",
-                        false,
-                    )
-                }
-            }
-        }
-        val results = supervisorScope {
-            spawns.mapIndexed { i, spawn ->
-                async {
+            return try {
+                supervisorScope {
                     try {
                         sem.withPermit {
                             runOneSubAgent(
-                                spawn = spawn,
+                                spawn = spawns[0],
                                 toolId = toolId,
                                 toolBlocks = toolBlocks,
                                 assistantId = assistantId,
                                 currentText = currentText,
                                 parallelWriters = writerTotal,
-                                index = i + 1,
-                                total = spawns.size,
-                                cardIndex = i + 1,
+                                index = index,
+                                total = total,
+                                cardIndex = null,
                                 tokenBudget = sharedBudget,
                             )
                         }
@@ -346,12 +345,47 @@ internal suspend fun ChatViewModel.executeRunSubAgent(
                         throw e
                     } catch (t: Throwable) {
                         ToolExecutionResult(
-                            "Sub-agent ${i + 1} failed: ${t.javaClass.simpleName}: ${t.message}",
+                            "Sub-agent failed: ${t.javaClass.simpleName}: ${t.message}",
                             false,
                         )
                     }
                 }
-            }.awaitAll()
+            } finally {
+                multiAgentSettings.clearSlotThinkingLevels()
+            }
+        }
+        val results = try {
+            supervisorScope {
+                spawns.mapIndexed { i, spawn ->
+                    async {
+                        try {
+                            sem.withPermit {
+                                runOneSubAgent(
+                                    spawn = spawn,
+                                    toolId = toolId,
+                                    toolBlocks = toolBlocks,
+                                    assistantId = assistantId,
+                                    currentText = currentText,
+                                    parallelWriters = writerTotal,
+                                    index = i + 1,
+                                    total = spawns.size,
+                                    cardIndex = i + 1,
+                                    tokenBudget = sharedBudget,
+                                )
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (t: Throwable) {
+                            ToolExecutionResult(
+                                "Sub-agent ${i + 1} failed: ${t.javaClass.simpleName}: ${t.message}",
+                                false,
+                            )
+                        }
+                    }
+                }.awaitAll()
+            }
+        } finally {
+            multiAgentSettings.clearSlotThinkingLevels()
         }
         val ok = results.count { it.success }
         val body = buildString {
@@ -418,21 +452,31 @@ private suspend fun ChatViewModel.runOneSubAgent(
             config.modelEntries.map { it.id }.toSet(),
             multiAgentSettings.maxConcurrent.value,
         )
-        // Resolve the initial entry once. Retries may swap to another pool entry
-        // (see the attempt loop below) so a rate-limited / truncated endpoint is
-        // skipped instead of hammered. The base pick honours the coordinator's
-        // explicit `model` request and the round-robin slot assignment.
-        val pickedId = MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
-        val baseEntry = when {
-            pickedId != null -> config.modelEntries.find {
-                it.id == pickedId ||
-                    it.model.id.equals(pickedId, ignoreCase = true) ||
-                    it.model.displayName.equals(pickedId, ignoreCase = true)
-            }
-            else -> _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
-        } ?: return ToolExecutionResult(
+        // Resolve exact IDs first, then fuzzy-match dirty provider/model labels
+        // only within the user's configured pool. Retries may rotate afterwards.
+        val selectedEntries = if (pool.isEmpty()) config.modelEntries else
+            pool.mapNotNull { id -> config.modelEntries.find { it.id == id } }
+        val requestedEntry = requested?.let { modelId ->
+            selectedEntries.firstOrNull { it.id.equals(modelId, ignoreCase = true) }
+                ?: com.openminis.app.provider.ModelAliasMatcher.resolveBest(
+                    modelId,
+                    selectedEntries,
+                    idOf = { it.model.id },
+                    nameOf = { it.model.displayName },
+                )
+        }
+        val pickedId = requestedEntry?.id
+            ?: MultiAgentSettings.pickModelId(pool, requested, subAgentRoundRobin.getAndIncrement())
+        val baseEntry = requestedEntry ?: pickedId?.let { id ->
+            config.modelEntries.find { it.id == id }
+        } ?: _activeEntryId.value?.let { id -> config.modelEntries.find { it.id == id } }
+            ?: return ToolExecutionResult(
             "No model available for sub-agent. Select models under Settings → Multi-agent, or keep the main session model selected.",
             false,
+        )
+        val requestedThinking = spawn.thinkingLevel ?: parseThinkingLevel(
+            multiAgentSettings.slotThinkingLevel((index - 1).coerceAtLeast(0)),
+            baseEntry.effectiveMaxThinkingLevel,
         )
         // [T-android-subagent-depth-leak] Claim the depth slot inside a
         // try/finally that covers EVERYTHING after the claim. The lane body has
@@ -450,6 +494,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
             ?: SubAgentLane.idFor(parentSession, System.nanoTime())
         val trackerId = com.openminis.app.service.SubAgentActivityTracker.start(
             parentSessionId = parentSession,
+            parentToolId = toolId,
             title = title,
             role = role,
             model = baseEntry.model.displayName,
@@ -458,7 +503,10 @@ private suspend fun ChatViewModel.runOneSubAgent(
             kind = kind,
             turnCap = maxTurns,
         )
+        val subAgentJob = kotlinx.coroutines.SupervisorJob(kotlin.coroutines.coroutineContext[kotlinx.coroutines.Job])
+        com.openminis.app.service.SubAgentActivityTracker.attachJob(trackerId, subAgentJob)
         return try {
+            withContext(subAgentJob) {
             // Bounded retry with pool-endpoint rotation. Sub-agent failures are
             // mostly transient upstream errors (429 / truncated stream); the main
             // session already retries those, sub-agents used to die on first blip.
@@ -489,7 +537,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                             (last as? LLMError)?.isFallbackable == true
                         if (noSameKey) {
                             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, last?.message)
-                            return ToolExecutionResult(
+                            return@withContext ToolExecutionResult(
                                 "Sub-agent failed after ${attempt - 1} attempt(s): ${last?.message ?: last?.javaClass?.simpleName}",
                                 false,
                             )
@@ -500,7 +548,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 val provider = providerForModelEntry(entry)
                 if (provider == null) {
                     if (attempt >= maxAttempts) {
-                        return ToolExecutionResult(
+                        return@withContext ToolExecutionResult(
                             "Failed to create provider for ${entry.model.displayName} (attempt $attempt/$maxAttempts)",
                             false,
                         )
@@ -592,6 +640,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     writePaths = writePaths,
                     maxTurns = maxTurns,
                     tokenBudget = tokenBudget,
+                    thinkingLevel = requestedThinking,
                 )
             }
             com.openminis.app.service.SubAgentActivityTracker.appendLog(
@@ -634,14 +683,14 @@ private suspend fun ChatViewModel.runOneSubAgent(
                     // Final failure: RETURN, do not throw — an exception escaping
                     // this lane would cancel its fan-out siblings via awaitAll.
                     com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, e.message)
-                    return ToolExecutionResult(
+                    return@withContext ToolExecutionResult(
                         "Sub-agent failed after $attempt attempt(s): ${e.message ?: e.javaClass.simpleName}",
                         false,
                     )
                 }
             }
             if (attemptResult != null) {
-                return if (attempt > 1) attemptResult.copy(
+                return@withContext if (attempt > 1) attemptResult.copy(
                     output = "(recovered on attempt $attempt/$maxAttempts via ${entry.model.displayName})\n" + attemptResult.output,
                 ) else attemptResult
             }
@@ -661,8 +710,11 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 status = ToolBlockStatus.FAILED,
             )
             failed
+            }
         } catch (e: CancellationException) {
+            val stoppedByUser = com.openminis.app.service.SubAgentActivityTracker.wasUserStopped(trackerId)
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, e.message)
+            if (stoppedByUser) return ToolExecutionResult("Sub-agent stopped by user", false)
             throw e
         } catch (t: Throwable) {
             com.openminis.app.service.SubAgentActivityTracker.finish(trackerId, false, t.message)
@@ -684,6 +736,7 @@ private suspend fun ChatViewModel.runOneSubAgent(
         } finally {
             withContext(NonCancellable) {
                 runCatching { ExecutionCoordinator.sessionDidTerminate(laneId) }
+                subAgentJob.cancel()
             }
         }
         } finally {

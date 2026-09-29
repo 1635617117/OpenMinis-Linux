@@ -266,10 +266,9 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
             _errorText.value = "Set a passphrase to encrypt this backup."
             return
         }
-        if (_includeCredentials.value && !encrypting) {
-            _errorText.value = "Encrypt the backup before including credentials."
-            return
-        }
+        // Encryption is a user choice. Credentials are still opt-in and the
+        // unencrypted export warning is shown by the backup screen/exporter;
+        // do not turn that warning into a forced encryption policy.
         _isRunning.value = true
         _lastResult.value = null
         _statusText.value = "Starting…"

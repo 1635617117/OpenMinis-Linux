@@ -282,6 +282,9 @@ class PersistentShell(
         val p = processBuilder.start()
         process = p
         SandboxWorkload.track(p, "shell:$sessionId")
+        com.openminis.app.service.ActiveRunRegistry.registerProcess(sessionId, p)
+        val activeRun = com.openminis.app.service.ActiveRunContext.current()
+        activeRun?.registerProcess(p) { stop() }
         stdinWriter = BufferedWriter(OutputStreamWriter(p.outputStream, StandardCharsets.UTF_8))
 
         // Start background reader thread
@@ -674,6 +677,8 @@ class PersistentShell(
         try { stdinWriter?.close() } catch (_: Exception) {}
         if (process === p) stdinWriter = null
         SandboxWorkload.release(p, kill = true, reason = "shell-stop:$sessionId")
+        if (p != null) com.openminis.app.service.ActiveRunRegistry.unregisterProcess(sessionId, p)
+        if (p != null) com.openminis.app.service.ActiveRunContext.current()?.unregisterProcess(p)
         p?.destroyForcibly()
         runCatching { p?.waitFor(500, java.util.concurrent.TimeUnit.MILLISECONDS) }
         if (process === p) process = null

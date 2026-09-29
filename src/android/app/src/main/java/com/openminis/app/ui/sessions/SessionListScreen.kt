@@ -774,19 +774,18 @@ fun SessionListScreen(
                 },
                 actions = {
                         IconButton(onClick = onScheduledTasksClick) {
-                            Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) {
+                            androidx.compose.material3.BadgedBox(
+                                badge = {
+                                    if (scheduledTaskCount > 0) {
+                                        Badge { Text("$scheduledTaskCount") }
+                                    }
+                                },
+                            ) {
                                 Icon(
                                     Icons.Outlined.Schedule,
                                     contentDescription = stringResource(R.string.sessionlist_scheduled_tasks),
                                     modifier = Modifier.size(24.dp),
                                 )
-                                if (scheduledTaskCount > 0) {
-                                    Badge(
-                                        modifier = Modifier
-                                            .align(Alignment.TopEnd)
-                                            .offset(x = 0.dp, y = 2.dp),
-                                    ) { Text("$scheduledTaskCount") }
-                                }
                             }
                         }
                 },

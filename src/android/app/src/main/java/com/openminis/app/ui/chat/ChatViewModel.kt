@@ -107,6 +107,7 @@ import kotlinx.coroutines.sync.Semaphore
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.yield
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -678,6 +679,7 @@ class ChatViewModel(
         // can be filtered with `adb logcat -s Minis.ChatVMStream:D`.
         // Removed once the retry-state regression is rooted out.
         internal const val TAG_STREAM = "ChatVMStream"
+        internal const val STOP_CLEANUP_JOIN_TIMEOUT_MS = 5_000L
         /**
          * Hard ceiling on agent loop iterations within a single user turn.
          * Backstop against runaway tool-call cycles that slip past
@@ -689,6 +691,7 @@ class ChatViewModel(
          * Mirrors iOS AIChatViewModel.maxAgentTurns.
          */
         internal const val MAX_AGENT_TURNS = 200
+        internal const val MAX_GOAL_CONTINUATIONS = 16
         private const val MIN_MAX_TOKENS = 1024
         /**
          * Hard ceiling on max_tokens we ever send to a provider, regardless
@@ -808,6 +811,7 @@ class ChatViewModel(
     // session and its parsed LLM representation in memory.
     internal var loadedMessageOffset = 0
     internal var loadedMessageTotal = 0
+    internal var unrepresentedLoadedRows = 0
     internal var loadingOlderMessages = false
 
     /**
@@ -898,10 +902,34 @@ class ChatViewModel(
      */
     private val _hasOlderMessages = MutableStateFlow(false)
     val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages.asStateFlow()
+    private val _hasNewerMessages = MutableStateFlow(false)
+    val hasNewerMessages: StateFlow<Boolean> = _hasNewerMessages.asStateFlow()
+
+    internal fun loadedPersistedRowCount(messages: List<ChatMessage> = _messages.value): Int =
+        messages.sumOf { it.sourceDbIds.size } + unrepresentedLoadedRows
 
     internal fun refreshHasOlderMessages() {
         val loadedVisible = _messages.value.count { !it.isInternalBridge }
+        val loadedRows = loadedPersistedRowCount()
         _hasOlderMessages.value = loadedMessageOffset > 0 || loadedVisible > _visibleMessageCap.value
+        _hasNewerMessages.value = loadedMessageOffset + loadedRows < loadedMessageTotal
+    }
+
+    internal fun notePersistedUiRow(uiMessageId: String?, dbMessageId: String) {
+        if (uiMessageId != null) {
+            var attached = false
+            _messages.value = _messages.value.map { message ->
+                if (message.id == uiMessageId && dbMessageId !in message.sourceDbIds) {
+                    attached = true
+                    message.copy(sourceDbIds = message.sourceDbIds + dbMessageId)
+                } else message
+            }
+            if (!attached) unrepresentedLoadedRows++
+        } else {
+            unrepresentedLoadedRows++
+        }
+        loadedMessageTotal++
+        refreshHasOlderMessages()
     }
 
     /**
@@ -932,31 +960,71 @@ class ChatViewModel(
         viewModelScope.launch {
             try {
                 val page = withContext(Dispatchers.IO) {
-                    val rows = ArrayList<com.openminis.app.data.db.MessageEntity>(
-                        loadedMessageOffset - newOffset,
+                    chatRepository.loadMessagesBefore(
+                        sessionId = sessionId,
+                        endExclusive = loadedMessageOffset,
+                        limit = loadedMessageOffset - newOffset,
+                        totalMessages = loadedMessageTotal,
                     )
-                    var offset = newOffset
-                    while (offset < loadedMessageOffset) {
-                        val chunk = chatRepository.dao.loadMessagesPage(
-                            sessionId,
-                            offset,
-                            minOf(50, loadedMessageOffset - offset),
-                        )
-                        if (chunk.isEmpty()) break
-                        rows.addAll(chunk)
-                        offset += chunk.size
-                    }
-                    rows
                 }
-                if (page.isNotEmpty()) {
-                    val older = withContext(Dispatchers.IO) { page.toChatMessages() }
+                if (page.messages.isNotEmpty()) {
+                    val older = withContext(Dispatchers.IO) { page.messages.toChatMessages() }
                     val combined = older + _messages.value
+                    // Keep the old side around the viewport. The omitted newer
+                    // side remains reachable through the pinned newer control.
                     val retained = combined.take(MAX_LOADED_MESSAGE_WINDOW)
                     _messages.value = retained
-                    loadedMessageOffset = newOffset
+                    loadedMessageOffset = page.firstMessageOffset
+                    loadedMessageTotal = page.totalMessages
                     _visibleMessageCap.value = minOf(
                         plan.nextVisibleCap,
                         retained.count { !it.isInternalBridge },
+                    )
+                }
+                refreshHasOlderMessages()
+            } finally {
+                loadingOlderMessages = false
+            }
+        }
+    }
+
+    /** Move the bounded message window toward newer persisted rows. */
+    fun loadNewerMessages() {
+        if (loadingOlderMessages) return
+        loadingOlderMessages = true
+        viewModelScope.launch {
+            try {
+                val loadedRows = loadedPersistedRowCount()
+                val start = loadedMessageOffset + loadedRows
+                val total = withContext(Dispatchers.IO) {
+                    chatRepository.dao.messageCountForSession(sessionId)
+                }
+                loadedMessageTotal = total
+                if (start >= total) {
+                    refreshHasOlderMessages()
+                    return@launch
+                }
+                val page = withContext(Dispatchers.IO) {
+                    chatRepository.loadMessagesAfter(
+                        sessionId = sessionId,
+                        startInclusive = start,
+                        limit = VISIBLE_MESSAGE_CAP_STEP,
+                        totalMessages = total,
+                    )
+                }
+                if (page.messages.isNotEmpty()) {
+                    val newer = withContext(Dispatchers.IO) { page.messages.toChatMessages() }
+                    val combined = _messages.value + newer
+                    val dropCount = (combined.size - MAX_LOADED_MESSAGE_WINDOW).coerceAtLeast(0)
+                    val droppedRows = combined.take(dropCount).sumOf { it.sourceDbIds.size }
+                    val retained = combined.takeLast(MAX_LOADED_MESSAGE_WINDOW)
+                    _messages.value = retained
+                    loadedMessageOffset += droppedRows
+                    loadedMessageTotal = page.totalMessages
+                    val retainedVisible = retained.count { !it.isInternalBridge }
+                    _visibleMessageCap.value = minOf(
+                        retainedVisible,
+                        _visibleMessageCap.value + newer.count { !it.isInternalBridge },
                     )
                 }
                 refreshHasOlderMessages()
@@ -1500,6 +1568,14 @@ class ChatViewModel(
     // streaming, hiding the Stop button while the new turn was live).
     @Volatile
     internal var streamJob: Job? = null
+
+    /** A stop request is tied to the exact job, not to a later resumed turn. */
+    @Volatile
+    internal var stoppedStreamJob: Job? = null
+
+    @Volatile
+    internal var stoppedRun: com.openminis.app.service.ActiveRun? = null
+
     internal var currentProvider: LLMProvider? = null
     internal var currentModel: LLMModel? = null
 
@@ -2337,6 +2413,7 @@ class ChatViewModel(
             title = "Thinking",
             subtitle = "",
         ),
+        SlashCommand(id = "goal", icon = Icons.Outlined.Build, title = "Goal", subtitle = ""),
     )
 
     // [T-android-split-chat] filteredSlashCommands / updateSlashMenuState /
@@ -2436,7 +2513,12 @@ class ChatViewModel(
         if (trimmed.isEmpty()) return false
         val first = trimmed[0]
         if (first != '/' && first != '／') return false
-        val name = trimmed.drop(1).lowercase()
+        val body = trimmed.drop(1)
+        if (body.equals("goal", ignoreCase = true) || body.startsWith("goal ", ignoreCase = true)) {
+            viewModelScope.launch { executeGoalCommand(body.removeRange(0, 4).trim()) }
+            return true
+        }
+        val name = body.lowercase()
         val cmd = availableSlashCommands.firstOrNull { it.title.lowercase() == name }
         if (cmd != null) {
             executeSlashCommand(cmd)
@@ -4387,7 +4469,7 @@ class ChatViewModel(
 
     internal fun effectiveContent(id: String): String? = streamSession.effectiveContent(id)
 
-    private fun flushStreamingDelta(id: String) = streamSession.flushStreamingDelta(id)
+    internal fun flushStreamingDelta(id: String) = streamSession.flushStreamingDelta(id)
 
     internal fun flushAllStreamingDeltas() = streamSession.flushAllStreamingDeltas()
 
@@ -4479,6 +4561,43 @@ class ChatViewModel(
         append("]")
     }
 
+    internal suspend fun persistAssistantTurnForRun(
+        run: com.openminis.app.service.ActiveRun,
+        parts: List<AgentContentPart>,
+        usage: LLMUsage?,
+        reasoningContent: String? = null,
+        toolBlockMeta: Map<String, AssistantBlock> = emptyMap(),
+        assistantText: String? = null,
+        uiMessageId: String? = run.assistantMessageId,
+    ): String? = run.withPersistencePermit {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            persistAssistantTurn(parts, usage, reasoningContent, toolBlockMeta).also { id ->
+                if (id != null) {
+                    withContext(Dispatchers.Main.immediate) { notePersistedUiRow(uiMessageId, id) }
+                    if (assistantText != null) run.markAssistantTurnPersisted(assistantText)
+                }
+            }
+        }
+    }
+
+    internal suspend fun persistToolResultMessageForRun(
+        run: com.openminis.app.service.ActiveRun,
+        parts: List<AgentContentPart>,
+        targetSessionId: String = realSessionId.ifEmpty { sessionId },
+        uiMessageId: String? = run.assistantMessageId,
+    ): String? = run.withPersistencePermit {
+        kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+            val resultIds = parts.filterIsInstance<AgentContentPart.ToolResult>().mapTo(mutableSetOf()) { it.id }
+            persistToolResultMessage(parts, targetSessionId).also { dbId ->
+                if (dbId != null) withContext(Dispatchers.Main.immediate) { notePersistedUiRow(uiMessageId, dbId) }
+                val currentToolId = run.currentToolSnapshot()?.callId
+                if (dbId != null && currentToolId != null && currentToolId in resultIds) {
+                    run.setCurrentTool(null, null)
+                }
+            }
+        }
+    }
+
     internal suspend fun persistAssistantTurn(
         parts: List<AgentContentPart>,
         usage: LLMUsage?,
@@ -4502,7 +4621,10 @@ class ChatViewModel(
 
 
     /** Persist tool results as a user-role message (mirrors iOS behavior). */
-    internal suspend fun persistToolResultMessage(parts: List<AgentContentPart>): String? {
+    internal suspend fun persistToolResultMessage(
+        parts: List<AgentContentPart>,
+        targetSessionId: String = realSessionId.ifEmpty { sessionId },
+    ): String? {
         val results = parts.filterIsInstance<AgentContentPart.ToolResult>()
         if (results.isEmpty()) return null
         val partsJson = buildString {
@@ -4514,7 +4636,7 @@ class ChatViewModel(
             }
             append("]")
         }
-        val entity = chatRepository.appendMessage(realSessionId.ifEmpty { sessionId }, "user", partsJson)
+        val entity = chatRepository.appendMessage(targetSessionId, "user", partsJson)
         return entity.id
     }
 
@@ -4627,53 +4749,58 @@ class ChatViewModel(
     }
 
     override fun cancelStream() {
-        AppLogger.info(TAG_STREAM, "cancelStream invoked _isStreaming=false (sid=$activeSessionId)")
+        val job = streamJob
+        if (job == null || stoppedStreamJob === job) return
+        // A coroutine may already be completing while its provider stream is
+        // still producing callbacks. `isActive` is not a reliable stop guard:
+        // cancellation can be observed before the provider unwinds. Use the
+        // identity fence above and let ActiveRun.stop() make the operation
+        // idempotent while cleanup persists the interrupted turn.
+        val stoppedSessionId = activeSessionId
+        val draftSessionId = sessionId
+        val persistedSessionId = realSessionId
+        val capturedSessionIds = listOf(stoppedSessionId, draftSessionId, persistedSessionId)
+            .filter(String::isNotBlank).distinct()
+        val capturedRun = com.openminis.app.service.ActiveRunRegistry.current(job)
+        val capturedAssistantId = capturedRun?.assistantMessageId
+        val capturedModelSnapshot = currentModelSnapshot()
+        val interruptedLabel = context.getString(R.string.chat_response_interrupted)
+        val stopCleanupScope = (context.applicationContext as com.openminis.app.MinisApp).appCoroutineScopes.io
+        AppLogger.info(TAG_STREAM, "cancelStream invoked (sid=$stoppedSessionId)")
         dismissPendingUserQuestions("cancelled")
-        streamJob?.cancel()
-        _isStreaming.value = false
-        // T-streaming-side-channel: flush any in-flight delta back into the
-        // canonical message so the rest of cancelStream's cleanup (publish
-        // overlay excerpt, persist, retry-eligible state) sees the real
-        // content rather than a stale pre-stream snapshot.
-        flushAllStreamingDeltas()
-        // T171: drop activity tracker immediately, don't wait for the
-        // streamJob's finally block. When OkHttp is wedged in a blocking
-        // execute() call.cancel() may unwind eventually but the finally
-        // doesn't run until then — meanwhile RPC chat.session.status would
-        // still report isRunning=true and the user thinks the stop button
-        // did nothing.
-        // [T-android-overlay-reply-status-34599] User-initiated cancel:
-        // surface any reply we already streamed + tag outcome as
-        // Cancelled so the overlay's glyph reflects the actual end
-        // state (⊘) instead of carrying over the prior tool's outcome.
-        publishOverlayReplyExcerpt(activeSessionId)
-        SessionActivityTracker.clearToolRunning(com.openminis.app.service.ToolOutcome.Cancelled)
-        SessionActivityTracker.setInactive(activeSessionId)
-        if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
-            SessionActivityTracker.setInactive(sessionId)
-        }
-        // Stop whichever shell the agent loop is actually dispatching against.
-        // Before `ensureSession()` that is the draft id; after, the real id.
-        // Stopping the wrong one leaves a runaway yt-dlp/ffmpeg alive.
-        ExecutionCoordinator.stopCurrentCommand(activeSessionId)
-        com.openminis.app.service.SubAgentActivityTracker.clearSession(activeSessionId)
-        if (sessionId != activeSessionId) {
-            com.openminis.app.service.SubAgentActivityTracker.clearSession(sessionId)
-        }
-        if (isDraft && realSessionId.isNotEmpty() && activeSessionId != sessionId) {
-            // Mid-turn rename: sweep any lingering draft shell too.
-            ExecutionCoordinator.stopCurrentCommand(sessionId)
-        }
-        handleUserCancelledCleanup()
+        stoppedRun = capturedRun
 
-        // T189: iOS parity (AIChatViewModel.swift L2592-2610). If the user
-        // enqueued prompts during the cancelled stream, auto-resume the drain
-        // instead of leaving them stuck as dashed bubbles waiting for a manual
-        // long-press retry.
-        val pending = _promptQueue.value
-        if (pending.isNotEmpty()) {
-            AppLogger.info(TAG_STREAM, "cancel — ${pending.size} queued prompt(s) remain, restarting drain")
-            resumeQueueAfterCancel()
+        // Stop owned tool/guest/host resources before asking the coroutine to
+        // unwind. The session shell is per conversation; no process belonging to
+        // another chat or the user's interactive terminal is touched.
+        capturedRun?.let(com.openminis.app.service.ActiveRunRegistry::stopExact)
+            ?: capturedSessionIds.forEach { com.openminis.app.service.ActiveRunRegistry.stop(it) }
+        job.cancel(CancellationException("Stopped by user"))
+        _isStreaming.value = false
+        capturedSessionIds.forEach { sid -> ExecutionCoordinator.stopCurrentCommand(sid) }
+        if (activeSessionId == stoppedSessionId) {
+            SessionActivityTracker.clearToolRunning(com.openminis.app.service.ToolOutcome.Cancelled)
+        }
+        SessionActivityTracker.setInactive(stoppedSessionId)
+        if (isDraft && persistedSessionId.isNotEmpty() && stoppedSessionId != draftSessionId) {
+            SessionActivityTracker.setInactive(draftSessionId)
+        }
+
+        // Wait for tool callbacks/finally blocks before committing the last
+        // stream delta. Otherwise a late successful tool result could overwrite
+        // CANCELLED, or the text snapshot could miss its final chunk.
+        stopCleanupScope.launch {
+            withTimeoutOrNull(STOP_CLEANUP_JOIN_TIMEOUT_MS) { job.join() }
+            withContext(NonCancellable + kotlinx.coroutines.Dispatchers.Main.immediate) {
+                finishStoppedRun(
+                    run = capturedRun,
+                    stoppedSessionId = stoppedSessionId,
+                    capturedSessionIds = capturedSessionIds,
+                    capturedAssistantId = capturedAssistantId,
+                    capturedModelSnapshot = capturedModelSnapshot,
+                    interruptedLabel = interruptedLabel,
+                )
+            }
         }
     }
 
@@ -5073,7 +5200,12 @@ class ChatViewModel(
                 // Coalesce a blank value to null: the UI gate is `error?.let`, so
                 // a non-null "" would render an empty banner. Defends against any
                 // legacy/other-writer "" row.
-                error = entity.errorInfo?.takeIf { it.isNotBlank() },
+                error = entity.errorInfo?.let { status ->
+                    when (status) {
+                        com.openminis.app.data.db.PersistedMessageStatus.INTERRUPTED_INFO -> context.getString(R.string.chat_response_interrupted)
+                        else -> status
+                    }
+                }?.takeIf { it.isNotBlank() },
             )
         }.let { messages ->
             // Merge consecutive assistant messages into one:
@@ -5206,9 +5338,11 @@ class ChatViewModel(
         val droppedCount = messages.size - MAX_LOADED_MESSAGE_WINDOW
         // Only persisted rows advance the database offset. System info bubbles
         // are UI-only, so counting them would skip real rows on the next page.
-        val droppedRows = messages.take(droppedCount)
-            .sumOf { msg -> msg.sourceDbIds?.size?.coerceAtLeast(1) ?: 1 }
-        loadedMessageOffset = (loadedMessageOffset - droppedRows).coerceAtLeast(0)
+        val droppedRows = messages.take(droppedCount).sumOf { it.sourceDbIds.size }
+        // Removing the oldest loaded rows advances the database start offset.
+        // Subtracting here re-fetches duplicates and can make the older window
+        // drift away from the rows actually present in `_messages`.
+        loadedMessageOffset += droppedRows
         return messages.takeLast(MAX_LOADED_MESSAGE_WINDOW)
     }
 

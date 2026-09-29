@@ -8,6 +8,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import com.openminis.app.service.ActiveRunContext
+import kotlinx.coroutines.currentCoroutineContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
@@ -161,11 +163,14 @@ object ShellExecutor {
         // its finally before the catch, so clearing currentProcess there made
         // destroyForcibly a no-op and left the timed-out proot alive.
         var started: Process? = null
+        var activeRun: com.openminis.app.service.ActiveRun? = null
         try {
             val process = processBuilder.start()
             started = process
             currentProcess = process
             SandboxWorkload.track(process, "oneshot")
+            activeRun = ActiveRunContext.current()
+            activeRun?.registerProcess(process)
             SandboxWorkload.armDeadline(process, timeout)
             withTimeout(timeout) {
                     // Read raw chars to preserve \r for TerminalSanitizer CR-folding.
@@ -212,7 +217,11 @@ object ShellExecutor {
             output.appendLine("\n[Command timed out after ${timeout / 1000}s; guest process group killed]")
             exitCode = 124 // Standard timeout exit code
         } catch (e: kotlinx.coroutines.CancellationException) {
-            SandboxWorkload.release(started, kill = true, reason = "oneshot-cancel")
+            if (started != null && activeRun?.hasProcess(started) == true) {
+                // ActiveRun.stop() already killed the exact owned process tree.
+            } else {
+                SandboxWorkload.release(started, kill = true, reason = "oneshot-cancel")
+            }
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "Command failed: $command", e)
@@ -221,6 +230,7 @@ object ShellExecutor {
             exitCode = -1
         } finally {
             if (currentProcess === started) currentProcess = null
+            if (started != null) activeRun?.unregisterProcess(started)
             SandboxWorkload.release(started, kill = false, reason = "oneshot-done")
         }
 

@@ -15,6 +15,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * @param skipContextCheck set by the pre-send context dialog's own actions,
@@ -23,7 +24,11 @@ import kotlinx.coroutines.launch
  *   chunk) token count and pop the dialog again — iOS guards the identical
  *   re-entry with `skipCompactCheck`.
  */
-internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) {
+internal fun ChatViewModel.sendMessage(
+    text: String,
+    skipContextCheck: Boolean,
+    internalGoalRun: Boolean = false,
+) {
     // [T-android-paste-mediaref] `[Pasted#N]` markers are NOT expanded here
     // any more.
     //
@@ -49,7 +54,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
     // T180: allow attachments-only sends (no caption). Mirrors iOS, where
     // an empty text + non-empty attachments still produces a valid user
     // message. Without this an image-only "look at this" send dropped.
-    if (trimmed.isBlank() && _attachments.value.isEmpty()) return
+    if (!internalGoalRun && trimmed.isBlank() && _attachments.value.isEmpty()) return
     if (_isCompacting.value) {
         appendSystemInfo(
             text = "Wait for the current compact to finish before sending.",
@@ -61,7 +66,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
     // send: either compact silently (auto-compact on) or ask first. The
     // whole point is that the request which tripped the threshold must not
     // be the one that goes out over-length.
-    if (!skipContextCheck) {
+    if (!skipContextCheck && !internalGoalRun) {
         when (checkContextBeforeSend()) {
             ChatViewModel.PreSendContextAction.PROCEED -> {}
             ChatViewModel.PreSendContextAction.COMPACT_THEN_SEND -> {
@@ -91,7 +96,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
     // "image attachment shows up as Move to" symptom in T185. Mirrors
     // iOS AIChatView.swift:2255 (`hasInjectedShareContent = false`
     // inside the send button's tap closure).
-    if (_hasInjectedShareContent.value) _hasInjectedShareContent.value = false
+    if (!internalGoalRun && _hasInjectedShareContent.value) _hasInjectedShareContent.value = false
 
     val initialProvider = currentProvider
     if (initialProvider == null) {
@@ -102,7 +107,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
 
     _error.value = null
 
-    val currentAttachments = _attachments.value
+    val currentAttachments = if (internalGoalRun) emptyList() else _attachments.value
     val groupIdForCaps = _selectedGroupId.value
     if (!groupIdForCaps.isNullOrBlank()) {
         val neededCaps = CapabilityRouter.neededForTask(
@@ -117,7 +122,11 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
         )
         currentProvider?.let { provider = it }
     }
-    clearAttachments()
+    if (internalGoalRun && provider.model.isPureVideoGenerator) {
+        appendSystemInfo("Goal execution needs a text-capable model. Select one and resume the Goal.", "info")
+        return
+    }
+    if (!internalGoalRun) clearAttachments()
 
     // T145: claim _isStreaming synchronously so a rapid second tap can't
     // slip past the entry guard during DB/OAuth setup. See retryFromMessage.
@@ -144,7 +153,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
     // edited text as a fresh user turn. Snapshot + clear the id here so
     // any error in the truncate path doesn't leave the composer stuck
     // in edit mode.
-    val editingId = _editingMessageId.value
+    val editingId = if (internalGoalRun) null else _editingMessageId.value
     if (editingId != null) _editingMessageId.value = null
 
     viewModelScope.launch {
@@ -178,31 +187,25 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
             prepared.attachedFilesXml,
             bodyPartsJson = pasted?.partsJson,
         )
-        val persistedUser = chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
+        val persistedUser = if (internalGoalRun) null else
+            chatRepository.appendMessage(activeSessionId, "user", userPartsJson)
 
-        val userMsg = ChatMessage(
-            id = persistedUser.id,
-            role = "user",
-            // The bubble shows the SHORT body with markers removed; the
-            // pasted blocks appear beside it as file cards (below).
-            // Strip the consumed markers from the visible caption — the
-            // file cards now stand for them. Only ids that actually
-            // resolved are removed, so a literal the user typed for an
-            // unknown id survives as text, matching how it is persisted.
-            content = pasted?.let { p ->
-                p.consumedIds.fold(trimmed) { acc, id ->
-                    acc.replace(PastedText.placeholderFor(id), "")
-                }.trim()
-            } ?: trimmed,
-            imageUris = prepared.imageUris,
-            // Pasted blocks render exactly like attached documents: append
-            // them to the non-image suffix, preserving the
-            // images-first/files-after ordering that
-            // ChatMessage.attachmentNames depends on.
-            attachmentNames = prepared.attachmentNames + (pasted?.uiNames ?: emptyList()),
-            attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
-        )
-        _messages.value = trimLoadedWindow(_messages.value + userMsg)
+        if (persistedUser != null) {
+            val userMsg = ChatMessage(
+                id = persistedUser.id,
+                role = "user",
+                content = pasted?.let { p ->
+                    p.consumedIds.fold(trimmed) { acc, id -> acc.replace(PastedText.placeholderFor(id), "") }
+                        .trim()
+                } ?: trimmed,
+                imageUris = prepared.imageUris,
+                attachmentNames = prepared.attachmentNames + (pasted?.uiNames ?: emptyList()),
+                attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
+                sourceDbIds = listOf(persistedUser.id),
+            )
+            _messages.value = trimLoadedWindow(_messages.value + userMsg)
+            notePersistedUiRow(persistedUser.id, persistedUser.id)
+        }
         val imageParts = prepared.imageParts
 
         // T132: build the user contentParts in iOS order — caption first
@@ -232,15 +235,17 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
         }
         prepared.attachedFilesXml?.let { userContentParts.add(AgentContentPart.Text(it)) }
 
-        appendBoundedHistory(LLMMessage(
-            role = LLMMessage.Role.USER,
-            content = modelBody,
-            imageParts = imageParts,
-            contentParts = userContentParts,
-            dbMessageId = persistedUser.id,
-        ))
-        // [T-context-ring] Refresh after user appends.
-        refreshContextUsage()
+        if (persistedUser != null) {
+            appendBoundedHistory(LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = modelBody,
+                imageParts = imageParts,
+                contentParts = userContentParts,
+                dbMessageId = persistedUser.id,
+            ))
+            // [T-context-ring] Refresh after user appends.
+            refreshContextUsage()
+        }
 
         // Refresh OAuth token if needed before sending (mirrors iOS validAccessToken)
         if ((provider as? com.openminis.app.provider.anthropic.AnthropicProvider)?.isOAuth == true) {
@@ -280,8 +285,14 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
 
         // Start agent loop with fallback. _isStreaming was set synchronously at top.
         streamLaunched = true
-        streamJob = launch(Dispatchers.IO) {
-            AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob ENTER sid=$activeSessionId")
+        val runSessionId = activeSessionId
+        streamJob = launchActiveRun(
+            runSessionId,
+            Dispatchers.IO,
+            ownerSessionIds = setOf(runSessionId, activeSessionId, sessionId),
+            beforeStart = { streamJob = it },
+        ) { run ->
+            AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob ENTER sid=$runSessionId")
             try {
                 // [T-STALL-DIAG] Snapshot BEFORE the (possibly blocking)
                 // acquire. If the log shows this line and then no "slot
@@ -297,6 +308,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
                 AppLogger.debug(ChatViewModel.TAG_STREAM, "send streamJob slot acquired")
                 SessionActivityTracker.setActive(activeSessionId, onStop = { cancelStream() })
 
+
                 // Resolve the active group's fallback strategy
                 val activeFallbackStrategy = run {
                     val groupId = _selectedGroupId.value
@@ -306,6 +318,25 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
 
                 // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
                 val fallbackProviders = buildFallbackProviders(provider)
+                val sendUserText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
+                val shouldDiscuss = !internalGoalRun && !provider.model.isPureVideoGenerator &&
+                    com.openminis.app.data.PlanDiscussionTrigger.shouldRun(
+                        com.openminis.app.data.PlanDiscussionPrefs.mode(), sendUserText,
+                    )
+                val hasActiveGoal = shouldDiscuss && withContext(Dispatchers.IO) {
+                    runCatching { com.openminis.app.goal.GoalManager(chatRepository).get(activeSessionId) }
+                        .fold(
+                            onSuccess = { it?.status == com.openminis.app.data.db.GoalStatus.ACTIVE },
+                            onFailure = { true },
+                        )
+                }
+                val planMarkdown = if (shouldDiscuss && !hasActiveGoal) runPlanDiscussion(provider) else null
+                val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
+                    systemPrompt +
+                        "\n\n## Agreed plan from Plan Discussion\n" +
+                        "A role graph already finished: brief, design, parallel critique, at most one revise, then a secretary contract. The full board is the preceding assistant card. Follow the execution contract below. Do not start another discussion or spawn discussants. Unresolved objections are constraints.\n\n" +
+                        planMarkdown
+                } else systemPrompt
 
                 try {
                     if (provider.model.isPureVideoGenerator) {
@@ -316,15 +347,18 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
-                            systemPrompt = systemPrompt,
+                            systemPrompt = promptForLoop,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
+                            goalExecutionRun = internalGoalRun,
                         )
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.
                         // Skipped on cancel: cancelled job won't reach here.
-                        drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
-                        AppLogger.info(ChatViewModel.TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        if (!run.isStopped) {
+                            drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                            AppLogger.info(ChatViewModel.TAG_STREAM, "send drainQueuedPrompts RETURN")
+                        }
                     }
                 } catch (e: CancellationException) {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop CANCELLED")
@@ -332,9 +366,11 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
                 } catch (e: Exception) {
                     AppLogger.error(ChatViewModel.TAG_STREAM, "send runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(ChatViewModel.TAG, "Agent loop error (all fallbacks exhausted)", e)
-                    setInlineError(e.message ?: "Unknown error")
-                    // T298: completion notifier should show the ❌ variant.
-                    SessionActivityTracker.markStreamError(activeSessionId)
+                    if (!run.isStopped) {
+                        setInlineError(e.message ?: "Unknown error")
+                        // T298: completion notifier should show the ❌ variant.
+                        SessionActivityTracker.markStreamError(activeSessionId)
+                    }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob FINALLY enter")
                     // [T-android-overlay-reply-status-34599] Surface
@@ -350,7 +386,7 @@ internal fun ChatViewModel.sendMessage(text: String, skipContextCheck: Boolean) 
                     AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob FINALLY exit")
                 }
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
-                setInlineError(e.message ?: "会话排队超时，名额已释放")
+                if (!run.isStopped) setInlineError(e.message ?: "会话排队超时，名额已释放")
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send streamJob CANCELLED waiting for slot")
                 Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")

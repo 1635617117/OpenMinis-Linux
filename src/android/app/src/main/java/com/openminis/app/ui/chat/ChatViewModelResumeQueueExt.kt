@@ -88,7 +88,7 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
         _canResume.value = false
         _error.value = null
 
-        streamJob = launch(Dispatchers.IO) {
+        streamJob = launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob ENTER sid=$activeSessionId")
             try {
                 SessionConcurrencyManager.acquireSlot(activeSessionId)
@@ -116,7 +116,9 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
                 } catch (e: Exception) {
                     AppLogger.error(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel drain EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                     Log.e(ChatViewModel.TAG, "Queued drain error (resumeQueueAfterCancel)", e)
-                    setInlineError(e.message ?: "Unknown error")
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        setInlineError(e.message ?: "Unknown error")
+                    }
                 } finally {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY enter")
                     // [T-android-overlay-reply-status-34599] Surface
@@ -132,7 +134,9 @@ internal fun ChatViewModel.resumeQueueAfterCancel() {
                     AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob FINALLY exit")
                 }
             } catch (e: com.openminis.app.service.SlotQueueTimeout) {
-                setInlineError(e.message ?: "会话排队超时，名额已释放")
+                if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                    setInlineError(e.message ?: "会话排队超时，名额已释放")
+                }
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "resumeQueueAfterCancel streamJob CANCELLED waiting for slot")
             }

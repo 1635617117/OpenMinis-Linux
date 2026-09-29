@@ -231,6 +231,9 @@
     <string name="plugin_market_empty">No remote plugins. Check network and retry.</string>
     <string name="plugin_market_api_key">API key</string>
     <string name="plugin_market_install">Install</string>
+    <string name="plugin_market_allow_private">Allow private network targets</string>
+    <string name="plugin_market_allow_private_desc">Only for this installed connector; cloud metadata hosts remain blocked.</string>
+    <string name="plugin_market_config_trust_note">Connector credentials and private-network access are bound to its endpoint and API definition; changed configurations must be reviewed and reinstalled.</string>
     <string name="settings_collab_roles_section">Catalog roles</string>
     <string name="settings_collab_roles_footer">Pass these names as spawn_agent role to inject focus, do-not, when-silent, and who-to-ask routing. Tap a custom role to edit or delete; new roles with the same name shadow built-ins.</string>
     <string name="mcp_title">MCP Integrations</string>
@@ -517,6 +520,7 @@
     <string name="token_usage_section_context">Context</string>
     <string name="token_usage_context_used">Context Used</string>
     <string name="token_usage_context_window">Context Window</string>
+    <string name="token_usage_context_percent">Context Used</string>
     <string name="token_usage_max_output">Max Output</string>
     <string name="token_usage_section_thinking">Thinking</string>
     <string name="token_usage_thinking_label">Thinking</string>
@@ -720,6 +724,7 @@
     <string name="browser_minis_browsing">Minis Ultra is browsing</string>
     <!-- Streaming indicator shown while the assistant is composing a reply. %1$s is the Soul-customized assistant name (default "Minis Ultra"). -->
     <string name="chat_typing_indicator">%1$s is typing</string>
+    <string name="chat_response_interrupted">Interrupted</string>
     <string name="read_aloud_unavailable">Read aloud failed: no usable voice engine. Check Voice Output settings or install a system speech engine.</string>
     <string name="chat_error_stream_dropped_partial">The connection dropped — this reply may be incomplete. Tap Retry to continue.</string>
     <!-- Composer placeholder. %1$s is the Soul-customized assistant name (default "Minis Ultra"). The parenthetical is an inline hint reminding the user that typing '@' opens the file-mention picker. T-android-placeholder-single-line collapses the prior two-row (title + hint) layout into a single line, matching iOS 19e1d61f. -->
@@ -998,6 +1003,9 @@
     <string name="perm_allow_minis_config">Allow minis-config</string>
     <string name="perm_minis_config_desc">When disabled, the Agent cannot read or modify any settings via minis-config. The change history at Logs → Config Changes remains accessible. The Agent will receive a permission_denied error and can guide you via deep links instead.</string>
     <string name="perm_section_privacy">Privacy</string>
+    <string name="perm_privacy_global_title">Privacy access</string>
+    <string name="perm_privacy_global_desc">Applies to calendar, location, clipboard, contacts, other chats, and photos. Per-tool deny remains in force.</string>
+    <string name="perm_privacy_global_level">Default for privacy tools</string>
     <string name="perm_section_media">Media</string>
     <string name="perm_section_system">System</string>
     <string name="perm_tool_calendar">Calendar</string>
@@ -2151,6 +2159,7 @@
     <string name="debug_trigger_crash_menu">Trigger crash (Debug)</string>
     <!-- [T-android-larky-longsession-followup] Tappable header at the top of the chat list, shown only when more older messages exist behind the windowed slice. -->
     <string name="chat_load_older_messages">↑ Load older messages</string>
+    <string name="chat_load_newer_messages">↓ Load newer messages</string>
     <!-- [T-error-persist-android] Shown when the model returns an empty reply (no text, no tools). -->
     <string name="error_empty_response_generic">Model returned an empty response. Please try again or switch models.</string>
     <string name="error_empty_response_context_large">The model returned an empty response. The conversation context may be too large — try compacting or starting a new session.</string>

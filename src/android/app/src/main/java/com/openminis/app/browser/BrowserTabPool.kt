@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -230,6 +231,7 @@ class BrowserTabPool(private val context: Context) {
     private var customUserAgentString: String? = null
 
     private var sessionId: String? = null
+    private val activeRunJobs = ConcurrentHashMap<Int, Job>()
     private val savedURLs = mutableMapOf<Int, String>()
 
     /**
@@ -715,7 +717,19 @@ class BrowserTabPool(private val context: Context) {
                     tab.manager.loadBlankPage()
                 }
             }
-            val result = tab.manager.execute(input)
+            val run = com.openminis.app.service.ActiveRunRegistry.current(sessionId.orEmpty())
+            val actionJob = currentCoroutineContext()[Job]
+            val stopAction: (() -> Unit)? = if (run != null && actionJob != null) {
+                activeRunJobs[tab.id] = actionJob
+                { activeRunJobs.remove(tab.id, actionJob); tab.manager.stopActiveAction() }
+            } else null
+            val unregisterStop = if (stopAction != null) run!!.registerStopAction(stopAction) else null
+            val result = try {
+                tab.manager.execute(input)
+            } finally {
+                unregisterStop?.invoke()
+                if (actionJob != null) activeRunJobs.remove(tab.id, actionJob)
+            }
             // [T-android-js-dialogs-256] If this tab's page tried to open an
             // alert/confirm/prompt, the agent browser answered it with a default
             // rather than showing a modal (which would hang an unattended loop).
@@ -1147,6 +1161,13 @@ class BrowserTabPool(private val context: Context) {
     }
 
     // -- Release --
+
+    fun stopActiveRun() {
+        val activeIds = activeRunJobs.keys.toSet()
+        activeRunJobs.values.toSet().forEach { it.cancel() }
+        _tabs.value.filter { it.id in activeIds }.forEach { it.manager.stopActiveAction() }
+        activeRunJobs.clear()
+    }
 
     fun releaseAllTabs() {
         _tabs.value.forEach {

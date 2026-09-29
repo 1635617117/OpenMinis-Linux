@@ -18,6 +18,7 @@ object WebFetchTool {
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
+            .dns(FetchUrlGuard.publicInternetDns())
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .followRedirects(true)

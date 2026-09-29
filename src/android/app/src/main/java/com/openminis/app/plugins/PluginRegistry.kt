@@ -2,9 +2,11 @@ package com.openminis.app.plugins
 
 import android.content.Context
 import com.openminis.app.tools.FetchUrlGuard
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
-import java.net.HttpURLConnection
-import java.net.URL
+import java.net.URI
+import java.util.concurrent.TimeUnit
 
 /**
  * Remote OpenAPI-lite plugin catalog.
@@ -120,18 +122,42 @@ object PluginRegistry {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         try {
             FetchUrlGuard.blockedReason(REGISTRY_URL)?.let { throw IllegalArgumentException(it) }
-            val conn = (URL(REGISTRY_URL).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 10_000
-                readTimeout = 10_000
-                instanceFollowRedirects = true
-                requestMethod = "GET"
-                setRequestProperty("Accept", "application/json")
+            var currentUrl = REGISTRY_URL
+            val origin = URI(REGISTRY_URL)
+            var redirects = 0
+            val client = OkHttpClient.Builder()
+                .dns(FetchUrlGuard.publicInternetDns())
+                .connectTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(10, TimeUnit.SECONDS)
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .build()
+            var text: String? = null
+            while (text == null) {
+                FetchUrlGuard.blockedReason(currentUrl)?.let { throw IllegalArgumentException(it) }
+                val response = client.newCall(
+                    Request.Builder().url(currentUrl).header("Accept", "application/json").build(),
+                ).execute()
+                text = response.use {
+                    if (it.code in 300..399) {
+                        val location = it.header("Location") ?: throw IllegalStateException("redirect missing Location")
+                        if (redirects++ >= 2) throw IllegalStateException("too many registry redirects")
+                        val next = URI(currentUrl).resolve(location)
+                        if (!next.scheme.equals(origin.scheme, true) || !next.host.equals(origin.host, true) ||
+                            effectivePort(next) != effectivePort(origin)
+                        ) throw IllegalArgumentException("cross-origin registry redirect blocked")
+                        currentUrl = next.toString()
+                        null
+                    } else {
+                        if (!it.isSuccessful) throw IllegalStateException("registry HTTP ${it.code}")
+                        it.body?.string() ?: throw IllegalStateException("empty registry response")
+                    }
+                }
             }
-            val text = conn.inputStream.bufferedReader().use { it.readText() }
-            conn.disconnect()
-            val plugins = parse(text)
+            val catalogText = checkNotNull(text)
+            val plugins = parse(catalogText)
             if (plugins.isEmpty()) throw IllegalStateException("empty registry")
-            prefs.edit().putString(CACHE_KEY, text).apply()
+            prefs.edit().putString(CACHE_KEY, catalogText).apply()
             return plugins to true
         } catch (_: Exception) {
             val cached = prefs.getString(CACHE_KEY, null)
@@ -140,6 +166,13 @@ object PluginRegistry {
             }
             return emptyList<RemotePlugin>() to false
         }
+    }
+
+    private fun effectivePort(uri: URI): Int = when {
+        uri.port >= 0 -> uri.port
+        uri.scheme.equals("https", true) -> 443
+        uri.scheme.equals("http", true) -> 80
+        else -> -1
     }
 
     fun cached(context: Context): List<RemotePlugin> {

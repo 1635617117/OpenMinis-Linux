@@ -4,9 +4,12 @@ import android.database.sqlite.SQLiteBlobTooBigException
 import com.openminis.app.data.body.BodyStore
 import com.openminis.app.data.body.ResourceLimits
 import com.openminis.app.data.db.ChatDao
+import com.openminis.app.data.db.GoalDao
+import com.openminis.app.data.db.SessionGoalEntity
 import com.openminis.app.data.db.ChatSessionEntity
 import com.openminis.app.data.db.FolderEntity
 import com.openminis.app.data.db.MessageEntity
+import com.openminis.app.data.db.PersistedMessageStatus
 import com.openminis.app.data.model.ModelAttributionSnapshot
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.sandbox.ExecutionCoordinator
@@ -20,6 +23,7 @@ import java.util.UUID
 
 class ChatRepository(
     internal val dao: ChatDao,
+    internal val goalDao: GoalDao,
     private val filesDir: File? = null,
 ) {
 
@@ -68,6 +72,7 @@ class ChatRepository(
     data class SessionTail(
         val messages: List<com.openminis.app.data.db.MessageEntity>,
         val totalMessages: Int,
+        val firstMessageOffset: Int,
     )
 
     suspend fun loadSessionTail(
@@ -76,38 +81,103 @@ class ChatRepository(
         pageSize: Int = 50,
     ): SessionTail {
         val total = dao.messageCountForSession(sessionId)
-        if (total <= 0) return SessionTail(emptyList(), 0)
+        if (total <= 0) return SessionTail(emptyList(), 0, 0)
+        return loadMessagesBefore(sessionId, total, limit, pageSize, totalMessages = total)
+    }
+
+    suspend fun loadMessagesBefore(
+        sessionId: String,
+        endExclusive: Int,
+        limit: Int,
+        pageSize: Int = 50,
+        totalMessages: Int,
+    ): SessionTail = loadBoundedMessageRange(
+        sessionId = sessionId,
+        startInclusive = (endExclusive - limit).coerceAtLeast(0),
+        endExclusive = endExclusive.coerceIn(0, totalMessages),
+        pageSize = pageSize,
+        totalMessages = totalMessages,
+        fromNewest = true,
+    )
+
+    suspend fun loadMessagesAfter(
+        sessionId: String,
+        startInclusive: Int,
+        limit: Int,
+        pageSize: Int = 50,
+        totalMessages: Int,
+    ): SessionTail = loadBoundedMessageRange(
+        sessionId = sessionId,
+        startInclusive = startInclusive.coerceIn(0, totalMessages),
+        endExclusive = (startInclusive + limit).coerceAtMost(totalMessages),
+        pageSize = pageSize,
+        totalMessages = totalMessages,
+        fromNewest = false,
+    )
+
+    private suspend fun loadBoundedMessageRange(
+        sessionId: String,
+        startInclusive: Int,
+        endExclusive: Int,
+        pageSize: Int,
+        totalMessages: Int,
+        fromNewest: Boolean,
+    ): SessionTail {
+        if (startInclusive >= endExclusive) return SessionTail(emptyList(), totalMessages, startInclusive)
         if (!com.openminis.app.data.body.Admission.tryAdmit(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())) {
-            return SessionTail(emptyList(), total)
+            return SessionTail(emptyList(), totalMessages, if (fromNewest) endExclusive else startInclusive)
         }
         try {
-            val want = minOf(limit, total)
-            val oldestWantedSort = total - want
-            val out = ArrayList<com.openminis.app.data.db.MessageEntity>(want.coerceAtMost(256))
-            var pageStart = oldestWantedSort
-            var remaining = want
+            val rows = ArrayList<com.openminis.app.data.db.MessageEntity>()
             var previewBytes = 0L
-            while (remaining > 0 && previewBytes < ResourceLimits.SESSION_PREVIEW_BUDGET) {
-                val page = dao.loadMessagesPage(sessionId, pageStart, minOf(pageSize, remaining))
+            var stoppedAtBudget = false
+            if (fromNewest) {
+                var cursor = endExclusive
+                while (cursor > startInclusive && rows.size < endExclusive - startInclusive) {
+                    val pageStart = maxOf(startInclusive, cursor - pageSize)
+                    val expected = cursor - pageStart
+                    val page = dao.loadMessagesPage(sessionId, pageStart, expected)
+                    if (page.isEmpty()) break
+                    for (index in page.indices.reversed()) {
+                        val row = page[index]
+                        val rowBytes = row.partsJson.length.toLong() * 2L
+                        if (!com.openminis.app.data.body.PreviewBudget.canTake(
+                                previewBytes, rowBytes, ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+                            )
+                        ) {
+                            stoppedAtBudget = true
+                            break
+                        }
+                        rows.add(row)
+                        previewBytes += rowBytes
+                    }
+                    cursor = pageStart
+                    if (stoppedAtBudget || page.size < expected) break
+                }
+                val chronological = rows.asReversed()
+                return SessionTail(chronological, totalMessages, endExclusive - rows.size)
+            }
+
+            var cursor = startInclusive
+            while (cursor < endExclusive) {
+                val page = dao.loadMessagesPage(sessionId, cursor, minOf(pageSize, endExclusive - cursor))
                 if (page.isEmpty()) break
                 for (row in page) {
-                    val rowBytes = (row.preview?.length ?: row.partsJson.length).toLong()
+                    val rowBytes = row.partsJson.length.toLong() * 2L
                     if (!com.openminis.app.data.body.PreviewBudget.canTake(
-                            previewBytes,
-                            rowBytes,
-                            ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+                            previewBytes, rowBytes, ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
                         )
                     ) {
-                        return SessionTail(out, total)
+                        stoppedAtBudget = true
+                        break
                     }
-                    out.add(row)
+                    rows.add(row)
                     previewBytes += rowBytes
                 }
-                pageStart += page.size
-                remaining -= page.size
-                if (page.size < minOf(pageSize, remaining + page.size)) break
+                cursor += page.size
+                if (stoppedAtBudget) break
             }
-            return SessionTail(out, total)
+            return SessionTail(rows, totalMessages, startInclusive)
         } finally {
             com.openminis.app.data.body.Admission.release(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())
         }
@@ -224,6 +294,7 @@ class ChatRepository(
 
     suspend fun deleteSession(id: String) {
         dao.deleteMessages(id)
+        goalDao.delete(id)
         dao.deleteSession(id)
         val dir = filesDir
         if (dir != null) {
@@ -601,6 +672,25 @@ class ChatRepository(
     suspend fun updateLastAssistantError(sessionId: String, errorInfo: String?) =
         dao.updateLastAssistantError(sessionId, errorInfo)
 
+    suspend fun lastAssistantMessageId(sessionId: String): String? =
+        dao.lastAssistantMessageId(sessionId)
+
+    suspend fun goal(sessionId: String): SessionGoalEntity? = goalDao.get(sessionId)
+
+    suspend fun createGoal(goal: SessionGoalEntity) = goalDao.insert(goal)
+    suspend fun saveGoal(goal: SessionGoalEntity) = goalDao.saveState(
+        sessionId = goal.sessionId,
+        objective = goal.objective,
+        status = goal.status,
+        tokenBudget = goal.tokenBudget,
+        tokensUsed = goal.tokensUsed,
+        elapsedMs = goal.elapsedMs,
+        blockedCondition = goal.blockedCondition,
+        blockedCount = goal.blockedCount,
+        pausedAt = goal.pausedAt,
+        updatedAt = goal.updatedAt,
+    )
+
     /**
      * [T-token-attribution-snapshot] `modelSnapshot` records which model
      * ACTUALLY produced this message.
@@ -620,6 +710,7 @@ class ChatRepository(
         tokenUsage: String? = null,
         reasoningContent: String? = null,
         modelSnapshot: ModelAttributionSnapshot? = null,
+        errorInfo: String? = null,
     ): MessageEntity {
         val sortOrder = dao.nextSortOrder(sessionId)
         val now = System.currentTimeMillis()
@@ -635,6 +726,7 @@ class ChatRepository(
             sessionId = sessionId,
             role = role,
             partsJson = stored.inline,
+            errorInfo = errorInfo,
             bodyBytes = stored.bodyBytes,
             bodyRef = stored.ref,
             bodySha = stored.sha,

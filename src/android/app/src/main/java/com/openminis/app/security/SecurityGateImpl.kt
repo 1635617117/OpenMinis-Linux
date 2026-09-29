@@ -81,7 +81,7 @@ class SecurityGateImpl : SecurityGate {
         val SHELL_TOOLS = setOf("shell_exec", "shell_execute", "su_exec", "env_exec")
         val COORDINATOR_TOOLS = setOf(
             "spawn_agent", "run_subagent", "dispatch_agents", "wolfpack_run",
-            "agent_plan", "cronjob", "ask_user_question", "invoke_skill",
+            "agent_plan", "goal", "update_goal", "cronjob", "ask_user_question", "invoke_skill",
             "skill_manage", "memory_write", "memory_get", "save_memory",
             "recall_memory", "ask_reasoning",
         )

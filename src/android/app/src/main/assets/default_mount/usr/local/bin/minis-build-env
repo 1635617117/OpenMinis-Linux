@@ -1,0 +1,35 @@
+#!/bin/sh
+# Install a bounded, named guest build profile. No arbitrary package arguments.
+set -eu
+export DEBIAN_FRONTEND=noninteractive
+export TMPDIR=/tmp TMP=/tmp TEMP=/tmp
+
+profile=${1:-}
+action=${2:-plan}
+case "$profile" in
+  native) packages="build-essential pkg-config cmake ninja-build git" ;;
+  python) packages="python3 python3-pip python3-venv python3-dev" ;;
+  go) packages="golang-go" ;;
+  rust) packages="rustc cargo" ;;
+  java) packages="openjdk-17-jdk-headless gradle" ;;
+  android) packages="Android SDK (installed by minis-android-sdk-setup)" ;;
+  *) echo "usage: minis-build-env <native|python|go|rust|java|android> [plan|install]" >&2; exit 2 ;;
+esac
+
+if [ "$action" = "plan" ]; then
+  echo "profile=$profile"
+  echo "packages=$packages"
+  echo "run: minis-build-env $profile install"
+  exit 0
+fi
+[ "$action" = "install" ] || { echo "action must be plan or install" >&2; exit 2; }
+if [ "$profile" = "android" ]; then
+  exec /usr/local/bin/minis-android-sdk-setup
+fi
+command -v apt-get >/dev/null 2>&1 || { echo "apt-get not found" >&2; exit 1; }
+[ -f /usr/local/lib/minis/apt-lock.sh ] || { echo "shared apt lock helper is missing" >&2; exit 1; }
+. /usr/local/lib/minis/apt-lock.sh
+minis_acquire_apt_lock 1800 || { echo "apt is busy" >&2; exit 1; }
+trap minis_release_apt_lock EXIT
+apt-get update
+apt-get install -y --no-install-recommends $packages

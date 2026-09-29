@@ -63,7 +63,7 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
 
     // _isStreaming was already set synchronously by the caller.
     val launchedProvider = provider
-    streamJob = viewModelScope.launch(Dispatchers.IO) {
+    streamJob = viewModelScope.launchActiveRun(activeSessionId, Dispatchers.IO, ownerSessionIds = setOf(activeSessionId, sessionId, realSessionId), beforeStart = { streamJob = it }) {
         AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob ENTER sid=$activeSessionId")
         try {
             SessionConcurrencyManager.acquireSlot(activeSessionId)
@@ -103,11 +103,13 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
             } catch (e: Exception) {
                 AppLogger.error(ChatViewModel.TAG_STREAM, "$label runAgentLoop EXCEPTION ${e.javaClass.simpleName}: ${e.message}")
                 Log.e(ChatViewModel.TAG, "Agent loop error ($label)", e)
-                setInlineError(e.message ?: "Unknown error")
-                // T298: flag the upcoming setInactive() so the
-                // background completion notifier renders the ❌
-                // variant instead of a clean success.
-                SessionActivityTracker.markStreamError(activeSessionId)
+                if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                    setInlineError(e.message ?: "Unknown error")
+                    // T298: flag the upcoming setInactive() so the
+                    // background completion notifier renders the ❌
+                    // variant instead of a clean success.
+                    SessionActivityTracker.markStreamError(activeSessionId)
+                }
             } finally {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY enter")
                 // [T-android-overlay-reply-status-34599] Surface
@@ -123,7 +125,9 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob FINALLY exit")
             }
         } catch (e: com.openminis.app.service.SlotQueueTimeout) {
-            setInlineError(e.message ?: "会话排队超时，名额已释放")
+            if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                setInlineError(e.message ?: "会话排队超时，名额已释放")
+            }
         } catch (e: CancellationException) {
             AppLogger.info(ChatViewModel.TAG_STREAM, "$label streamJob CANCELLED waiting for slot")
             Log.d(ChatViewModel.TAG, "Cancelled while waiting for concurrency slot")
