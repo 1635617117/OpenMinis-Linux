@@ -222,6 +222,12 @@ internal fun currentSubAgentLine(spawn: ChatSubAgentSpawn, index: Int, total: In
  * gets `$toolId#sub-$index`. A single spawn keeps the parent card and must
  * not publish every live sibling's transcript into it.
  */
+internal fun ChatViewModel.subAgentChipsEnabled(): Boolean =
+    context.getSharedPreferences(
+        com.openminis.app.ui.settings.PREF_APPEARANCE,
+        android.content.Context.MODE_PRIVATE,
+    ).getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)
+
 internal suspend fun ChatViewModel.publishSubAgentCard(
     parentToolId: String,
     cardIndex: Int?,
@@ -232,6 +238,8 @@ internal suspend fun ChatViewModel.publishSubAgentCard(
     log: String,
     status: ToolBlockStatus = ToolBlockStatus.RUNNING,
 ) {
+    // Chip mode owns the sub-agent UI. Do not also inject transcript cards.
+    if (subAgentChipsEnabled()) return
     if (parentToolId.isEmpty() || assistantId.isEmpty() || toolBlocks == null) return
     val cardId = if (cardIndex != null) subAgentCardId(parentToolId, cardIndex) else parentToolId
     synchronized(toolBlocks) {

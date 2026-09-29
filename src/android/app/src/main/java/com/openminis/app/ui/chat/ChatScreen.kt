@@ -424,50 +424,6 @@ private fun slashPickerHeight(
 /** Rows visible in the picker band before it starts scrolling. */
 private const val SLASH_PICKER_VISIBLE_ROWS = 4
 
-private enum class HistoryBoundaryDirection { OLDER, NEWER }
-
-/**
- * Shared boundary control for both sides of the bounded history window.
- * Keeping direction as data prevents the older/newer entries from drifting
- * into separate button implementations again.
- */
-@Composable
-private fun HistoryBoundaryButton(
-    direction: HistoryBoundaryDirection,
-    modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-) {
-    val older = direction == HistoryBoundaryDirection.OLDER
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(18.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        tonalElevation = 4.dp,
-        onClick = onClick,
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Icon(
-                imageVector = if (older) Icons.Default.ArrowUpward else Icons.Default.KeyboardArrowDown,
-                contentDescription = null,
-                modifier = Modifier.size(16.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                text = stringResource(
-                    if (older) R.string.chat_load_older_messages
-                    else R.string.chat_load_newer_messages,
-                ),
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.labelMedium,
-            )
-        }
-    }
-}
-
 // [T-android-tool-autoscroll] Combined signal for the streaming auto-follow
 // LaunchedEffect. data class so distinctUntilChanged uses structural equality
 // — any field flip propagates a tick. Per-block (id, kind, status, length)
@@ -563,8 +519,6 @@ fun ChatScreen(
     // Callers needing the full history (compact / fork / regenerate / send)
     // continue to read viewModel.messages directly inside the VM.
     val messages by viewModel.uiMessages.collectAsState()
-    val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
-    val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
@@ -3224,24 +3178,6 @@ fun ChatScreen(
         Column(
             modifier = Modifier.fillMaxSize(),
         ) {
-            val subAgentMembers by com.openminis.app.service.SubAgentActivityTracker.members.collectAsState()
-            val activeSubAgentToolIds = remember(messages, subAgentMembers, sessionId, showSubAgentBar) {
-                if (!showSubAgentBar) emptySet()
-                else buildSet {
-                    subAgentMembers.filter { it.parentSessionId == sessionId }.forEach { member ->
-                        member.parentToolId.takeIf(String::isNotBlank)?.let(::add)
-                        member.detailToolId.takeIf(String::isNotBlank)?.let(::add)
-                    }
-                    // Keep completed spawn cards suppressed as well. The live
-                    // tracker removes members on finish, but the parent message
-                    // remains in history and must stay represented by the chip.
-                    messages.filter { it.role == "assistant" }.forEach { message ->
-                        message.toolBlocks.filter { block ->
-                            block.kind == "tool_use" && block.toolName in setOf("spawn_agent", "run_subagent")
-                        }.forEach { add(it.id) }
-                    }
-                }
-            }
             if (showSubAgentBar) {
                 SubAgentLiveBar(
                     sessionId = sessionId,
@@ -3472,7 +3408,7 @@ fun ChatScreen(
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
                 var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
-                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds, activeSubAgentToolIds) {
+                LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds, showSubAgentBar) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
                     // `messages` is CONSTANT within this effect (the effect is
@@ -3566,7 +3502,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
-                                        suppressToolIds = activeSubAgentToolIds,
+                                        hideSubAgentCards = showSubAgentBar,
                                     )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
@@ -3653,7 +3589,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
-                                        suppressToolIds = activeSubAgentToolIds,
+                                        hideSubAgentCards = showSubAgentBar,
                                     )
                                 }
                             }
@@ -4473,20 +4409,6 @@ fun ChatScreen(
                     }
                 }
                 } // AlwaysStretchOverscrollBox
-                if (hasOlderMessages) {
-                    HistoryBoundaryButton(
-                        direction = HistoryBoundaryDirection.OLDER,
-                        modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
-                        onClick = viewModel::loadOlderMessages,
-                    )
-                }
-                if (hasNewerMessages) {
-                    HistoryBoundaryButton(
-                        direction = HistoryBoundaryDirection.NEWER,
-                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
-                        onClick = viewModel::loadNewerMessages,
-                    )
-                }
                 // SelectionDragTracker bridges gesture-published dragIntent
                 // with listState scroll observation — that's what keeps the
                 // selection extending across newly-scrolled-in shards when
@@ -4583,14 +4505,12 @@ fun ChatScreen(
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 var detailToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
-                LaunchedEffect(messages, foldAiProcess, activeSubAgentToolIds) {
+                LaunchedEffect(messages, foldAiProcess, showSubAgentBar) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
                     ) { msgs, stream ->
                         val merged = if (stream.isEmpty()) msgs else mergeStreamingOverlay(msgs, stream)
-                        // Keep live spawn cards in the unified detail index even while
-                        // their inline rows are suppressed; chips can open this one sheet.
                         val all = assistantToolUseBlocks(merged)
                         // The floating strip belongs to the latest assistant
                         // reply, not to every tool in the session. Keep the
@@ -4598,6 +4518,7 @@ fun ChatScreen(
                         val latestReply = merged.lastOrNull { it.role == "assistant" }
                         val overlay = latestReply?.toolBlocks.orEmpty()
                             .filter { isFloatingProcessTool(it, foldAiProcess) }
+                            .filterNot { showSubAgentBar && isSubAgentTranscriptCard(it) }
                         all to overlay
                     }.collect { (all, overlay) ->
                         detailToolBlocks = all

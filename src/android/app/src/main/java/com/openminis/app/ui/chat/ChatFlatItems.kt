@@ -296,7 +296,7 @@ internal fun buildFlatChatItems(
     showCompletedToolCards: Boolean = true,
     foldAiProcess: Boolean = false,
     expandedProcessIds: Set<String> = emptySet(),
-    suppressToolIds: Set<String> = emptySet(),
+    hideSubAgentCards: Boolean = false,
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
@@ -342,13 +342,11 @@ internal fun buildFlatChatItems(
         }
     }
     for (idx in fromIndex until messages.size) {
-        val message = messages[idx].let { message ->
-            if (suppressToolIds.isEmpty() || message.toolBlocks.none { block ->
-                    suppressToolIds.any { id -> block.id == id || block.id.startsWith("$id#sub-") }
-                }) message
-            else message.copy(toolBlocks = message.toolBlocks.filterNot { block ->
-                suppressToolIds.any { id -> block.id == id || block.id.startsWith("$id#sub-") }
-            })
+        val rawMessage = messages[idx]
+        val message = if (!hideSubAgentCards || rawMessage.toolBlocks.none(::isSubAgentTranscriptCard)) {
+            rawMessage
+        } else {
+            rawMessage.copy(toolBlocks = rawMessage.toolBlocks.filterNot(::isSubAgentTranscriptCard))
         }
         // [T-android-perf-logging] Per-100-message progress breadcrumb.
         // `out.size` is the running row count, so a sudden jump between two
@@ -655,6 +653,14 @@ internal fun shouldShowToolUseRow(block: AssistantBlock, showCompletedToolCards:
         else -> true
     }
 }
+
+private val SUB_AGENT_TRANSCRIPT_TOOLS = setOf("spawn_agent", "run_subagent", "dispatch_agents")
+
+/** Chat cards that duplicate the sub-agent chip. Hidden while chip mode is on. */
+internal fun isSubAgentTranscriptCard(block: AssistantBlock): Boolean =
+    block.kind == "tool_use" && (
+        block.toolName in SUB_AGENT_TRANSCRIPT_TOOLS || "#sub-" in block.id
+    )
 
 internal fun isAlwaysVisibleProcessTool(block: AssistantBlock): Boolean =
     block.kind == "tool_use" && block.toolName == "ask_user_question"
