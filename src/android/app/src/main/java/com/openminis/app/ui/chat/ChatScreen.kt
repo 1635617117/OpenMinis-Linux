@@ -424,6 +424,50 @@ private fun slashPickerHeight(
 /** Rows visible in the picker band before it starts scrolling. */
 private const val SLASH_PICKER_VISIBLE_ROWS = 4
 
+private enum class HistoryBoundaryDirection { OLDER, NEWER }
+
+/**
+ * Shared boundary control for both sides of the bounded history window.
+ * Keeping direction as data prevents the older/newer entries from drifting
+ * into separate button implementations again.
+ */
+@Composable
+private fun HistoryBoundaryButton(
+    direction: HistoryBoundaryDirection,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    val older = direction == HistoryBoundaryDirection.OLDER
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(18.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        tonalElevation = 4.dp,
+        onClick = onClick,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Icon(
+                imageVector = if (older) Icons.Default.ArrowUpward else Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                text = stringResource(
+                    if (older) R.string.chat_load_older_messages
+                    else R.string.chat_load_newer_messages,
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.labelMedium,
+            )
+        }
+    }
+}
+
 // [T-android-tool-autoscroll] Combined signal for the streaming auto-follow
 // LaunchedEffect. data class so distinctUntilChanged uses structural equality
 // — any field flip propagates a tick. Per-block (id, kind, status, length)
@@ -4442,36 +4486,18 @@ fun ChatScreen(
                 }
                 } // AlwaysStretchOverscrollBox
                 if (hasOlderMessages) {
-                    Surface(
+                    HistoryBoundaryButton(
+                        direction = HistoryBoundaryDirection.OLDER,
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = 4.dp,
-                        onClick = { viewModel.loadOlderMessages() },
-                    ) {
-                        Text(
-                            text = stringResource(R.string.chat_load_older_messages),
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
+                        onClick = viewModel::loadOlderMessages,
+                    )
                 }
                 if (hasNewerMessages) {
-                    Surface(
+                    HistoryBoundaryButton(
+                        direction = HistoryBoundaryDirection.NEWER,
                         modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp),
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        tonalElevation = 4.dp,
-                        onClick = { viewModel.loadNewerMessages() },
-                    ) {
-                        Text(
-                            text = stringResource(R.string.chat_load_newer_messages),
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            style = MaterialTheme.typography.labelMedium,
-                        )
-                    }
+                        onClick = viewModel::loadNewerMessages,
+                    )
                 }
                 // SelectionDragTracker bridges gesture-published dragIntent
                 // with listState scroll observation — that's what keeps the
