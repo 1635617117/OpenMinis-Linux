@@ -94,7 +94,7 @@ import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
 
 @Composable
-internal fun AssistantHeader() {
+internal fun AssistantHeader(speakerName: String? = null) {
     // [T-soul-md] Identity header = icon + SOUL.md-driven `name`.
     //
     // [T-android-soul-custom-icon] The icon is now the user-settable
@@ -106,8 +106,9 @@ internal fun AssistantHeader() {
     // two surfaces were written separately and the chat one silently failed
     // to pick up image icons; sharing the renderer makes that class of
     // divergence impossible rather than merely unlikely.
+    val namedSpeaker = speakerName?.takeIf { it.isNotBlank() }
     val soulMeta by com.openminis.app.agent.SoulStore.cachedMetadata.collectAsState()
-    val displayName = soulMeta.name.ifBlank { com.openminis.app.agent.SoulMetadata.DEFAULT.name }
+    val displayName = namedSpeaker ?: soulMeta.name.ifBlank { com.openminis.app.agent.SoulMetadata.DEFAULT.name }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
@@ -123,12 +124,29 @@ internal fun AssistantHeader() {
         // 18.dp, matching the previous Icon exactly: the row height feeds a
         // measured-height estimate in the message list, so the icon stays
         // square and same-sized whichever branch renders.
+        if (namedSpeaker != null) {
+            val avatarColor = groupSpeakerColor(namedSpeaker)
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .background(avatarColor, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = namedSpeaker.take(1),
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        } else {
         com.openminis.app.ui.settings.SoulIconGlyph(
             icon = soulMeta.icon,
             sizeDp = 18.dp,
             emojiSp = 15.sp,
             sparkleTint = sparkleGradient,
         )
+        }
         Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = displayName,
@@ -138,6 +156,18 @@ internal fun AssistantHeader() {
         )
     }
 }
+
+private val groupSpeakerPalette = listOf(
+    Color(0xFF5B8DEF),
+    Color(0xFF3FA36A),
+    Color(0xFFD4654A),
+    Color(0xFF8A6AD6),
+    Color(0xFFC48A2A),
+    Color(0xFF3A9CA8),
+)
+
+private fun groupSpeakerColor(name: String): Color =
+    groupSpeakerPalette[name.hashCode().ushr(1) % groupSpeakerPalette.size]
 
 @Composable
 internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? = null) {

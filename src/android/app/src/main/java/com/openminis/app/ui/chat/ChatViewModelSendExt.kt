@@ -318,28 +318,20 @@ internal fun ChatViewModel.sendMessage(
 
                 // Build full fallback provider list upfront (mirrors iOS triedEntries approach)
                 val fallbackProviders = buildFallbackProviders(provider)
-                val sendUserText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
-                val shouldDiscuss = !internalGoalRun && !provider.model.isPureVideoGenerator &&
-                    com.openminis.app.data.PlanDiscussionTrigger.shouldRun(
-                        com.openminis.app.data.PlanDiscussionPrefs.mode(), sendUserText,
-                    )
-                val hasActiveGoal = shouldDiscuss && withContext(Dispatchers.IO) {
-                    runCatching { com.openminis.app.goal.GoalManager(chatRepository).get(activeSessionId) }
-                        .fold(
-                            onSuccess = { it?.status == com.openminis.app.data.db.GoalStatus.ACTIVE },
-                            onFailure = { true },
-                        )
-                }
-                val planMarkdown = if (shouldDiscuss && !hasActiveGoal) runPlanDiscussion(provider) else null
-                val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
-                    systemPrompt +
-                        "\n\n## Agreed plan from Plan Discussion\n" +
-                        "A role graph already finished: brief, design, parallel critique, at most one revise, then a secretary contract. The full board is the preceding assistant card. Follow the execution contract below. Do not start another discussion or spawn discussants. Unresolved objections are constraints.\n\n" +
-                        planMarkdown
-                } else systemPrompt
+                val groupChat = groupChatEnabled.value &&
+                    !internalGoalRun &&
+                    !provider.model.isPureVideoGenerator
 
                 try {
-                    if (provider.model.isPureVideoGenerator) {
+                    if (groupChat) {
+                        AppLogger.info(ChatViewModel.TAG_STREAM, "send runGroupChat CALL")
+                        groupChatCloseRequested = false
+                        runGroupChat(provider, closing = false)
+                        if (!run.isStopped && !groupChatCloseRequested) {
+                            drainQueuedPrompts(provider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                        }
+                        AppLogger.info(ChatViewModel.TAG_STREAM, "send runGroupChat RETURN")
+                    } else if (provider.model.isPureVideoGenerator) {
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runVideoGenerationTurn CALL")
                         runVideoGenerationTurn(provider, modelBody, activeSessionId)
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runVideoGenerationTurn RETURN")
@@ -347,7 +339,7 @@ internal fun ChatViewModel.sendMessage(
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop CALL")
                         runAgentLoop(
                             provider = provider,
-                            systemPrompt = promptForLoop,
+                            systemPrompt = systemPrompt,
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
                             goalExecutionRun = internalGoalRun,

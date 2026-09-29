@@ -48,7 +48,6 @@ import androidx.compose.material.icons.outlined.ScreenLockPortrait
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.ViewAgenda
 import androidx.compose.material.icons.outlined.Groups
-import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -90,7 +89,6 @@ const val KEY_TOOL_PREVIEW = "tool_preview"        // Boolean, default true
 const val KEY_SHOW_FLOATING_TOOL_BAR = "chat.showFloatingToolBar"  // Boolean, default true
 const val KEY_SHOW_COMPLETED_TOOL_CARDS = "chat.showCompletedToolCards"  // Boolean, default false
 const val KEY_SHOW_SUBAGENT_BAR = "chat.showSubAgentBar"  // Boolean, default true
-const val KEY_SHOW_PLAN_BANNER = "chat.showPlanDiscussionBanner"  // Boolean, default false
 // [T-keyboard-auto-pop default flip] Default ON — most users want the
 // composer ready for a follow-up immediately after the model finishes.
 // Key name mirrors iOS `@AppStorage("chat.autoFocusAfterReply")` so a
@@ -273,7 +271,6 @@ fun AppearanceScreen(
     var showFloatingToolBar by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_FLOATING_TOOL_BAR, true)) }
     var showCompletedToolCards by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
     var showSubAgentBar by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_SUBAGENT_BAR, true)) }
-    var showPlanBanner by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_PLAN_BANNER, false)) }
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var foldAiProcess by remember { mutableStateOf(prefs.getBoolean(KEY_FOLD_AI_PROCESS, false)) }
@@ -494,16 +491,6 @@ fun AppearanceScreen(
                 onCheckedChange = {
                     showSubAgentBar = it
                     prefs.edit().putBoolean(KEY_SHOW_SUBAGENT_BAR, it).apply()
-                },
-            )
-            SettingsSwitchRow(
-                icon = Icons.Outlined.Forum,
-                iconColor = tileTeal,
-                title = stringResource(R.string.appearance_show_plan_banner),
-                checked = showPlanBanner,
-                onCheckedChange = {
-                    showPlanBanner = it
-                    prefs.edit().putBoolean(KEY_SHOW_PLAN_BANNER, it).apply()
                 },
                 showDivider = false,
             )

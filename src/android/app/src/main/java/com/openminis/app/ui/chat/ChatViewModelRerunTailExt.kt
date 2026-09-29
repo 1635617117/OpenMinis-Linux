@@ -3,10 +3,9 @@ package com.openminis.app.ui.chat
 import android.util.Log
 import androidx.lifecycle.viewModelScope
 import com.openminis.app.logging.AppLogger
+import com.openminis.app.data.model.isPureVideoGenerator
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.ProviderFactory
-import com.openminis.app.data.PlanDiscussionPrefs
-import com.openminis.app.data.PlanDiscussionTrigger
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.service.SessionConcurrencyManager
 import kotlinx.coroutines.CancellationException
@@ -77,25 +76,20 @@ internal suspend fun ChatViewModel.runRerunStreamTail(
             val fallbackProviders = buildFallbackProviders(launchedProvider)
             try {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop CALL")
-                val planMarkdown = if (PlanDiscussionTrigger.shouldRun(PlanDiscussionPrefs.mode(), _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty())) {
-                    runPlanDiscussion(launchedProvider)
+                if (groupChatEnabled.value && !launchedProvider.model.isPureVideoGenerator) {
+                    groupChatCloseRequested = false
+                    runGroupChat(launchedProvider, closing = false)
+                    if (com.openminis.app.service.ActiveRunContext.current()?.isStopped == false) {
+                        drainQueuedPrompts(launchedProvider, systemPrompt, fallbackProviders, activeFallbackStrategy)
+                    }
                 } else {
-                    null
-                }
-                val promptForLoop = if (!planMarkdown.isNullOrBlank()) {
-                    systemPrompt +
-                        "\n\n## Agreed plan from Plan Discussion\n" +
-                        "A role graph already finished: brief, design, parallel critique, at most one revise, then a secretary contract. The full board is the previous assistant message. Follow the 执行契约 below. Do not start another discussion or spawn discussants. Unresolved objections are constraints.\n\n" +
-                        planMarkdown
-                } else {
-                    systemPrompt
-                }
                 runAgentLoop(
                     provider = launchedProvider,
-                    systemPrompt = promptForLoop,
+                    systemPrompt = systemPrompt,
                     fallbackProviders = fallbackProviders,
                     fallbackStrategy = activeFallbackStrategy,
                 )
+                }
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop RETURN normal")
             } catch (e: CancellationException) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "$label runAgentLoop CANCELLED")

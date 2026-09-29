@@ -78,6 +78,8 @@ data class ChatMessage(
     // ChatMessage.sourceSortOrder, which serves the same UI↔raw mapping
     // role (AIChatViewModel.swift:3411, 3421).
     val sourceDbIds: List<String> = emptyList(),
+    /** Set for an AI group-chat utterance. Keeps that model's bubble separate. */
+    val speakerName: String? = null,
 ) {
     /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the

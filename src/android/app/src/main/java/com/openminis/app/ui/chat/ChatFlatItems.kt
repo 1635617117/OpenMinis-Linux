@@ -53,7 +53,7 @@ internal sealed class FlatChatItem {
         override fun hashCode(): Int = message.hashCode() * 31 + precededByUser.hashCode()
     }
 
-    data class AssistantHeader(val messageId: String) : FlatChatItem() {
+    data class AssistantHeader(val messageId: String, val speakerName: String = "") : FlatChatItem() {
         override val key = "header:$messageId"
         override val contentType = "header"
     }
@@ -343,10 +343,17 @@ internal fun buildFlatChatItems(
     }
     for (idx in fromIndex until messages.size) {
         val rawMessage = messages[idx]
-        val message = if (!hideSubAgentCards || rawMessage.toolBlocks.none(::isSubAgentTranscriptCard)) {
+        val hideSpeakerTools = !rawMessage.speakerName.isNullOrBlank()
+        val message = if (
+            (!hideSubAgentCards || rawMessage.toolBlocks.none(::isSubAgentTranscriptCard)) &&
+            !hideSpeakerTools
+        ) {
             rawMessage
         } else {
-            rawMessage.copy(toolBlocks = rawMessage.toolBlocks.filterNot(::isSubAgentTranscriptCard))
+            rawMessage.copy(toolBlocks = rawMessage.toolBlocks.filterNot { block ->
+                (hideSubAgentCards && isSubAgentTranscriptCard(block)) ||
+                    (hideSpeakerTools && block.kind == "tool_use")
+            })
         }
         // [T-android-perf-logging] Per-100-message progress breadcrumb.
         // `out.size` is the running row count, so a sudden jump between two
@@ -446,7 +453,7 @@ internal fun buildFlatChatItems(
         val headerHiddenByFold = showProcessSummary && !headerVisibleInBlocks &&
             message.content.isBlank() && message.error == null
         if (!isSystem && !isResumeContinuation && !headerHiddenByFold) {
-            out.add(dedupe(FlatChatItem.AssistantHeader(message.id)))
+            out.add(dedupe(FlatChatItem.AssistantHeader(message.id, message.speakerName.orEmpty())))
         }
         blocks.forEachIndexed { index, block ->
             when (block.kind) {

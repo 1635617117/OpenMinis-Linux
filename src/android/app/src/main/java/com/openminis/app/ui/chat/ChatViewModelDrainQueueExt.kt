@@ -3,6 +3,7 @@ package com.openminis.app.ui.chat
 import android.util.Log
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
+import com.openminis.app.data.model.isPureVideoGenerator
 import com.openminis.app.provider.LLMProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -97,12 +98,16 @@ internal suspend fun ChatViewModel.drainQueuedPrompts(
         ))
 
         try {
+            if (groupChatEnabled.value && !provider.model.isPureVideoGenerator) {
+                runGroupChat(provider, closing = false)
+            } else {
             runAgentLoop(
                 provider = provider,
                 systemPrompt = systemPrompt,
                 fallbackProviders = fallbackProviders,
                 fallbackStrategy = fallbackStrategy,
             )
+            }
         } catch (e: CancellationException) {
             Log.d(ChatViewModel.TAG, "Agent loop (queued-drain) cancelled")
             // Cancel mid-drain: cancelStream() will check _promptQueue

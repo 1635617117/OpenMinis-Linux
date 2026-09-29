@@ -2278,7 +2278,6 @@ fun ChatScreen(
     var showCompletedToolCards by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
     var foldAiProcess by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)) }
     var showSubAgentBar by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)) }
-    var showPlanBanner by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER, false)) }
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
@@ -2298,7 +2297,6 @@ fun ChatScreen(
             showCompletedToolCards = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)
             foldAiProcess = sp.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)
             showSubAgentBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)
-            showPlanBanner = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER, false)
             showChatTitlePill = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)
         }
         fun onMain(block: () -> Unit) {
@@ -2315,7 +2313,6 @@ fun ChatScreen(
                     com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR -> showSubAgentBar = sp.getBoolean(key, true)
-                    com.openminis.app.ui.settings.KEY_SHOW_PLAN_BANNER -> showPlanBanner = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
                     null -> applyAppearancePrefs(sp)
                 }
@@ -2926,6 +2923,28 @@ fun ChatScreen(
                                 },
                             )
                             MinisMenuDivider()
+                            val groupChatOn by viewModel.groupChatEnabled.collectAsState()
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_group_chat)) },
+                                onClick = { viewModel.setGroupChatEnabled(!groupChatOn) },
+                                leadingIcon = { Icon(Icons.Default.Forum, contentDescription = null) },
+                                trailingIcon = {
+                                    SettingsSwitch(
+                                        checked = groupChatOn,
+                                        onCheckedChange = { viewModel.setGroupChatEnabled(it) },
+                                    )
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.chat_menu_end_group_chat)) },
+                                enabled = groupChatOn,
+                                onClick = {
+                                    showChatMenu = false
+                                    viewModel.endGroupChat()
+                                },
+                                leadingIcon = { Icon(Icons.Default.Stop, contentDescription = null) },
+                            )
+                            MinisMenuDivider()
                             // Open Terminal (iOS parity) — session-bound, starts in /var/minis
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.chat_menu_open_terminal)) },
@@ -3192,14 +3211,14 @@ fun ChatScreen(
                 onDeny = { viewModel.denyPendingTool(it) },
                 onDismissIntercept = { InterceptFeedback.dismiss(it) },
             )
-            val planDiscussionBannerOn = showPlanBanner && com.openminis.app.data.PlanDiscussionPrefs.isEnabled()
-            if (planDiscussionBannerOn) {
+            val groupChatOn by viewModel.groupChatEnabled.collectAsState()
+            if (groupChatOn) {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
@@ -3210,10 +3229,14 @@ fun ChatScreen(
                         )
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            stringResource(R.string.plan_discussion_banner),
+                            stringResource(R.string.group_chat_banner),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f),
                         )
+                        androidx.compose.material3.TextButton(onClick = { viewModel.endGroupChat() }) {
+                            Text(stringResource(R.string.chat_menu_end_group_chat))
+                        }
                     }
                 }
             }
@@ -4176,7 +4199,7 @@ fun ChatScreen(
                                 },
                             )
                             } // close UserBubble SideEffect + UserMessageBubble block
-                            is FlatChatItem.AssistantHeader -> AssistantHeader()
+                            is FlatChatItem.AssistantHeader -> AssistantHeader(item.speakerName)
                             is FlatChatItem.AssistantText -> BoundsTrackedBlock(
                                 messageId = item.messageId,
                                 slotKey = "text:${item.block.id}",

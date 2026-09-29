@@ -185,7 +185,7 @@
     <string name="settings_skills">Skills</string>
     <string name="settings_skills_subtitle">Manage Minis Ultra Agent skills and instructions</string>
     <string name="settings_multi_agent">Multi-agent</string>
-    <string name="settings_multi_agent_subtitle">Parallel sub-agents, concurrency cap, team models, and plan discussion</string>
+    <string name="settings_multi_agent_subtitle">Parallel sub-agents, concurrency cap, and team models</string>
     <string name="settings_multi_agent_section_dispatch">Dispatch</string>
     <string name="settings_multi_agent_enable">Enable multi-agent</string>
     <string name="settings_multi_agent_enable_subtitle">Main session model coordinates; teammates run via spawn_agent</string>
@@ -2411,4 +2411,13 @@
     <string name="execution_idle_minutes">Idle shell timeout</string>
     <string name="execution_minutes_value">%1$d min</string>
     <string name="execution_idle_help">Only shells confirmed idle are reclaimed. Background processes are protected; uncertain process state prevents automatic reclamation. Shell-local variables and working directory reset after reclamation.</string>
+    <string name="chat_menu_group_chat">AI group chat</string>
+    <string name="chat_menu_end_group_chat">End discussion</string>
+    <string name="group_chat_banner">AI group chat is on. Models discuss on this page; tool calls stay hidden.</string>
+    <string name="group_chat_analyzing">Analyzing…</string>
+    <string name="group_chat_framing">Framing the question…</string>
+    <string name="group_chat_summarizing">Summarizing the discussion…</string>
+    <string name="group_chat_host_suffix">Host</string>
+    <string name="group_chat_need_models">AI group chat needs at least two different models. Choose teammates in Settings → Multi-agent.</string>
+    <string name="group_chat_nothing_to_close">There is no discussion to end.</string>
 </resources>

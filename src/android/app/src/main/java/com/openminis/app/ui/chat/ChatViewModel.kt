@@ -2063,13 +2063,26 @@ class ChatViewModel(
         _autoCompactEnabled.value = enabled
     }
 
-    private val _planDiscussionEnabled =
-        MutableStateFlow(PlanDiscussionPrefs.isEnabled())
-    val planDiscussionEnabled: StateFlow<Boolean> = _planDiscussionEnabled.asStateFlow()
+    internal fun groupChatPrefs() =
+        context.getSharedPreferences("minis_group_chat", android.content.Context.MODE_PRIVATE)
 
-    fun setPlanDiscussionEnabled(enabled: Boolean) {
-        PlanDiscussionPrefs.setEnabled(context, enabled)
-        _planDiscussionEnabled.value = PlanDiscussionPrefs.isEnabled()
+    internal fun groupChatKey() = "enabled:${realSessionId.ifEmpty { sessionId }}"
+
+    internal fun closedKey() = "closed:${realSessionId.ifEmpty { sessionId }}"
+
+    private val _groupChatEnabled = MutableStateFlow(groupChatPrefs().getBoolean(groupChatKey(), false))
+    val groupChatEnabled: StateFlow<Boolean> = _groupChatEnabled.asStateFlow()
+
+    @Volatile
+    internal var groupChatCloseRequested = false
+
+    @Volatile
+    internal var groupChatClosedAfterId: String? = groupChatPrefs().getString(closedKey(), null)
+
+    fun setGroupChatEnabled(enabled: Boolean) {
+        groupChatPrefs().edit().putBoolean(groupChatKey(), enabled).apply()
+        _groupChatEnabled.value = enabled
+        if (!enabled) groupChatCloseRequested = false
     }
 
     /**
@@ -5046,6 +5059,7 @@ class ChatViewModel(
             // Powers the user-bubble file chip → FilePreviewScreen tap after
             // a session reload.
             val restoredAttachmentUris = mutableListOf<Uri>()
+            var speakerName: String? = null
 
             if (entity.role == "assistant" && !entity.reasoningContent.isNullOrEmpty()) {
                 blocks.add(AssistantBlock(
@@ -5063,6 +5077,9 @@ class ChatViewModel(
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
                     when (obj.optString("type")) {
+                        com.openminis.app.tools.GroupChat.SPEAKER_PART -> {
+                            speakerName = obj.optString("value", "").takeIf { it.isNotBlank() }
+                        }
                         "text" -> {
                             val raw = obj.optString("value", "")
                             // Strip <system-reminder>...</system-reminder> blocks
@@ -5199,6 +5216,7 @@ class ChatViewModel(
                 attachmentUris = restoredAttachmentUris,
                 toolBlocks = blocks,
                 sourceDbIds = listOf(entity.id),
+                speakerName = speakerName,
                 // [T-error-persist-android] Restore the persisted terminal error
                 // so the inline error banner + Retry button survive a reload.
                 // Coalesce a blank value to null: the UI gate is `error?.let`, so
@@ -5217,7 +5235,9 @@ class ChatViewModel(
             val merged = mutableListOf<ChatMessage>()
             for (msg in messages) {
                 val prev = merged.lastOrNull()
-                if (msg.role == "assistant" && prev?.role == "assistant") {
+                if (msg.role == "assistant" && prev?.role == "assistant" &&
+                    com.openminis.app.tools.GroupChat.shouldMergeAssistantTurns(prev.speakerName, msg.speakerName)
+                ) {
                     // Merge: combine tool blocks, append text, keep the last id.
                     // Deduplicate by block.id — the agent loop may persist the same tool
                     // use in multiple consecutive turns (as it carries tool state across),

@@ -156,7 +156,7 @@
     <string name="settings_skills">技能</string>
     <string name="settings_skills_subtitle">管理 Minis Ultra Agent 的技能与指令</string>
     <string name="settings_multi_agent">多智能体</string>
-    <string name="settings_multi_agent_subtitle">并行子代理、并发上限、团队模型与计划讨论</string>
+    <string name="settings_multi_agent_subtitle">并行子代理、并发上限与团队模型</string>
     <string name="settings_multi_agent_section_dispatch">调度</string>
     <string name="settings_multi_agent_enable">启用多智能体</string>
     <string name="settings_multi_agent_enable_subtitle">主会话模型做协调者，通过 spawn_agent 分派队友</string>
@@ -2234,4 +2234,13 @@
     <string name="execution_idle_minutes">空闲 Shell 回收时间</string>
     <string name="execution_minutes_value">%1$d 分钟</string>
     <string name="execution_idle_help">只回收确认空闲的 Shell。后台进程受保护，进程状态不确定时不自动回收。回收后 Shell 内临时变量和工作目录会重置。</string>
+    <string name="chat_menu_group_chat">AI 群聊</string>
+    <string name="chat_menu_end_group_chat">结束讨论</string>
+    <string name="group_chat_banner">AI 群聊已开启。各模型在本页讨论，工具过程隐藏。</string>
+    <string name="group_chat_analyzing">正在分析…</string>
+    <string name="group_chat_framing">正在整理问题…</string>
+    <string name="group_chat_summarizing">正在汇总讨论…</string>
+    <string name="group_chat_host_suffix">主持</string>
+    <string name="group_chat_need_models">AI 群聊需要至少两个不同模型。请先到设置 → 多智能体，为团队模型选择其他模型。</string>
+    <string name="group_chat_nothing_to_close">当前没有可结束的讨论。</string>
 </resources>

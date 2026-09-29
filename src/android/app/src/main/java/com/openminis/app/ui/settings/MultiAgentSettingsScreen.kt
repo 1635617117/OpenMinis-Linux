@@ -29,7 +29,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.openminis.app.MinisApp
 import com.openminis.app.R
-import com.openminis.app.data.PlanDiscussionPrefs
 import com.openminis.app.data.model.ModelEntry
 import com.openminis.app.data.model.ProviderInstance
 import com.openminis.app.data.model.ThinkingLevel
@@ -66,7 +65,6 @@ fun MultiAgentSettingsScreen(
         MultiAgentSettings.resizeSlots(selectedIds, maxConcurrent)
     }
     val staleCount = selectedIds.count { it.isNotBlank() && it !in candidateIds }
-    var discussionMode by remember { mutableStateOf(PlanDiscussionPrefs.mode()) }
 
     LaunchedEffect(configLoaded, candidateIds) {
         if (configLoaded) repo.retainLiveEntries(candidateIds)
@@ -175,28 +173,6 @@ fun MultiAgentSettingsScreen(
                     showDivider = index < slots.lastIndex,
                     onSelect = { repo.setSlotModel(index, it) },
                     onSelectThinking = { repo.setSlotThinkingLevel(index, it.name) },
-                )
-            }
-        }
-
-        SettingsSection(
-            header = stringResource(R.string.settings_plan_discussion_section),
-            footer = stringResource(R.string.settings_plan_discussion_footer),
-        ) {
-            val modes = listOf(
-                PlanDiscussionPrefs.Mode.OFF to R.string.settings_plan_discussion_off,
-                PlanDiscussionPrefs.Mode.AUTO to R.string.settings_plan_discussion_auto,
-                PlanDiscussionPrefs.Mode.ALWAYS to R.string.settings_plan_discussion_always,
-            )
-            modes.forEachIndexed { index, (mode, titleRes) ->
-                SettingsChoiceRow(
-                    title = stringResource(titleRes),
-                    selected = discussionMode == mode,
-                    onSelect = {
-                        discussionMode = mode
-                        PlanDiscussionPrefs.setMode(context, mode)
-                    },
-                    showDivider = index < modes.lastIndex,
                 )
             }
         }
