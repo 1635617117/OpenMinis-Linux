@@ -1013,7 +1013,11 @@ class ChatViewModel(
                     )
                 }
                 if (page.messages.isNotEmpty()) {
+                    val knownDbIds = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
                     val newer = withContext(Dispatchers.IO) { page.messages.toChatMessages() }
+                        .filter { message ->
+                            message.sourceDbIds.isEmpty() || message.sourceDbIds.none(knownDbIds::contains)
+                        }
                     val combined = _messages.value + newer
                     val dropCount = (combined.size - MAX_LOADED_MESSAGE_WINDOW).coerceAtLeast(0)
                     val droppedRows = combined.take(dropCount).sumOf { it.sourceDbIds.size }

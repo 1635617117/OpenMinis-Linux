@@ -31,6 +31,7 @@ import com.openminis.app.R
 import com.openminis.app.i18n.TranslationOutcome
 import com.openminis.app.i18n.TranslationPrefs
 import com.openminis.app.i18n.TranslationRunner
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlin.math.ceil
 
@@ -196,11 +197,11 @@ internal fun TranslateCorner(
 fun AssistantTranslateButton(
     source: String,
     onTranslated: (String) -> Unit,
+    taskScope: CoroutineScope,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     if (!TranslationPrefs.isEnabled(context)) return
-    val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     Box(modifier = modifier.size(32.dp), contentAlignment = Alignment.Center) {
         if (busy) {
@@ -211,7 +212,7 @@ fun AssistantTranslateButton(
                     if (busy || source.isBlank()) return@IconButton
                     val lang = TranslationPrefs.lang(context)
                     busy = true
-                    scope.launch {
+                    taskScope.launch {
                         try {
                             when (val result = TranslationRunner.translate(context, source, lang)) {
                                 is TranslationOutcome.Text -> onTranslated(result.value)

@@ -49,7 +49,7 @@ fun ContextRing(
     )
     val fg = ringColor(if (usage.known) ratio else 0f)
     val trackColor = ChatColors.toolBorder
-    val displayText = if (!usage.known) "?" else formatCompactContext(usage.usedTokens)
+    val displayText = if (!usage.known) "?" else "${(ratio * 100f).toInt()}%"
 
     val clickMod = if (onClick != null) {
         Modifier.clickable(
@@ -104,12 +104,6 @@ private val RingGreen = Color(0xFF7BE0A4)
 private val RingBlue = Color(0xFF4FA3FF)
 private val RingYellow = Color(0xFFF2C14E)
 private val RingRed = Color(0xFFE5484D)
-
-private fun formatCompactContext(tokens: Long): String = when {
-    tokens >= 1_000_000L -> "${tokens / 1_000_000L}M"
-    tokens >= 1_000L -> "${tokens / 1_000L}K"
-    else -> tokens.toString()
-}
 
 private fun ringColor(ratio: Float): Color {
     val r = ratio.coerceIn(0f, 1f)

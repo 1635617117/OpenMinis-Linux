@@ -2972,26 +2972,6 @@ fun ChatScreen(
                                 },
                             )
                             MinisMenuDivider()
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_new_chat)) },
-                                onClick = {
-                                    showChatMenu = false
-                                    if (isStreaming) showNewChatStopDialog = true else onNewChat()
-                                },
-                                leadingIcon = { Icon(Icons.Default.Add, contentDescription = null) },
-                            )
-                            // Clear Chat (iOS parity, red)
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.chat_menu_clear_chat), color = MaterialTheme.colorScheme.error) },
-                                onClick = {
-                                    showChatMenu = false
-                                    showClearChatDialog = true
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error)
-                                },
-                            )
-                            MinisMenuDivider()
                             // Open Terminal (iOS parity) — session-bound, starts in /var/minis
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.chat_menu_open_terminal)) },
@@ -3245,16 +3225,22 @@ fun ChatScreen(
             modifier = Modifier.fillMaxSize(),
         ) {
             val subAgentMembers by com.openminis.app.service.SubAgentActivityTracker.members.collectAsState()
-            val activeSubAgentToolIds = remember(subAgentMembers, sessionId, showSubAgentBar) {
+            val activeSubAgentToolIds = remember(messages, subAgentMembers, sessionId, showSubAgentBar) {
                 if (!showSubAgentBar) emptySet()
-                else subAgentMembers.filter { it.parentSessionId == sessionId }
-                    .flatMap { member ->
-                        listOfNotNull(
-                            member.parentToolId.takeIf(String::isNotBlank),
-                            member.detailToolId.takeIf(String::isNotBlank),
-                        )
+                else buildSet {
+                    subAgentMembers.filter { it.parentSessionId == sessionId }.forEach { member ->
+                        member.parentToolId.takeIf(String::isNotBlank)?.let(::add)
+                        member.detailToolId.takeIf(String::isNotBlank)?.let(::add)
                     }
-                    .toSet()
+                    // Keep completed spawn cards suppressed as well. The live
+                    // tracker removes members on finish, but the parent message
+                    // remains in history and must stay represented by the chip.
+                    messages.filter { it.role == "assistant" }.forEach { message ->
+                        message.toolBlocks.filter { block ->
+                            block.kind == "tool_use" && block.toolName in setOf("spawn_agent", "run_subagent")
+                        }.forEach { add(it.id) }
+                    }
+                }
             }
             if (showSubAgentBar) {
                 SubAgentLiveBar(
@@ -4276,6 +4262,7 @@ fun ChatScreen(
                                             button = {
                                                 AssistantTranslateButton(
                                                     source = item.block.content,
+                                                    taskScope = coroutineScope,
                                                     onTranslated = {
                                                         viewModel.replaceAssistantTextBlock(item.messageId, item.block.id, it)
                                                     },
@@ -4321,6 +4308,7 @@ fun ChatScreen(
                                             button = {
                                                 AssistantTranslateButton(
                                                     source = item.segmentText.ifBlank { item.rawText },
+                                                    taskScope = coroutineScope,
                                                     onTranslated = {
                                                         if (item.translateWholeReply) {
                                                             viewModel.replaceAssistantOutput(item.messageId, it)

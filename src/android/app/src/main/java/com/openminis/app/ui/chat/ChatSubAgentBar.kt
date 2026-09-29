@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -84,24 +85,30 @@ fun SubAgentLiveBar(
             Row(
                 modifier = Modifier
                     .background(bg, RoundedCornerShape(999.dp))
-                    .padding(start = 10.dp, end = 2.dp),
+                    .padding(start = 10.dp, end = 1.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-            Text(
-                text = label,
-                color = Color.White,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .widthIn(max = 220.dp)
-                    .clickable { detailMemberId = m.id }
-                    .padding(vertical = 4.dp),
-            )
-            IconButton(onClick = { onStop(m.id) }, modifier = Modifier.widthIn(min = 28.dp).heightIn(min = 28.dp)) {
-                Icon(Icons.Filled.Stop, contentDescription = "Stop ${m.title}", tint = Color.White)
-            }
+                Text(
+                    text = label,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 220.dp)
+                        .clickable { detailMemberId = m.id }
+                        .padding(vertical = 4.dp),
+                )
+                Icon(
+                    Icons.Filled.Stop,
+                    contentDescription = "Stop ${m.title}",
+                    tint = Color.White,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable { onStop(m.id) }
+                        .padding(3.dp),
+                )
             }
             }
         }
