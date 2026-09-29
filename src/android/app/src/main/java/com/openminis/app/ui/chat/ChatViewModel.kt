@@ -2112,6 +2112,13 @@ class ChatViewModel(
         dismissMentionMenu()
     }
 
+    /** Prefs can outlive the in-memory flag after a restart. Do not dismiss the @ menu. */
+    internal fun adoptStoredGroupChatEnabled() {
+        if (!_groupChatEnabled.value && groupChatPrefs().getBoolean(groupChatKey(), false)) {
+            _groupChatEnabled.value = true
+        }
+    }
+
     /**
      * [T-codex-fast-mode] Whether the Fast Mode menu row (and, when enabled,
      * the nav ⚡ badge) is shown. Mirrors iOS activeModelSupportsFastMode

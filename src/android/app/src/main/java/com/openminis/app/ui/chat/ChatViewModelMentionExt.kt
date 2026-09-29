@@ -101,10 +101,8 @@ internal fun looksLikeFileMention(filter: String): Boolean =
  * A path-shaped filter still means a file, but only while group chat is off.
  */
 internal fun ChatViewModel.shouldListGroupModels(filter: String): Boolean {
-    if (!_groupChatEnabled.value && groupChatPrefs().getBoolean(groupChatKey(), false)) {
-        _groupChatEnabled.value = true
-    }
-    if (_groupChatEnabled.value) return true
+    adoptStoredGroupChatEnabled()
+    if (groupChatEnabled.value) return true
     return currentGroupMentions().any { !it.host } && !looksLikeFileMention(filter)
 }
 
