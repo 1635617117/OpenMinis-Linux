@@ -94,7 +94,7 @@ import com.openminis.app.ui.theme.ChatColors
 import com.openminis.app.ui.components.MinisTextButton
 
 @Composable
-internal fun AssistantHeader(speakerName: String? = null) {
+internal fun AssistantHeader(speakerName: String? = null, speakerVendor: String? = null) {
     // [T-soul-md] Identity header = icon + SOUL.md-driven `name`.
     //
     // [T-android-soul-custom-icon] The icon is now the user-settable
@@ -125,20 +125,11 @@ internal fun AssistantHeader(speakerName: String? = null) {
         // measured-height estimate in the message list, so the icon stays
         // square and same-sized whichever branch renders.
         if (namedSpeaker != null) {
-            val avatarColor = groupSpeakerColor(namedSpeaker)
-            Box(
-                modifier = Modifier
-                    .size(18.dp)
-                    .background(avatarColor, CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = namedSpeaker.take(1),
-                    color = Color.White,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
+            VendorMark(
+                vendor = speakerVendor?.takeIf { it.isNotBlank() }
+                    ?: com.openminis.app.tools.GroupChat.vendorKey(null, namedSpeaker),
+                fallbackName = namedSpeaker,
+            )
         } else {
         com.openminis.app.ui.settings.SoulIconGlyph(
             icon = soulMeta.icon,
@@ -156,18 +147,6 @@ internal fun AssistantHeader(speakerName: String? = null) {
         )
     }
 }
-
-private val groupSpeakerPalette = listOf(
-    Color(0xFF5B8DEF),
-    Color(0xFF3FA36A),
-    Color(0xFFD4654A),
-    Color(0xFF8A6AD6),
-    Color(0xFFC48A2A),
-    Color(0xFF3A9CA8),
-)
-
-private fun groupSpeakerColor(name: String): Color =
-    groupSpeakerPalette[name.hashCode().ushr(1) % groupSpeakerPalette.size]
 
 @Composable
 internal fun AssistantMessageView(message: ChatMessage, onRetry: (() -> Unit)? = null) {

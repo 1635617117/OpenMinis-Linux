@@ -35,6 +35,21 @@ class GroupChatTest {
     }
 
     @Test
+    fun vendorMatchIgnoresDirtyModelFields() {
+        assertEquals("deepseek", GroupChat.vendorKey("models/DeepSeek-V3:latest", "DeepSeek（官方）", "openAI"))
+        assertEquals("deepseek", GroupChat.vendorKey("deep-seek_chat", null))
+        assertEquals("openai", GroupChat.vendorKey("gpt4o-mini", "【自定义】GPT-4o"))
+        assertEquals("openai", GroupChat.vendorKey("o1preview", null))
+        assertEquals("doubao", GroupChat.vendorKey("Doubao-pro-32k", "【豆包】"))
+        assertEquals("gemini", GroupChat.vendorKey("gemini2.5pro", "models/gemini-2.5-flash"))
+        assertEquals("anthropic", GroupChat.vendorKey("claude-3.5-sonnet（官方）", null))
+        assertEquals("xai", GroupChat.vendorKey("x.ai/grok-3", null))
+        assertEquals("qwen", GroupChat.vendorKey("qwen2.5-72b", "通义千问"))
+        assertEquals("anthropic", GroupChat.vendorKey("custom-model", null, "anthropic"))
+        assertEquals("unknown", GroupChat.vendorKey("metadata-exporter", null))
+    }
+
+    @Test
     fun promptsKeepTheUserQuestionAndPriorSpeakers() {
         val opinion = GroupChat.opinionPrompt("Gemini", "分析这份财报", "主持人：核对收入", "DeepSeek：收入口径不一致")
         assertTrue(opinion.contains("分析这份财报"))

@@ -80,6 +80,8 @@ data class ChatMessage(
     val sourceDbIds: List<String> = emptyList(),
     /** Set for an AI group-chat utterance. Keeps that model's bubble separate. */
     val speakerName: String? = null,
+    /** Vendor key for the speaker mark. Empty on ordinary assistant turns. */
+    val speakerVendor: String? = null,
 ) {
     /**
      * [T-bridge-message-ui-leak-android] True when this UI message is the

@@ -6,6 +6,72 @@ package com.openminis.app.tools
  */
 object GroupChat {
     const val SPEAKER_PART = "speaker"
+    const val VENDOR_UNKNOWN = "unknown"
+
+    /**
+     * Model family, not the wire protocol. Matching is fuzzy: punctuation,
+     * slashes, brackets and glued version numbers are stripped before alias
+     * search, so `models/DeepSeek-V3:latest` and `gpt4o-mini` still resolve.
+     * More specific families are checked before OpenAI, so an OpenAI-compatible
+     * DeepSeek does not inherit the OpenAI mark.
+     */
+    fun vendorKey(modelId: String?, displayName: String?, providerType: String? = null): String {
+        val compact = compactVendorText(modelId) + " " + compactVendorText(displayName)
+        val segments = listOfNotNull(modelId, displayName)
+            .flatMap { it.split(Regex("[^A-Za-z0-9\\u4e00-\\u9fff]+")) }
+            .map { compactVendorText(it) }
+            .filter { it.isNotEmpty() }
+        if (compact.isNotBlank()) {
+            VENDOR_ALIASES.firstOrNull { (_, aliases) ->
+                aliases.any { matchesVendor(compact.replace(" ", ""), segments, it) }
+            }?.first?.let { return it }
+        }
+        return when (providerType?.trim()) {
+            "anthropic" -> "anthropic"
+            "gemini" -> "gemini"
+            "xAI" -> "xai"
+            "kimiCode" -> "kimi"
+            "openRouter" -> "openrouter"
+            "openAI", "openAIResponses" -> "openai"
+            else -> VENDOR_UNKNOWN
+        }
+    }
+
+    internal fun compactVendorText(raw: String?): String =
+        raw.orEmpty().lowercase().replace(Regex("[^a-z0-9\\u4e00-\\u9fff]+"), "")
+
+    private val VENDOR_ALIASES = listOf(
+        "deepseek" to listOf("deepseek", "深度求索"),
+        "qwen" to listOf("qwen", "qwq", "qvq", "tongyi", "通义", "千问"),
+        "kimi" to listOf("kimi", "moonshot", "月之暗面"),
+        "doubao" to listOf("doubao", "豆包"),
+        "anthropic" to listOf("claude", "anthropic"),
+        "gemini" to listOf("gemini", "gemma"),
+        "xai" to listOf("grok", "xai"),
+        "mistral" to listOf("mistral", "mixtral", "pixtral", "codestral"),
+        "meta" to listOf("llama", "metallama"),
+        "zhipu" to listOf("chatglm", "zhipu", "智谱", "glm"),
+        "minimax" to listOf("minimax", "abab", "hailuo", "海螺"),
+        "hunyuan" to listOf("hunyuan", "混元"),
+        "ernie" to listOf("ernie", "wenxin", "文心"),
+        "baichuan" to listOf("baichuan", "百川"),
+        "stepfun" to listOf("stepfun"),
+        "internlm" to listOf("internlm", "internvl"),
+        "groq" to listOf("groq"),
+        "cohere" to listOf("cohere", "commandr"),
+        "perplexity" to listOf("perplexity", "pplx"),
+        "openrouter" to listOf("openrouter"),
+        "openai" to listOf("chatgpt", "openai", "gpt", "dalle", "o1", "o3", "o4"),
+    )
+
+    private fun matchesVendor(compact: String, segments: List<String>, alias: String): Boolean {
+        val token = compactVendorText(alias)
+        if (token.isEmpty()) return false
+        val cjk = token.any { it.code > 127 }
+        if (cjk || token.length >= 5) return compact.contains(token)
+        return compact == token || compact.startsWith(token) ||
+            segments.any { it == token || it.startsWith(token) }
+    }
 
     data class Line(val speaker: String, val text: String)
 

@@ -53,7 +53,11 @@ internal sealed class FlatChatItem {
         override fun hashCode(): Int = message.hashCode() * 31 + precededByUser.hashCode()
     }
 
-    data class AssistantHeader(val messageId: String, val speakerName: String = "") : FlatChatItem() {
+    data class AssistantHeader(
+        val messageId: String,
+        val speakerName: String = "",
+        val speakerVendor: String = "",
+    ) : FlatChatItem() {
         override val key = "header:$messageId"
         override val contentType = "header"
     }
@@ -453,7 +457,11 @@ internal fun buildFlatChatItems(
         val headerHiddenByFold = showProcessSummary && !headerVisibleInBlocks &&
             message.content.isBlank() && message.error == null
         if (!isSystem && !isResumeContinuation && !headerHiddenByFold) {
-            out.add(dedupe(FlatChatItem.AssistantHeader(message.id, message.speakerName.orEmpty())))
+            out.add(dedupe(FlatChatItem.AssistantHeader(
+                message.id,
+                message.speakerName.orEmpty(),
+                message.speakerVendor.orEmpty(),
+            )))
         }
         blocks.forEachIndexed { index, block ->
             when (block.kind) {

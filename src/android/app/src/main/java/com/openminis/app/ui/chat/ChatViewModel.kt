@@ -5060,6 +5060,7 @@ class ChatViewModel(
             // a session reload.
             val restoredAttachmentUris = mutableListOf<Uri>()
             var speakerName: String? = null
+            var speakerVendor: String? = null
 
             if (entity.role == "assistant" && !entity.reasoningContent.isNullOrEmpty()) {
                 blocks.add(AssistantBlock(
@@ -5079,6 +5080,9 @@ class ChatViewModel(
                     when (obj.optString("type")) {
                         com.openminis.app.tools.GroupChat.SPEAKER_PART -> {
                             speakerName = obj.optString("value", "").takeIf { it.isNotBlank() }
+                            speakerVendor = obj.optString("vendor", "").takeIf { it.isNotBlank() }
+                                ?: com.openminis.app.tools.GroupChat.vendorKey(null, speakerName)
+                                    .takeIf { it != com.openminis.app.tools.GroupChat.VENDOR_UNKNOWN }
                         }
                         "text" -> {
                             val raw = obj.optString("value", "")
@@ -5217,6 +5221,7 @@ class ChatViewModel(
                 toolBlocks = blocks,
                 sourceDbIds = listOf(entity.id),
                 speakerName = speakerName,
+                speakerVendor = speakerVendor,
                 // [T-error-persist-android] Restore the persisted terminal error
                 // so the inline error banner + Retry button survive a reload.
                 // Coalesce a blank value to null: the UI gate is `error?.let`, so

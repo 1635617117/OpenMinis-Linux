@@ -44,6 +44,11 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     val hostName = (mainEntry?.model?.displayName ?: currentModel?.displayName ?: "Host") +
         " · " + context.getString(com.openminis.app.R.string.group_chat_host_suffix)
     val hostSnapshot = snapshotFor(mainEntry)
+    val hostVendor = GroupChat.vendorKey(
+        mainEntry?.model?.id ?: currentModel?.id,
+        mainEntry?.model?.displayName ?: currentModel?.displayName,
+        hostSnapshot?.providerTypeRaw,
+    )
     val members = groupMembers(config.modelEntries, mainEntry?.id)
     if (!closing && members.isEmpty()) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
@@ -54,6 +59,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     if (!closing && !groupChatCloseRequested) {
         val brief = speakVisible(
             speaker = hostName,
+            vendor = hostVendor,
             snapshot = hostSnapshot,
             provider = provider,
             system = GroupChat.HOST_SYSTEM,
@@ -83,6 +89,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
 
     val summary = speakVisible(
         speaker = hostName,
+        vendor = hostVendor,
         snapshot = hostSnapshot,
         provider = provider,
         system = GroupChat.HOST_SYSTEM,
@@ -123,6 +130,7 @@ internal fun ChatViewModel.endGroupChat() {
 
 private data class GroupMember(
     val name: String,
+    val vendor: String,
     val provider: LLMProvider,
     val snapshot: ModelAttributionSnapshot?,
     val maxTokens: Int,
@@ -145,6 +153,11 @@ private fun ChatViewModel.groupMembers(
         val provider = providerForModelEntry(entry) ?: return@mapNotNull null
         GroupMember(
             name = entry.model.displayName,
+            vendor = GroupChat.vendorKey(
+                entry.model.id,
+                entry.model.displayName,
+                snapshotFor(entry)?.providerTypeRaw,
+            ),
             provider = provider,
             snapshot = snapshotFor(entry),
             maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 2048),
@@ -182,6 +195,7 @@ private suspend fun ChatViewModel.speakMembers(
                 toolGate = gate,
                 allowPass = true,
                 thinkingLevel = member.thinkingLevel,
+                vendor = member.vendor,
             )
             text.takeIf { it.isNotBlank() }?.let { GroupChat.Line(member.name, it) }
         }
@@ -200,13 +214,14 @@ private suspend fun ChatViewModel.speakVisible(
     allowPass: Boolean = false,
     thinkingLevel: com.openminis.app.data.model.ThinkingLevel =
         com.openminis.app.data.model.ThinkingLevel.OFF,
+    vendor: String = GroupChat.VENDOR_UNKNOWN,
 ): String {
     if (groupChatCloseRequested && allowPass) return ""
     val id = UUID.randomUUID().toString()
-    upsertGroupBubble(id, speaker, placeholder, analyzing = true)
+    upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
         speakModel(provider, system, user, tools, toolGate, thinkingLevel) {
-            upsertGroupBubble(id, speaker, placeholder, analyzing = true)
+            upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
         }
     } catch (e: CancellationException) {
         removeGroupBubble(id)
@@ -216,12 +231,13 @@ private suspend fun ChatViewModel.speakVisible(
         removeGroupBubble(id)
         return ""
     }
-    val dbId = persistGroupUtterance(speaker, text, snapshot)
+    val dbId = persistGroupUtterance(speaker, text, snapshot, vendor)
     withContext(Dispatchers.Main) {
         _messages.value = _messages.value.map { message ->
             if (message.id == id) message.copy(
                 content = text,
                 speakerName = speaker,
+                speakerVendor = vendor,
                 isStreaming = false,
                 isAwaitingModelResponse = false,
                 sourceDbIds = listOfNotNull(dbId),
@@ -297,6 +313,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
     speaker: String,
     text: String,
     analyzing: Boolean,
+    vendor: String = GroupChat.VENDOR_UNKNOWN,
 ) {
     withContext(Dispatchers.Main) {
         val current = _messages.value
@@ -305,6 +322,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
                 if (it.id == id) it.copy(
                     content = text,
                     speakerName = speaker,
+                    speakerVendor = vendor,
                     isStreaming = true,
                     isAwaitingModelResponse = analyzing,
                 ) else it
@@ -315,6 +333,7 @@ private suspend fun ChatViewModel.upsertGroupBubble(
                 role = "assistant",
                 content = text,
                 speakerName = speaker,
+                speakerVendor = vendor,
                 isStreaming = true,
                 isAwaitingModelResponse = analyzing,
             )
@@ -345,9 +364,15 @@ private suspend fun ChatViewModel.persistGroupUtterance(
     speaker: String,
     text: String,
     snapshot: ModelAttributionSnapshot?,
+    vendor: String = GroupChat.vendorKey(snapshot?.modelId, snapshot?.displayName, snapshot?.providerTypeRaw),
 ): String? = withContext(Dispatchers.IO) {
     val parts = JSONArray()
-        .put(JSONObject().put("type", GroupChat.SPEAKER_PART).put("value", speaker))
+        .put(
+            JSONObject()
+                .put("type", GroupChat.SPEAKER_PART)
+                .put("value", speaker)
+                .put("vendor", vendor),
+        )
         .put(JSONObject().put("type", "text").put("value", text))
         .toString()
     chatRepository.appendMessage(
