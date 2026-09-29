@@ -36,14 +36,50 @@ jobs:
       - name: Build rclone AAR
         env:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK }}
+          # deps/rclone-mobile/go.mod requires go 1.26.0. Installing 1.25 and
+          # then gomobile@latest made the toolchain jump to 1.26 mid-step.
+          GO_VERSION: "1.26.8"
+          GO_SHA256: "d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b"
+          GOMOBILE_VERSION: "v0.0.0-20260908204917-8b95e45f8d3e"
+          GOTOOLCHAIN: local
+          GOPROXY: "https://proxy.golang.org,direct"
+          # aac4d26 native-deps died on sum.golang.org HTTP/2 INTERNAL_ERROR
+          # while verifying azblob. Force HTTP/1.1 and retry the module steps.
+          GODEBUG: "http2client=0"
         run: |
-          curl -fsSL -o /tmp/go.tar.gz https://go.dev/dl/go1.25.0.linux-amd64.tar.gz
+          set -euo pipefail
+          curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+            -o /tmp/go.tar.gz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+          echo "${GO_SHA256}  /tmp/go.tar.gz" | sha256sum -c -
+          sudo rm -rf /usr/local/go
           sudo tar -C /usr/local -xzf /tmp/go.tar.gz
-          export PATH=/usr/local/go/bin:$PATH
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          export PATH=$PATH:$(go env GOPATH)/bin
-          gomobile init
-          bash deps/build_rclone_android.sh
+          echo "/usr/local/go/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/go/bin:${PATH}"
+          go version | grep -F "go${GO_VERSION}"
+          retry() {
+            local attempt=1
+            local max=5
+            local delay=5
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$attempt" -ge "$max" ]; then
+                echo "failed after ${max} attempts: $*" >&2
+                return 1
+              fi
+              echo "attempt ${attempt} failed, retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              delay=$((delay * 2))
+            done
+          }
+          retry go install "golang.org/x/mobile/cmd/gomobile@${GOMOBILE_VERSION}"
+          gopath_bin="$(go env GOPATH)/bin"
+          echo "$gopath_bin" >> "$GITHUB_PATH"
+          export PATH="${PATH}:${gopath_bin}"
+          retry gomobile init
+          retry bash deps/build_rclone_android.sh
       - name: Build libunwind
         env:
           ANDROID_NDK_HOME: /usr/local/lib/android/sdk/ndk/${{ env.ANDROID_NDK }}

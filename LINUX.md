@@ -117,5 +117,5 @@ SAF 目录绑定在 `/var/minis/mounts/<name>/`。若有「所有文件访问」
 `src/android/app/libs/rclone.aar` 是 gomobile 产物（约 15MB），已 gitignore，**不是**编译 APK 的硬依赖。
 
 - 没有 AAR 时，Gradle 会编译 `src/rcloneStub`，APK 能打出来；SMB/WebDAV/SFTP/S3/FTP 备份会在 RPC 时返回 501 说明。
-- 只有要完整远程备份时，才需要主机 Go 1.22+ 与 gomobile，然后运行 `./deps/build_rclone_android.sh`，把 AAR 放到 `src/android/app/libs/rclone.aar`。
+- 只有要完整远程备份时，才需要主机 Go 1.26+（云端钉 1.26.8）与 gomobile，然后运行 `./deps/build_rclone_android.sh`，把 AAR 放到 `src/android/app/libs/rclone.aar`。
 - 客户机里 `minis-dev-setup` 会装 `golang-go`，方便在沙箱里重建绑定，但首次从 Windows/macOS 编译 APK 不必装 Go。

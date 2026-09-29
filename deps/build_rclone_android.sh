@@ -20,8 +20,8 @@ BUILD="$ROOT/deps/build/rclone"
 
 command -v go >/dev/null || { echo "error: go toolchain not found" >&2; exit 1; }
 command -v gomobile >/dev/null || {
-  echo "error: gomobile not installed. Run:" >&2
-  echo "  go install golang.org/x/mobile/cmd/gomobile@latest" >&2
+  echo "error: gomobile not installed. CI pins Go 1.26.8 and:" >&2
+  echo "  go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20260908204917-8b95e45f8d3e" >&2
   echo "  gomobile init" >&2
   exit 1
 }
