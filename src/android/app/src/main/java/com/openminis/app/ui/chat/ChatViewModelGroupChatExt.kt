@@ -50,56 +50,80 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         hostSnapshot?.providerTypeRaw,
     )
     val members = groupMembers(config.modelEntries, mainEntry?.id)
-    if (!closing && members.isEmpty()) {
+    val hostPlain = mainEntry?.model?.displayName ?: currentModel?.displayName ?: "Host"
+    val wantsClose = closing || GroupChat.isCloseRequest(userText)
+    if (!wantsClose && members.isEmpty()) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
+        return
+    }
+    if (wantsClose && prior.isEmpty()) {
+        publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_nothing_to_close))
+        groupChatCloseRequested = false
         return
     }
 
     val spoken = prior.toMutableList()
-    if (!closing && !groupChatCloseRequested) {
-        val brief = speakVisible(
+    val contextText = recentContext()
+    val addressed = if (!wantsClose) {
+        GroupChat.addressedName(userText, members.map { it.name } + hostPlain)
+    } else {
+        null
+    }
+    if (!wantsClose && addressed != null && !groupChatCloseRequested) {
+        val member = members.find { it.name == addressed }
+        if (member != null) {
+            spoken += speakMembers(listOf(member), analyzing) {
+                GroupChat.directPrompt(it.name, userText, GroupChat.transcript(prior), contextText)
+            }
+        } else {
+            val answer = speakVisible(
+                speaker = hostName,
+                vendor = hostVendor,
+                snapshot = hostSnapshot,
+                provider = provider,
+                system = GroupChat.memberSystem(hostPlain),
+                user = GroupChat.directPrompt(hostPlain, userText, GroupChat.transcript(prior), contextText),
+                tools = groupTools(provider),
+                placeholder = analyzing,
+                thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
+                    ?: com.openminis.app.data.model.ThinkingLevel.OFF,
+            )
+            if (answer.isNotBlank()) spoken += GroupChat.Line(hostName, answer)
+        }
+    } else if (!wantsClose && !groupChatCloseRequested && members.isNotEmpty()) {
+        val firstRound = speakMembers(members, analyzing) { member ->
+            val index = members.indexOf(member)
+            GroupChat.opinionPrompt(
+                member.name,
+                GroupChat.stance(index),
+                userText,
+                GroupChat.transcript(spoken),
+                contextText,
+            )
+        }
+        spoken += firstRound
+        if (!groupChatCloseRequested && firstRound.size >= 2) {
+            spoken += speakMembers(members, analyzing, deferBubble = true) { member ->
+                GroupChat.replyPrompt(member.name, userText, GroupChat.transcript(spoken))
+            }
+        }
+    }
+
+    if (wantsClose || groupChatCloseRequested) {
+        val summary = speakVisible(
             speaker = hostName,
             vendor = hostVendor,
             snapshot = hostSnapshot,
             provider = provider,
             system = GroupChat.HOST_SYSTEM,
-            user = if (prior.isEmpty()) {
-                GroupChat.framePrompt(userText, recentContext())
-            } else {
-                GroupChat.bridgePrompt(userText, GroupChat.transcript(prior))
-            },
+            user = GroupChat.summaryPrompt(userText, GroupChat.transcript(spoken)),
             tools = emptyList(),
-            placeholder = context.getString(com.openminis.app.R.string.group_chat_framing),
+            placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
         )
-        if (brief.isNotBlank()) spoken += GroupChat.Line(hostName, brief)
-    }
-    if (!closing && !groupChatCloseRequested && members.isNotEmpty()) {
-        val brief = spoken.lastOrNull { it.speaker == hostName }?.text.orEmpty()
-        val firstRound = speakMembers(members, analyzing) { member ->
-            GroupChat.opinionPrompt(member.name, userText, brief, GroupChat.transcript(spoken))
+        if (summary.isNotBlank()) {
+            groupChatClosedAfterId = _messages.value.lastOrNull { it.speakerName == hostName }?.id
+            groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
         }
-        spoken += firstRound
-        if (!groupChatCloseRequested && firstRound.size >= 2) {
-            val replies = speakMembers(members, analyzing) { member ->
-                GroupChat.replyPrompt(member.name, userText, GroupChat.transcript(spoken))
-            }
-            spoken += replies
-        }
-    }
-
-    val summary = speakVisible(
-        speaker = hostName,
-        vendor = hostVendor,
-        snapshot = hostSnapshot,
-        provider = provider,
-        system = GroupChat.HOST_SYSTEM,
-        user = GroupChat.summaryPrompt(userText, GroupChat.transcript(spoken), groupChatCloseRequested || closing),
-        tools = emptyList(),
-        placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
-    )
-    if ((closing || groupChatCloseRequested) && summary.isNotBlank()) {
-        groupChatClosedAfterId = _messages.value.lastOrNull { it.speakerName == hostName }?.id
-        groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
     }
     groupChatCloseRequested = false
 }
@@ -167,35 +191,38 @@ private fun ChatViewModel.groupMembers(
     }
 }
 
+private fun ChatViewModel.groupTools(provider: LLMProvider) = AgentTools.makeAgentTools(
+    supportsImageInput = provider.model.hasImageInput,
+    visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
+        providerRepository, context,
+    ),
+    memoryEnabled = false,
+    subAgentEnabled = false,
+).filter { !SubAgentKind.blocks(SubAgentKind.PLAN, it.name) }
+
 private suspend fun ChatViewModel.speakMembers(
     members: List<GroupMember>,
     analyzing: String,
+    deferBubble: Boolean = false,
     promptFor: (GroupMember) -> String,
 ): List<GroupChat.Line> = supervisorScope {
     val gate = Mutex()
     members.map { member ->
         async {
             if (groupChatCloseRequested) return@async null
-            val tools = AgentTools.makeAgentTools(
-                supportsImageInput = member.provider.model.hasImageInput,
-                visionGroupConfigured = com.openminis.app.tools.VisionGroupResolver.isConfigured(
-                    providerRepository, context,
-                ),
-                memoryEnabled = false,
-                subAgentEnabled = false,
-            ).filter { !SubAgentKind.blocks(SubAgentKind.PLAN, it.name) }
             val text = speakVisible(
                 speaker = member.name,
                 snapshot = member.snapshot,
                 provider = member.provider,
                 system = GroupChat.memberSystem(member.name),
                 user = promptFor(member),
-                tools = tools,
+                tools = groupTools(member.provider),
                 placeholder = analyzing,
                 toolGate = gate,
                 allowPass = true,
                 thinkingLevel = member.thinkingLevel,
                 vendor = member.vendor,
+                deferBubble = deferBubble,
             )
             text.takeIf { it.isNotBlank() }?.let { GroupChat.Line(member.name, it) }
         }
@@ -215,22 +242,24 @@ private suspend fun ChatViewModel.speakVisible(
     thinkingLevel: com.openminis.app.data.model.ThinkingLevel =
         com.openminis.app.data.model.ThinkingLevel.OFF,
     vendor: String = GroupChat.VENDOR_UNKNOWN,
+    deferBubble: Boolean = false,
 ): String {
     if (groupChatCloseRequested && allowPass) return ""
     val id = UUID.randomUUID().toString()
-    upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
+    if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
         speakModel(provider, system, user, tools, toolGate, thinkingLevel) {
-            upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
+            if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
         }
     } catch (e: CancellationException) {
         removeGroupBubble(id)
         throw e
     }
     if (text.isBlank() || (allowPass && GroupChat.isPass(text))) {
-        removeGroupBubble(id)
+        if (!deferBubble) removeGroupBubble(id)
         return ""
     }
+    if (deferBubble) upsertGroupBubble(id, speaker, text, analyzing = false, vendor = vendor)
     val dbId = persistGroupUtterance(speaker, text, snapshot, vendor)
     withContext(Dispatchers.Main) {
         _messages.value = _messages.value.map { message ->

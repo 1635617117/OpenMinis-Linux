@@ -2236,7 +2236,7 @@
     <string name="execution_idle_help">只回收确认空闲的 Shell。后台进程受保护，进程状态不确定时不自动回收。回收后 Shell 内临时变量和工作目录会重置。</string>
     <string name="chat_menu_group_chat">AI 群聊</string>
     <string name="chat_menu_end_group_chat">结束讨论</string>
-    <string name="group_chat_banner">AI 群聊已开启。各模型在本页讨论，工具过程隐藏。</string>
+    <string name="group_chat_banner">AI 群聊已开启。模型按不同立场直接讨论；@模型名只叫一个人。点结束，或发送「总结一下」，才出汇报。</string>
     <string name="group_chat_analyzing">正在分析…</string>
     <string name="group_chat_framing">正在整理问题…</string>
     <string name="group_chat_summarizing">正在汇总讨论…</string>

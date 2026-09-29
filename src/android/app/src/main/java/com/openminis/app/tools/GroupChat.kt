@@ -90,44 +90,68 @@ object GroupChat {
     fun shouldMergeAssistantTurns(prevSpeaker: String?, nextSpeaker: String?): Boolean =
         prevSpeaker.isNullOrBlank() && nextSpeaker.isNullOrBlank()
 
-    fun framePrompt(userText: String, context: String): String = """
-        请只整理这场讨论，不要替其他模型作答，也不要给出最终结论。
-        用用户的语言写 4 到 8 句：问题是什么、已经知道什么、希望大家分别核对什么。
-        不要调用工具。
+    /** Four lenses so parallel speakers do not write the same essay. */
+    fun stance(index: Int): String = STANCES[index.mod(STANCES.size).let { if (it < 0) it + STANCES.size else it }]
+
+    fun isCloseRequest(text: String): Boolean {
+        val compact = compactVendorText(text)
+        if (compact.isEmpty()) return false
+        return CLOSE_REQUESTS.any { request ->
+            val token = compactVendorText(request)
+            compact == token || compact.startsWith(token)
+        }
+    }
+
+    /**
+     * A leading @token addresses one speaker when it fuzzy-matches a name.
+     * Emails and unmatched @words are left as ordinary text.
+     */
+    fun addressedName(text: String, names: List<String>): String? {
+        val token = Regex("""^\s*@([^\s:：,，]{1,40})""").find(text)?.groupValues?.getOrNull(1) ?: return null
+        val compactToken = compactVendorText(token)
+        if (compactToken.length < 2) return null
+        return names.firstOrNull { name ->
+            val compactName = compactVendorText(name)
+            compactName.isNotEmpty() && (
+                compactName == compactToken ||
+                    compactName.startsWith(compactToken) ||
+                    compactToken.startsWith(compactName) ||
+                    (compactToken.length >= 3 && compactName.contains(compactToken))
+                )
+        }
+    }
+
+    fun opinionPrompt(name: String, stance: String, userText: String, prior: String, context: String): String = """
+        你是 $name。本轮你的立场是「$stance」，不要改成和其他人一样的综述。
+        ${stanceGuide(stance)}
+        可以同意或反对已有发言，但必须写出依据。不要扮演其他人。
+        需要查资料时可以调用工具；工具过程不会展示，正文里不要描述工具调用。
+        用用户的语言，80 到 180 字。没有把握的地方直接说不确定。
 
         用户：
         $userText
+
+        已有发言：
+        ${prior.ifBlank { "（还没有其他人发言）" }}
 
         近期上下文：
         ${context.ifBlank { "（无）" }}
     """.trimIndent()
 
-    fun bridgePrompt(userText: String, prior: String): String = """
-        用户补充了新内容。请用 2 到 4 句转述给群聊，指出这次要大家回应的新问题。
-        不要替其他模型作答，不要调用工具。
-
-        用户补充：
-        $userText
-
-        已有讨论：
-        $prior
-    """.trimIndent()
-
-    fun opinionPrompt(name: String, userText: String, brief: String, prior: String): String = """
-        你是 $name。请针对下面的问题发表你自己的看法。
-        可以同意或反对已有发言，但必须写出依据，以及你不确定的地方。
-        不要扮演其他人，不要复述主持人的整理。
-        需要查资料、读文件或检索时可以调用工具；工具过程不会展示，正文里不要描述工具调用。
-        用用户的语言，控制在 180 到 420 字。
+    fun directPrompt(name: String, userText: String, prior: String, context: String): String = """
+        你是 $name。用户点名让你回答，其他模型本轮不发言。
+        直接回答，不要写群聊总结，不要扮演别人。
+        需要查资料可以调用工具，正文不要描述工具过程。
+        用用户的语言，120 到 260 字。
 
         用户：
         $userText
 
-        主持人整理：
-        $brief
+        已有讨论：
+        ${prior.ifBlank { "（无）" }}
 
-        已有发言：
-        ${prior.ifBlank { "（你是第一位发言者）" }}
+        近期上下文：
+        ${context.ifBlank { "（无）" }}
     """.trimIndent()
 
     fun replyPrompt(name: String, userText: String, prior: String): String = """
@@ -142,10 +166,10 @@ object GroupChat {
         $prior
     """.trimIndent()
 
-    fun summaryPrompt(userText: String, prior: String, closed: Boolean): String = """
+    fun summaryPrompt(userText: String, prior: String): String = """
         你是主持人。请把这场群聊整理成给用户的汇报，不要编造没人说过的观点。
-        用用户的语言，分成三段：共识、分歧、建议。
-        ${if (closed) "这是讨论的结束汇报。" else "这是本轮汇报，用户还可以继续补充。"}
+        用用户的语言，分成三段：共识、分歧、建议。分歧要写清是谁和谁不同。
+        这是讨论的结束汇报，不要再向其他模型提问。
         不要调用工具。
 
         用户：
@@ -155,11 +179,29 @@ object GroupChat {
         $prior
     """.trimIndent()
 
-    const val HOST_SYSTEM = "你是 AI 群聊的主持人。只整理问题和汇报，不扮演其他模型，不编造他人没说过的话。"
+    const val HOST_SYSTEM = "你是 AI 群聊的主持人。只在讨论结束时汇报，不扮演其他模型，不编造他人没说过的话。"
+
+    private val STANCES = listOf("主张", "质疑", "补漏", "落地")
+
+    private val CLOSE_REQUESTS = listOf(
+        "结束讨论",
+        "结束这场讨论",
+        "总结一下",
+        "请总结",
+        "出个结论",
+        "收束讨论",
+    )
+
+    private fun stanceGuide(stance: String): String = when (stance) {
+        "质疑" -> "指出最危险的假设或错误，不要重复别人的结论。"
+        "补漏" -> "只补别人没覆盖的边界、成本或失败场景。"
+        "落地" -> "写出下一步可以执行的做法，不要再展开原则。"
+        else -> "给出一个明确主张：你推荐什么，以及为什么。"
+    }
 
     fun memberSystem(name: String): String = """
         你是 $name，正在和其他模型的同一场群聊里发言。
         只代表你自己。可以调用分析工具，但用户只能看到你的最终发言，看不到工具过程。
-        正文不要出现工具名、参数或“正在调用”。没有新观点时只回复 PASS。
+        正文不要出现工具名、参数或“正在调用”。只有补充轮明确要求时，才用 PASS 表示没有新观点。
     """.trimIndent()
 }

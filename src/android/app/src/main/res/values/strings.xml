@@ -2413,7 +2413,7 @@
     <string name="execution_idle_help">Only shells confirmed idle are reclaimed. Background processes are protected; uncertain process state prevents automatic reclamation. Shell-local variables and working directory reset after reclamation.</string>
     <string name="chat_menu_group_chat">AI group chat</string>
     <string name="chat_menu_end_group_chat">End discussion</string>
-    <string name="group_chat_banner">AI group chat is on. Models discuss on this page; tool calls stay hidden.</string>
+    <string name="group_chat_banner">AI group chat is on. Models speak from different stances. @Name asks one model. End discussion, or send “总结一下”, for the report.</string>
     <string name="group_chat_analyzing">Analyzing…</string>
     <string name="group_chat_framing">Framing the question…</string>
     <string name="group_chat_summarizing">Summarizing the discussion…</string>

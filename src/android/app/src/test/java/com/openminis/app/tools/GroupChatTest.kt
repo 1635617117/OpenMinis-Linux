@@ -51,12 +51,25 @@ class GroupChatTest {
 
     @Test
     fun promptsKeepTheUserQuestionAndPriorSpeakers() {
-        val opinion = GroupChat.opinionPrompt("Gemini", "分析这份财报", "主持人：核对收入", "DeepSeek：收入口径不一致")
+        val opinion = GroupChat.opinionPrompt("Gemini", "质疑", "分析这份财报", "DeepSeek：收入口径不一致", "")
         assertTrue(opinion.contains("分析这份财报"))
         assertTrue(opinion.contains("DeepSeek：收入口径不一致"))
-        val summary = GroupChat.summaryPrompt("分析这份财报", opinion, closed = true)
+        assertTrue(opinion.contains("质疑"))
+        val summary = GroupChat.summaryPrompt("分析这份财报", opinion)
         assertTrue(summary.contains("共识"))
         assertTrue(summary.contains("这是讨论的结束汇报"))
         assertEquals("speaker", GroupChat.SPEAKER_PART)
+    }
+
+    @Test
+    fun mentionAddressesOneSpeakerAndCloseIsExplicit() {
+        assertEquals("DeepSeek V3", GroupChat.addressedName("@deepseek 你怎么看", listOf("Gemini", "DeepSeek V3")))
+        assertEquals(null, GroupChat.addressedName("邮件是 a@b.com", listOf("Gemini")))
+        assertTrue(GroupChat.isCloseRequest("总结一下"))
+        assertTrue(GroupChat.isCloseRequest("请总结这场讨论"))
+        assertFalse(GroupChat.isCloseRequest("先别总结，继续讨论风险"))
+        assertEquals("主张", GroupChat.stance(0))
+        assertEquals("质疑", GroupChat.stance(1))
+        assertEquals("主张", GroupChat.stance(4))
     }
 }
