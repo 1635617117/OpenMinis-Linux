@@ -1,5 +1,16 @@
 package com.openminis.app.service
 
+internal enum class NotificationSurface {
+    /** AOSP SystemUI. Tool identity is stripped; run boundaries still publish. */
+    PROMOTED,
+    /**
+     * Forked SystemUI. One static row per run. A chronometer, progress bar,
+     * or promoted template is what their island re-inflates until SystemUI dies.
+     */
+    OEM_QUIET,
+    PLAIN,
+}
+
 /** The immutable, *visible* notification state. No streaming text or wall-clock ticks. */
 internal data class ForegroundNotificationState(
     val activeCount: Int,
@@ -9,12 +20,25 @@ internal data class ForegroundNotificationState(
     val finishedAtMs: Long?,
     val promoted: Boolean,
     val subtitle: String,
+    val surface: NotificationSurface = NotificationSurface.PLAIN,
 ) {
     val completed: Boolean get() = activeCount == 0 && finishedAtMs != null
 
-    /** The chip represents the agent run, not individual tools within it. */
-    fun stableForPromotion(): ForegroundNotificationState =
-        if (promoted) copy(toolName = null, isToolRunning = false) else this
+    /**
+     * Collapse fields that must not cause a SystemUI rebind.
+     * OEM rows also ignore session-count and subtitle churn: those are
+     * cosmetic, and each rebind is another island inflation.
+     */
+    fun normalized(): ForegroundNotificationState = when (surface) {
+        NotificationSurface.PROMOTED -> copy(toolName = null, isToolRunning = false)
+        NotificationSurface.OEM_QUIET -> copy(
+            activeCount = if (activeCount > 0) 1 else 0,
+            toolName = null,
+            isToolRunning = false,
+            subtitle = if (activeCount > 0) "running" else "idle",
+        )
+        NotificationSurface.PLAIN -> this
+    }
 }
 
 /**

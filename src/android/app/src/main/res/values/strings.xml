@@ -1525,6 +1525,7 @@
     <!-- [T-android-dynamic-island] Android 16 Live Updates / dynamic-island toggle. -->
     <string name="settings_dynamic_island">Dynamic Island (Live Updates)</string>
     <string name="settings_dynamic_island_footer">Show live Agent status on the Android 16 status chip. When on, this replaces the floating overlay so you don\'t see two status indicators at once.</string>
+    <string name="settings_dynamic_island_oem_footer">This system\'s own island rebuilds timers, progress bars and live-update notifications inside the system UI. Left running, that leaks until the system UI restarts. The switch still shows task status and replaces the floating overlay, but does not send a timer, progress bar or promotion flag.</string>
     <string name="settings_dynamic_island_unsupported">Your current system version doesn\'t support Live Updates yet (requires Android 16+ with the feature enabled).</string>
 
     <!-- T182 agent loop section i18n -->

@@ -24,8 +24,12 @@ class ForegroundNotificationPolicyTest {
 
     @Test fun promotedToolChangesNeverRebuildChip() {
         val policy = ForegroundNotificationPolicy()
-        val first = state(tool = "shell_execute").stableForPromotion()
-        val browser = state(tool = "browser_use").stableForPromotion()
+        val first = state(tool = "shell_execute")
+            .copy(surface = NotificationSurface.PROMOTED)
+            .normalized()
+        val browser = state(tool = "browser_use")
+            .copy(surface = NotificationSurface.PROMOTED)
+            .normalized()
         assertEquals(first, browser)
         policy.markPublished(first, 1_000L)
         assertEquals(ForegroundNotificationPolicy.Decision.Skip, policy.decide(browser, 60_000L))
@@ -66,5 +70,31 @@ class ForegroundNotificationPolicyTest {
         val next = state(tool = "browser_use")
         assertEquals(ForegroundNotificationPolicy.Decision.Publish, policy.decide(next, 0L))
         assertEquals(ForegroundNotificationPolicy.Decision.Publish, policy.decide(next, 50_000L))
+    }
+
+    @Test fun oemQuietRowDoesNotRepublishForToolCountOrSubtitle() {
+        val policy = ForegroundNotificationPolicy()
+        val running = state(tool = "shell_execute", subtitle = "1 task")
+            .copy(surface = NotificationSurface.OEM_QUIET)
+            .normalized()
+        val later = state(active = 4, tool = "browser_use", subtitle = "4 tasks")
+            .copy(surface = NotificationSurface.OEM_QUIET)
+            .normalized()
+        assertEquals(running, later)
+        policy.markPublished(running, 1_000L)
+        assertEquals(ForegroundNotificationPolicy.Decision.Skip, policy.decide(later, 3_600_000L))
+    }
+
+    @Test fun oemQuietStillPublishesRunStartAndCompletion() {
+        val policy = ForegroundNotificationPolicy()
+        val running = state().copy(surface = NotificationSurface.OEM_QUIET).normalized()
+        policy.markPublished(running, 1_000L)
+        val done = state(active = 0, finished = 9_000L, promoted = false)
+            .copy(surface = NotificationSurface.OEM_QUIET)
+            .normalized()
+        assertEquals(ForegroundNotificationPolicy.Decision.Publish, policy.decide(done, 9_100L))
+        policy.markPublished(done, 9_100L)
+        val nextRun = state(started = 20_000L).copy(surface = NotificationSurface.OEM_QUIET).normalized()
+        assertEquals(ForegroundNotificationPolicy.Decision.Publish, policy.decide(nextRun, 20_000L))
     }
 }

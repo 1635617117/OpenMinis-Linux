@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.13-linux
+
+- versionCode **213**
+- 后台灵动岛在 HyperOS、ZUI 及其他魔改 SystemUI 上不再投递计时器、进度条、ProgressStyle 和提升标记。这些系统会把这类模板收进自己的岛，并在系统界面进程里反复建视图，开久了就会把系统界面撑崩重启。任务状态改为一条稳定通知；原版 Android 16 仍走实时胶囊。状态栏图标改为应用内遮罩，不再使用框架彩色菜单图标。
+
+---
+
 # OpenMinis-Linux 2.0.12-linux
 
 - versionCode **212**

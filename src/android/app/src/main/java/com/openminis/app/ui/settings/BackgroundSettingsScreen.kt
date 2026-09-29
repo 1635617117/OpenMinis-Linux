@@ -289,10 +289,12 @@ fun BackgroundSettingsScreen(onBack: () -> Unit) {
                 onCheckedChange = { backgroundRepo.setDynamicIslandEnabled(it) },
             )
             BgFooter(
-                if (!dynamicIslandCapable) {
-                    stringResource(R.string.settings_dynamic_island_unsupported)
-                } else {
-                    stringResource(R.string.settings_dynamic_island_footer)
+                when {
+                    !com.openminis.app.service.DynamicIslandSupport.allowsLiveNotificationTemplates() ->
+                        stringResource(R.string.settings_dynamic_island_oem_footer)
+                    !dynamicIslandCapable ->
+                        stringResource(R.string.settings_dynamic_island_unsupported)
+                    else -> stringResource(R.string.settings_dynamic_island_footer)
                 },
             )
 

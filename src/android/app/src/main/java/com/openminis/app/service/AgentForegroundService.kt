@@ -30,7 +30,9 @@ import kotlinx.coroutines.launch
 
 /**
  * Foreground service that displays a persistent notification while agent sessions
- * are actively running. Shows session count, current tool name, and elapsed time.
+ * are actively running. On AOSP the row can show a tool name and a chronometer.
+ * On a forked SystemUI the row is a single static status: a ticking or promoted
+ * template is what their island leaks until the system UI restarts.
  */
 class AgentForegroundService : Service() {
 
@@ -309,21 +311,39 @@ class AgentForegroundService : Service() {
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Minis Ultra")
             .setContentText("Starting")
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setSmallIcon(R.drawable.ic_notification_status)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setUsesChronometer(false)
             .build()
 
-    private fun applyForeground(notification: Notification): Boolean {
+    private var foregroundAnchored = false
+
+    private fun applyForeground(notification: Notification, reanchor: Boolean = false): Boolean {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-                )
+            // Forked SystemUI ignores a later notify() on a foreground-service
+            // row, so a real run boundary still goes through startForeground.
+            // Those publishes are start/stop only; cosmetic updates never reach
+            // this method. AOSP tool-name updates use notify() and do not
+            // rebind the chip.
+            val forceStart = reanchor || !foregroundAnchored ||
+                !SystemUiHost.allowsLiveNotificationTemplates()
+            if (forceStart) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+                foregroundAnchored = true
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                // Repeating startForeground is a new focus-notification bind on
+                // HyperOS / ZUI. Same-id notify updates the shade without it.
+                getSystemService(NotificationManager::class.java)
+                    ?.notify(NOTIFICATION_ID, notification)
             }
             true
         } catch (t: Throwable) {
@@ -387,6 +407,7 @@ class AgentForegroundService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        foregroundAnchored = false
         notifyHandler.removeCallbacksAndMessages(null)
         releaseWakeLock()
         try {
@@ -684,11 +705,19 @@ class AgentForegroundService : Service() {
         val timeline = SessionActivityTracker.notificationTimeline.value
         val active = timeline.activeCount
         val app = (applicationContext as? MinisApp)?.takeIf { it.subsystemsReady() }
-        val promoted = active > 0 && DynamicIslandSupport.isDynamicIslandActive(
-            this, app?.backgroundSettingsRepository?.dynamicIslandEnabled?.value == true,
+        val userWantsIsland = app?.backgroundSettingsRepository?.dynamicIslandEnabled?.value == true
+        // Forked SystemUI must never see a live template, even if the user
+        // left the island switch off. HyperOS still lifts an IMPORTANCE_LOW
+        // ongoing row into its own island.
+        val liveTemplates = SystemUiHost.allowsLiveNotificationTemplates()
+        val promoted = liveTemplates && active > 0 && DynamicIslandSupport.isDynamicIslandActive(
+            this, userWantsIsland,
         )
-        // A live-update chip does not show ephemeral tool output or elapsed
-        // text. The system chronometer renders time without posting anything.
+        val surface = when {
+            !liveTemplates -> NotificationSurface.OEM_QUIET
+            promoted -> NotificationSurface.PROMOTED
+            else -> NotificationSurface.PLAIN
+        }
         val subtitle = when {
             active == 0 -> getString(R.string.notif_in_session)
             active == 1 -> getString(R.string.notif_one_task_running)
@@ -702,7 +731,8 @@ class AgentForegroundService : Service() {
             finishedAtMs = timeline.finishedAtMs?.takeIf { active == 0 },
             promoted = promoted,
             subtitle = subtitle,
-        ).stableForPromotion()
+            surface = surface,
+        ).normalized()
     }
 
     /** All status updates, mode transitions and OEM re-anchors share this path. */
@@ -719,7 +749,7 @@ class AgentForegroundService : Service() {
             ForegroundNotificationPolicy.Decision.Publish -> {
                 try {
                     val notification = buildNotification(state)
-                    if (applyForeground(notification)) {
+                    if (applyForeground(notification, reanchor = reanchor)) {
                         notificationPolicy.markPublished(state, SystemClock.elapsedRealtime())
                         Log.d(TAG, "status posted promoted=${state.promoted} active=${state.activeCount} completed=${state.completed}")
                     }
@@ -891,6 +921,10 @@ class AgentForegroundService : Service() {
             R.plurals.bg_service_sessions, sessionCount, sessionCount,
         )
 
+        if (state.surface == NotificationSurface.OEM_QUIET) {
+            return buildOemQuietNotification(isCompleted, pendingIntent, stopPendingIntent)
+        }
+
         // The row only renders the stable task snapshot: transient tool output
         // stays in the in-app overlay. System chronometer owns elapsed time.
         val toolName = state.toolName
@@ -925,7 +959,7 @@ class AgentForegroundService : Service() {
                 titleText = titleText,
                 collapsedText = collapsedText,
                 shortCritical = shortCritical,
-                smallIcon = smallIconRes(toolName, isCompleted),
+                smallIcon = statusIconRes(isCompleted),
                 contentIntent = pendingIntent,
                 stopIntent = stopPendingIntent,
                 runWhenMs = runWhenMs,
@@ -940,7 +974,7 @@ class AgentForegroundService : Service() {
         }
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(smallIconRes(toolName, isCompleted))
+            .setSmallIcon(statusIconRes(isCompleted))
             .setContentTitle(titleText)
             .setContentText(collapsedText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(collapsedText))
@@ -957,7 +991,7 @@ class AgentForegroundService : Service() {
         // no Stop once there is nothing left to stop.
         if (!isCompleted) {
             builder.addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
+                R.drawable.ic_notification_status,
                 getString(R.string.bg_service_stop_action),
                 stopPendingIntent,
             )
@@ -966,11 +1000,11 @@ class AgentForegroundService : Service() {
                 action = ACTION_INTERRUPT
             }
             val interruptPi = PendingIntent.getService(
-                this, 1, interruptIntent,
+                this, 2, interruptIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
             builder.addAction(
-                android.R.drawable.ic_menu_manage, "Pause", interruptPi,
+                R.drawable.ic_notification_status, "Pause", interruptPi,
             )
         }
 
@@ -1017,7 +1051,7 @@ class AgentForegroundService : Service() {
         // indeterminate+zero-progress can crash OEM SystemUI on promotion.
         val progressStyle = Notification.ProgressStyle()
             .addProgressSegment(Notification.ProgressStyle.Segment(100))
-            .setProgressTrackerIcon(Icon.createWithResource(this, smallIcon))
+            .setProgressTrackerIcon(Icon.createWithResource(this, R.drawable.ic_notification_status))
             .setProgressIndeterminate(false)
             .setProgress(0)
 
@@ -1039,7 +1073,7 @@ class AgentForegroundService : Service() {
 
         builder.addAction(
             Notification.Action.Builder(
-                Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+                Icon.createWithResource(this, R.drawable.ic_notification_status),
                 getString(R.string.bg_service_stop_action),
                 stopIntent,
             ).build(),
@@ -1101,29 +1135,51 @@ class AgentForegroundService : Service() {
     }
 
     /**
-     * T-bg-overlay phase 1: pick a system small-icon hint per tool kind.
-     * Notification small icons must be tintable monochrome — we use
-     * built-in framework drawables instead of pulling in app icon
-     * resources to avoid the Android < 24 "white square" fallback for
-     * vector drawables. The default (`ic_menu_manage`) preserves the
-     * pre-T pixel-identical look for idle / between-turn rebuilds.
+     * Status-bar icons must be an alpha mask from this app. Framework
+     * `ic_menu_*` drawables are color bitmaps; OEM SystemUI decodes a new
+     * one every time it rebuilds the island. Completed runs use the check.
      */
-    /**
-     * [T-android-live-update-completed] Small icon for the ongoing notification.
-     * Once the task has finished, show a checkmark instead of a tool glyph — the
-     * icon is the most glanceable part of the Live Update chip, and leaving the
-     * generic wrench there made a completed task read as still-running.
-     */
-    private fun smallIconRes(toolName: String?, isCompleted: Boolean): Int =
-        if (isCompleted) R.drawable.ic_notification_completed else toolSmallIconRes(toolName)
+    private fun statusIconRes(isCompleted: Boolean): Int =
+        if (isCompleted) R.drawable.ic_notification_completed else R.drawable.ic_notification_status
 
-    private fun toolSmallIconRes(toolName: String?): Int = when (toolName) {
-        "shell_execute" -> android.R.drawable.ic_menu_edit
-        "file_read", "read_image" -> android.R.drawable.ic_menu_view
-        "file_write", "file_edit" -> android.R.drawable.ic_menu_edit
-        "browser_use" -> android.R.drawable.ic_menu_compass
-        "memory_write", "memory_get" -> android.R.drawable.ic_menu_save
-        "web_search" -> android.R.drawable.ic_menu_search
-        else -> android.R.drawable.ic_menu_manage
+    /**
+     * Static ongoing row for HyperOS, ZUI and every other forked SystemUI.
+     * No chronometer, no progress, no promoted style, no changing text.
+     * Their island can mirror this once; it has nothing left to tick.
+     */
+    private fun buildOemQuietNotification(
+        isCompleted: Boolean,
+        contentIntent: PendingIntent,
+        stopIntent: PendingIntent,
+    ): Notification {
+        val title = if (isCompleted) {
+            getString(R.string.bg_service_notification_title_completed)
+        } else {
+            getString(R.string.bg_service_notification_title)
+        }
+        val text = if (isCompleted) {
+            getString(R.string.bg_service_notification_title_completed)
+        } else {
+            getString(R.string.notif_one_task_running)
+        }
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setSmallIcon(statusIconRes(isCompleted))
+            .setContentTitle(title)
+            .setContentText(text)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setShowWhen(false)
+            .setUsesChronometer(false)
+            .setContentIntent(contentIntent)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+        if (!isCompleted) {
+            builder.addAction(
+                R.drawable.ic_notification_status,
+                getString(R.string.bg_service_stop_action),
+                stopIntent,
+            )
+        }
+        return builder.build()
     }
 }

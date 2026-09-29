@@ -61,4 +61,13 @@ object DynamicIslandSupport {
      */
     fun isDynamicIslandActive(context: Context, userEnabled: Boolean): Boolean =
         userEnabled && isDynamicIslandCapable(context)
+
+    /**
+     * False on HyperOS, ZUI and every other forked SystemUI. Those forks
+     * report the Live Updates permission as granted, then re-inflate the
+     * promoted template in their own island until SystemUI is killed.
+     * Callers must post a static row instead of [isDynamicIslandActive].
+     */
+    fun allowsLiveNotificationTemplates(): Boolean =
+        SystemUiHost.allowsLiveNotificationTemplates()
 }
