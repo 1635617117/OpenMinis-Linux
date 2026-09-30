@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -33,6 +34,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import com.openminis.app.ui.components.MinisCenterTopBar
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -211,6 +213,7 @@ private fun LogsBody(
     onDeleteAll: () -> Unit,
 ) {
     val anyFiles = dailyLogs.isNotEmpty() || crashLogs.isNotEmpty()
+    var showContextSnapshot by remember { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -226,6 +229,49 @@ private fun LogsBody(
                 checked = loggingEnabled,
                 onCheckedChange = onToggleLogging,
                 showDivider = false,
+            )
+        }
+
+        // [T-context-assembly-preview] 上下文组装快照入口：最近一次发给模型
+        // 的 system prompt 构成明细+全文，排障"模型实际收到什么"。
+        SettingsSection(header = "上下文组装快照") {
+            SettingsRow(
+                title = "查看最近一次上下文组装",
+                subtitle = "按来源列出大小与全文（offloads/context-assembly/latest.md）",
+                onClick = { showContextSnapshot = true },
+                showDivider = false,
+            )
+        }
+
+        if (showContextSnapshot) {
+            val snapshot = com.openminis.app.agent.ContextAssemblySnapshot.latest
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showContextSnapshot = false },
+                title = { Text("上下文组装快照") },
+                text = {
+                    val body = snapshot?.let { s ->
+                        buildString {
+                            append("总字符：").append(s.totalChars).append("\n\n")
+                            s.sections.forEach { (label, len) ->
+                                append("• ").append(len).append(" 字符 — ").append(label).append("\n")
+                            }
+                            append("\n（全文见 offloads/context-assembly/latest.md）")
+                        }
+                    } ?: "还没有捕获过上下文组装（发一次消息后生成）。"
+                    androidx.compose.foundation.rememberScrollState().let { scroll ->
+                        Text(
+                            text = body,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(scroll),
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showContextSnapshot = false }) { Text("关闭") }
+                },
             )
         }
 

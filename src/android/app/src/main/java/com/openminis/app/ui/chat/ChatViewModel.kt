@@ -2961,10 +2961,15 @@ class ChatViewModel(
         // Rows trimmed out of the model window stay as a clipped excerpt.
         // A compact summary, when present, still replaces the older prefix;
         // this digest covers what this process actually dropped.
+        // [T-message-transformers] 发送前清洗 assistant 文本里的思考残留。
         return HistoryDigest.inject(
             steered,
             HistoryDigest.render(llmDigestLines, llmDigestOmitted),
-        )
+        ).map { msg ->
+            if (msg.role == com.openminis.app.data.model.LLMMessage.Role.ASSISTANT && msg.content.isNotBlank()) {
+                msg.copy(content = com.openminis.app.agent.MessageTransformerChain.apply(msg.content))
+            } else msg
+        }
     }
 
 
