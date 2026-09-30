@@ -2336,7 +2336,10 @@ class ProviderRepository(private val context: Context) {
      * instances without a token, which must stay unauthenticated).
      */
     fun usableApiKey(instance: ProviderInstance): String? =
-        loadApiKey(instance.id) ?: if (instance.allowsEmptyAPIKey) "" else null
+        // [T-key-rotation] 环境变量 OPENMINIS_KEYS_<id> 提供逗号分隔密钥池时轮换取用。
+        com.openminis.app.provider.ProviderKeyRotation.next(instance.id)
+            ?: loadApiKey(instance.id)
+            ?: if (instance.allowsEmptyAPIKey) "" else null
 
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()

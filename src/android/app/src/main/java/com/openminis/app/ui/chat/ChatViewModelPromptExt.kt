@@ -301,5 +301,11 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         if (identitySection.contains("Personality (from")) {
             append("\n\nPersonality reminder: the identity/persona block at the top of this prompt is BINDING for this turn, including existing conversations whose earlier assistant replies used a different voice. Those earlier replies are history, not the current character. Match the Personality block's voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific.")
         }
+        // [T-context-assembly-preview] 每次组装落快照：构成明细+全文，
+        // 调试"模型实际收到了什么"直接看 offloads/context-assembly/latest.md。
+        com.openminis.app.agent.ContextAssemblySnapshot.capture(
+            toString(),
+            sessionId,
+        )
     }
 }

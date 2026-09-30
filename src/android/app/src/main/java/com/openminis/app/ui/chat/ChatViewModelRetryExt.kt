@@ -125,6 +125,25 @@ fun ChatViewModel.retryLast() {
             val trailingAssistantSortOrder = dbMessages
                 .lastOrNull { it.role == "assistant" }?.sortOrder
             if (trailingAssistantSortOrder != null) {
+                // [T-answer-versions] 删除前把旧回答归档：重试后的新回答覆盖，
+                // 但上一版不会凭空消失，可在 offloads/answer-versions/ 找回。
+                val doomed = dbMessages.lastOrNull { it.sortOrder >= trailingAssistantSortOrder && it.role == "assistant" }
+                if (doomed != null && doomed.partsJson.isNotBlank()) {
+                    runCatching {
+                        val dir = java.io.File("/var/minis/workspace/offloads/answer-versions")
+                        dir.mkdirs()
+                        val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", java.util.Locale.US)
+                            .format(java.util.Date())
+                        val json = org.json.JSONObject()
+                            .put("sessionId", sid)
+                            .put("sortOrder", doomed.sortOrder)
+                            .put("messageId", doomed.id)
+                            .put("role", doomed.role)
+                            .put("partsJson", doomed.partsJson)
+                            .put("reasoningContent", doomed.reasoningContent.orEmpty())
+                        java.io.File(dir, "${sid}_${doomed.sortOrder}_$stamp.json").writeText(json.toString(2))
+                    }
+                }
                 chatRepository.deleteMessagesAfter(sid, trailingAssistantSortOrder)
                 AppLogger.info(
                     ChatViewModel.TAG_STREAM,

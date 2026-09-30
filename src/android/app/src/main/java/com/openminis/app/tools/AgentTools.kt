@@ -38,6 +38,7 @@ object AgentTools {
         add(ListDirTool.definition())
         add(GrepTool.definition())
         add(GlobTool.definition())
+        add(UiReadTool.definition())
         if (supportsImageInput || visionGroupConfigured) {
             add(ReadImageTool.definition())
         }
@@ -247,9 +248,10 @@ Each task prompt MUST be self-contained with ## Task / ## Expected result / ## C
         parameters = mapOf(
             "tool_title" to AgentToolParam("string", "A concise 5-10 word summary of what this tool call does, shown to the user (e.g. 'Save user preference for Python', 'Note today's project context'). Use the same language as the user."),
             "content" to AgentToolParam("string", "The memory content to write. Use concise Markdown with a short heading (## Topic) and context about what was done/learned."),
+            "revision" to AgentToolParam("string", "Optional. Pass the current log revision (reported at the end of memory_get) to make the write conflict-safe; the write fails with MEMORY_CONFLICT instead of overwriting a concurrent update."),
         ),
         required = listOf("tool_title", "content"),
-        propertyOrdering = listOf("tool_title", "content"),
+        propertyOrdering = listOf("tool_title", "content", "revision"),
     )
 
     // Aligned with iOS AIChatViewModel.swift:5069-5078

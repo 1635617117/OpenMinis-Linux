@@ -124,9 +124,12 @@ class MemoryRepository(private val memoryDir: File) {
     /**
      * Append a timestamped entry to today's daily log.
      * New entries are prepended (newest first).
-     * Returns a success/error message string.
+     *
+     * [T-memory-revision] [expectedRevision] 启用并发写入冲突检测（Eta 式 SHA-256）：
+     * 非空时先校验现有文件内容哈希，不匹配返回 MEMORY_CONFLICT，不覆盖并发更新。
+     * 写入成功返回新 revision（哈希前 16 位）。
      */
-    fun writeMemory(content: String): String {
+    fun writeMemory(content: String, expectedRevision: String? = null): String {
         if (content.isBlank()) return "Error: Missing required 'content' parameter"
 
         val fileName = "${IsoTime.formatLocalDate()}.md"
@@ -136,17 +139,36 @@ class MemoryRepository(private val memoryDir: File) {
         val entry = "<!-- $timestamp -->\n$content\n\n"
 
         val existing = if (file.exists()) file.readText() else ""
+        if (expectedRevision != null) {
+            val actual = sha256Hex(existing)
+            if (!actual.startsWith(expectedRevision)) {
+                return "Error: MEMORY_CONFLICT — 日志文件已被并发更新（期望 revision $expectedRevision，实际 ${actual.take(16)}…）。请先 memory_get 重新读取后再写。"
+            }
+        }
         val newContent = entry + existing
 
         return try {
             file.writeText(newContent)
-            Log.i(TAG, "Memory written to $fileName (${content.length} chars)")
-            "Memory saved to $fileName (${content.length} chars)"
+            val newRevision = sha256Hex(newContent).take(16)
+            Log.i(TAG, "Memory written to $fileName (${content.length} chars, revision $newRevision)")
+            "Memory saved to $fileName (${content.length} chars, revision $newRevision)"
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write memory", e)
             "Error writing memory: ${e.message}"
         }
     }
+
+    /** [T-memory-revision] 今日日志文件当前 revision（不存在返回 null）。 */
+    fun currentDailyRevision(): String? {
+        val file = File(memoryDir, "${IsoTime.formatLocalDate()}.md")
+        if (!file.exists()) return null
+        return sha256Hex(file.readText()).take(16)
+    }
+
+    private fun sha256Hex(s: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(s.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     // -- memory_get --
 

@@ -13,6 +13,7 @@ import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.LLMProvider
+import com.openminis.app.provider.firstEventWatchdog
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.ToolExecutionResult
@@ -37,6 +38,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
     goalExecutionRun: Boolean = false,
 ) {
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
+    // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
+    // 成功时 finish(DONE)；失败路径不落 FINISH，留 RUNNING 由
+    // GenerationRunStore.abandoned() 在下次启动扫描时标记。
+    val generationRunId = com.openminis.app.agent.GenerationRunStore.start(
+        activeSessionId,
+        provider.model.displayName,
+    )
     // [T-android-mem-probe-trust] Send-path context shape. The existing
     // `messages-shape` probe only runs on session LOAD, so the 2026-08-15
     // log described the session as it was opened, never as it was sent —
@@ -506,8 +514,14 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // so we catch at collect level and unwrap.
         var collectDone = false
         var retryAttempt = 0  // per-provider; reset when falling back to the next member
+        // [T-key-breaker] 熔断桶按 provider+模型维度算，整个 while 循环共享。
+        var breakerBucket = ""
         while (!collectDone) {
             try {
+                breakerBucket = com.openminis.app.provider.ProviderKeyGate.key(
+                    currentProvider.javaClass.simpleName,
+                    currentProvider.model.displayName,
+                )
                 // [T-android-enhanced-cache] Stamp the per-turn Enhanced
                 // Cache flag onto the active provider here — the single
                 // choke point every turn passes through, regardless of how
@@ -515,39 +529,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // Non-Anthropic providers ignore it (cast fails silently).
                 (currentProvider as? com.openminis.app.provider.anthropic.AnthropicProvider)
                     ?.enhancedCache = _enhancedCacheEnabled.value
-                // [T-STALL-DIAG] First-chunk watchdog. The reported symptom
-                // is "new session shows thinking… forever, UI empty, stop
-                // button still armed" — which is indistinguishable, in the
-                // current logs, between (a) the request never left, (b) it
-                // left and the provider never answered, and (c) it answered
-                // and the chunks were routed to the wrong session's UI.
-                //
-                // Stamp the request as it goes out, then have a detached
-                // watchdog report every 10s while NOT ONE chunk has arrived.
-                // Silence here + no network error = the request is hung
-                // below the provider (DNS/TCP/TLS/read), which no existing
-                // log covers. `firstChunkSeen` is flipped in the collector.
-                val streamStartMs = android.os.SystemClock.elapsedRealtime()
-                val firstChunkSeen = java.util.concurrent.atomic.AtomicBoolean(false)
-                val diagSid = activeSessionId
-                println(
-                    "[T-STALL-DIAG] stream REQUEST-OUT sid=$diagSid turn=$turn " +
-                        "provider=${currentProvider.javaClass.simpleName} " +
-                        "historySize=${agentHistory.size}",
-                )
-                val firstChunkWatchdog = viewModelScope.launch(Dispatchers.IO) {
-                    var waited = 0L
-                    while (!firstChunkSeen.get()) {
-                        kotlinx.coroutines.delay(10_000L)
-                        if (firstChunkSeen.get()) break
-                        waited += 10_000L
-                        println(
-                            "[T-STALL-DIAG] stream NO-FIRST-CHUNK sid=$diagSid turn=$turn " +
-                                "waitedMs=$waited provider=${currentProvider.javaClass.simpleName} " +
-                                "— request sent, provider has returned NOTHING (not even message_start)",
-                        )
-                    }
-                }
                 try {
                 // Route through effectiveAgentHistory() so a populated
                 // [_compactSummary] is prepended as a `<context-summary>`
@@ -572,22 +553,17 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     requestGoalPrompt,
                     appendNewUser = goalExecutionRun && turn == 0,
                 )
+                // [T-first-event-watchdog] A hung relay below the provider
+                // never throws — the stream below will cancel itself and surface
+                // a TransientError, letting the existing retry chain take over.
+                val firstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
                 currentProvider.streamMessage(
                     applyRequestImageBudget(requestHistory),
                     systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
                     temperature = samplingTemperature(_activeEntryId.value),
                     tools = agentTools,
                     thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
-                ).collect { chunk ->
-            // [T-STALL-DIAG] Mark first byte back from the provider and log
-            // the time-to-first-chunk once per turn.
-            if (firstChunkSeen.compareAndSet(false, true)) {
-                println(
-                    "[T-STALL-DIAG] stream FIRST-CHUNK sid=$diagSid turn=$turn " +
-                        "ttfbMs=${android.os.SystemClock.elapsedRealtime() - streamStartMs} " +
-                        "kind=${chunk.javaClass.simpleName}",
-                )
-            }
+                ).firstEventWatchdog(firstEventTimeoutMs).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.ThinkingDelta -> {
                     turnThinking.append(chunk.text)
@@ -951,22 +927,16 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 lastFileToolInputMs = 0L
                 lastOtherToolInputMs = 0L
                 collectDone = true
+                com.openminis.app.agent.GenerationRunStore.finish(generationRunId, ok = true)
+                // [T-key-breaker] 一轮正常收尾即清空该桶的失败计数。
+                com.openminis.app.provider.ProviderKeyGate.recordSuccess(breakerBucket)
                 // Stream completed without error — clear any lingering retry UI state.
                 if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
                     _autoRetryAttempt.value = 0
                     _autoRetryCountdown.value = 0
                 }
                 } finally {
-                    // [T-STALL-DIAG] Always stop the first-chunk watchdog —
-                    // success, error, or cancellation — so it can never
-                    // outlive its turn and spam the log.
-                    firstChunkWatchdog.cancel()
-                    if (!firstChunkSeen.get()) {
-                        println(
-                            "[T-STALL-DIAG] stream ENDED-WITHOUT-CHUNK sid=$diagSid turn=$turn " +
-                                "elapsedMs=${android.os.SystemClock.elapsedRealtime() - streamStartMs}",
-                        )
-                    }
+                    // [T-first-event-watchdog] The operator cancels itself; nothing to clean here.
                 }
             } catch (e: Exception) {
                 if (e is CancellationException && e.cause == null) throw e  // real job cancellation
@@ -984,12 +954,18 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     actual is com.openminis.app.data.model.LLMError.TransientError ||
                     actual is com.openminis.app.data.model.LLMError.RateLimited ||
                     is5xx) && !isPermanentCapacity
+                // [T-key-breaker] 冷却熔断：同一桶连续失败 3 次 → 5 分钟内跳过同源重试，
+                // 直接交给 fallback 成员，别用 1/2/4/8/16s 退避反复锤一把死 key。
+                val breakerTripped = com.openminis.app.provider.ProviderKeyGate.isTripped(breakerBucket)
+                if (isTransient) {
+                    com.openminis.app.provider.ProviderKeyGate.recordFailure(breakerBucket)
+                }
                 val maxRetries = effectiveMaxRetries()
                 // 429 with another group member: switch endpoints instead of
                 // hammering the same key through 1/2/4/8/16s (inside a typical
                 // 60s relay window). Same-provider retries remain for network
                 // / 5xx, and for 429 when this is the last candidate — at most once.
-                val skipSameProviderRetry = (isRateLimit && remainingFallbacks.isNotEmpty()) || isPermanentCapacity
+                val skipSameProviderRetry = (isRateLimit && remainingFallbacks.isNotEmpty()) || isPermanentCapacity || breakerTripped
                 val sameProviderBudget = if (isRateLimit) minOf(maxRetries, 1) else maxRetries
                 if (isTransient && !skipSameProviderRetry && sameProviderBudget > 0 && retryAttempt < sameProviderBudget) {
                     val retryAfter = (actual as? com.openminis.app.data.model.LLMError.RateLimited)?.retryAfterSeconds

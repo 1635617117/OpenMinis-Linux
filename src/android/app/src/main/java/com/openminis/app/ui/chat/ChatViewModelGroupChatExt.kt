@@ -10,6 +10,7 @@ import com.openminis.app.data.model.hasImageInput
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.provider.LLMProvider
 import com.openminis.app.provider.effectiveMaxThinkingLevel
+import com.openminis.app.provider.firstEventWatchdog
 import com.openminis.app.tools.AgentTools
 import com.openminis.app.tools.DiscussionGraph
 import com.openminis.app.tools.GroupChat
@@ -482,6 +483,8 @@ private suspend fun ChatViewModel.speakModel(
             temperature = null,
             tools = tools,
             thinkingLevel = thinkingLevel,
+        ).firstEventWatchdog(
+            if (thinkingLevel.isEnabled) 90_000L else 45_000L,
         ).collect { chunk ->
             when (chunk) {
                 is LLMStreamChunk.Started -> onStatus(

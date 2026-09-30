@@ -109,11 +109,12 @@ object MemoryTools {
             val obj = JSONObject(inputJson)
             val content = obj.optString("content", "")
             val toolTitle = obj.optString("tool_title", "memory_write")
+            val revision = obj.optString("revision", "").takeIf { it.isNotBlank() }
 
             if (content.isBlank()) {
                 ToolResult("Error: Missing required 'content' parameter", false, toolTitle)
             } else {
-                val result = repository.writeMemory(content)
+                val result = repository.writeMemory(content, revision)
                 val success = result.startsWith("Memory saved")
                 ToolResult(result, success, toolTitle)
             }
@@ -141,7 +142,11 @@ object MemoryTools {
                 return ToolResult(body, true, toolTitle)
             }
             val result = repository.getMemory(keywords, scope)
-            ToolResult(result, true, toolTitle)
+            val revision = repository.currentDailyRevision()
+            val withRevision = if (revision != null) {
+                "$result\n\n[当前日志 revision: $revision — 用 memory_write 并发安全写入时，把它作为 revision 参数传入]"
+            } else result
+            ToolResult(withRevision, true, toolTitle)
         } catch (e: Exception) {
             ToolResult("Error: ${e.message}", false)
         }

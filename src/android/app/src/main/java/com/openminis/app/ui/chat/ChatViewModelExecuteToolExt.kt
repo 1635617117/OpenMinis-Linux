@@ -9,6 +9,7 @@ import com.openminis.app.tools.FileWriteTool
 import com.openminis.app.tools.CronJobTool
 import com.openminis.app.tools.ReadImageTool
 import com.openminis.app.tools.ToolExecutionResult
+import com.openminis.app.tools.ToolOutputPolicy
 import com.openminis.app.security.SecurityGateHolder
 import org.json.JSONObject
 
@@ -59,6 +60,10 @@ internal suspend fun ChatViewModel.executeTool(
             com.openminis.app.tools.GrepTool.execute(argsJson, activeSessionId, context)
         com.openminis.app.tools.GlobTool.NAME -> com.openminis.app.tools.GlobTool.execute(argsJson, activeSessionId, context)
         com.openminis.app.tools.WebFetchTool.NAME -> com.openminis.app.tools.WebFetchTool.execute(argsJson)
+        // [T-ui-read] GUI Agent 的眼睛：a11y 读屏快照，配合 shell_execute 里
+        // 的 android-a11y-cli 点击/输入形成"看屏→决策→执行→再看"闭环。
+        com.openminis.app.tools.UiReadTool.NAME ->
+            com.openminis.app.tools.UiReadTool.execute(argsJson)
         // T178: pass sessionId + context so read_image routes through
         // resolveSessionHostPath like file_read/write/edit do — without
         // these, the tool consults the global last-writer-wins
@@ -179,6 +184,10 @@ internal suspend fun ChatViewModel.executeTool(
         com.openminis.app.evolution.EvolutionHooks.onToolFailure(
             activeSessionId, canonical, argsJson, result.output,
         )
+    }
+    // [T-tool-output-policy] 统一出口：环境变量脱敏 + 超长输出降级为可检索文件。
+    if (result.imageData == null) {
+        return result.copy(output = ToolOutputPolicy.apply(result.output, toolId))
     }
     return result
 }
