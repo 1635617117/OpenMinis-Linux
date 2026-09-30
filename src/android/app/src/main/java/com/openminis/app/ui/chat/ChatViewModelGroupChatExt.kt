@@ -137,9 +137,16 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
                 spoken.add(0, GroupChat.Line(hostName, opening))
             }
         }
+        // [group-chat-debate] 排队可视化：先给全员预建“排队中”气泡，
+        // 轮到谁谁变思考态，队列一眼可见；没被轮到的（关门截断）收尾清掉。
+        val queuedText = context.getString(com.openminis.app.R.string.group_chat_queued)
+        val queueIds = speakers.associate { it.name to UUID.randomUUID().toString() }
+        for (member in speakers) {
+            upsertGroupBubble(queueIds.getValue(member.name), member.name, queuedText, analyzing = true, vendor = member.vendor)
+        }
         for ((index, member) in speakers.withIndex()) {
             if (groupChatCloseRequested) break
-            spoken += speakMembers(listOf(member), analyzing) {
+            spoken += speakMembers(listOf(member), analyzing, bubbleIds = queueIds) {
                 GroupChat.opinionPrompt(
                     it.name,
                     GroupChat.stance(index),
@@ -148,6 +155,27 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
                     contextText,
                 )
             }
+        }
+        clearGroupQueue(queueIds)
+
+        // [group-chat-debate] 答辩轮：按序补刀（可多点、500 字内、可 PASS）。
+        // 收敛规则：整圈没人有新观点（全 PASS）即停；上限 4 圈兜底；关门立即停。
+        var debateRound = 0
+        while (debateRound < 4 && !groupChatCloseRequested) {
+            debateRound++
+            val debateIds = speakers.associate { it.name to UUID.randomUUID().toString() }
+            for (member in speakers) {
+                upsertGroupBubble(debateIds.getValue(member.name), member.name, queuedText, analyzing = true, vendor = member.vendor)
+            }
+            val before = spoken.size
+            for (member in speakers) {
+                if (groupChatCloseRequested) break
+                spoken += speakMembers(listOf(member), analyzing, allowPass = true, bubbleIds = debateIds) { m ->
+                    GroupChat.replyPrompt(m.name, userText, GroupChat.transcript(spoken).takeLast(8000))
+                }
+            }
+            clearGroupQueue(debateIds)
+            if (spoken.size == before) break
         }
     }
 
@@ -287,6 +315,7 @@ private suspend fun ChatViewModel.speakMembers(
     analyzing: String,
     deferBubble: Boolean = false,
     allowPass: Boolean = false,
+    bubbleIds: Map<String, String>? = null,
     promptFor: (GroupMember) -> String,
 ): List<GroupChat.Line> {
     val gate = Mutex()
@@ -308,6 +337,7 @@ private suspend fun ChatViewModel.speakMembers(
                 vendor = member.vendor,
                 deferBubble = deferBubble,
                 maxTokens = member.maxTokens,
+                bubbleId = bubbleIds?.get(member.name),
             )
         } catch (e: CancellationException) {
             throw e
@@ -345,9 +375,12 @@ private suspend fun ChatViewModel.speakVisible(
     vendor: String = GroupChat.VENDOR_UNKNOWN,
     deferBubble: Boolean = false,
     maxTokens: Int = 4096,
+    bubbleId: String? = null,
 ): String {
     if (groupChatCloseRequested && allowPass) return ""
-    val id = UUID.randomUUID().toString()
+    // [group-chat-debate] 排队可视化：外部预建的“排队中”气泡可传入复用，
+    // 轮到该成员时同一气泡从排队态平滑切换到思考态。
+    val id = bubbleId ?: UUID.randomUUID().toString()
     if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
         var spoken = speakModel(
@@ -509,6 +542,22 @@ private suspend fun ChatViewModel.speakModel(
         history += LLMMessage(role = LLMMessage.Role.USER, content = "", contentParts = results)
     }
     return GroupChat.recoverUtterance(report.toString(), lastThinking)
+}
+
+/**
+ * [group-chat-debate] 清掉仍是排队/思考态的占位气泡（被关门截断、没轮到发言的成员）。
+ * 已定型（正文/PASS/留痕）的气泡不受影响。
+ */
+private suspend fun ChatViewModel.clearGroupQueue(ids: Map<String, String>) {
+    withContext(Dispatchers.Main) {
+        val alive = _messages.value
+            .filter { message -> message.id in ids.values && message.isStreaming }
+            .map { it.id }
+            .toSet()
+        if (alive.isNotEmpty()) {
+            _messages.value = _messages.value.filterNot { it.id in alive }
+        }
+    }
 }
 
 private fun thinkingStatus(thinking: StringBuilder) = AssistantBlock(

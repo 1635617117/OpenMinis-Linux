@@ -393,9 +393,9 @@ object GroupChat {
     """.trimIndent()
 
     fun replyPrompt(name: String, userText: String, prior: String): String = """
-        你是 $name。阅读其他人的发言，只补充一个他们没说到、或你认为说错了的点。
+        你是 $name。阅读其他人的发言，补充他们没说到、或你认为说错了的点（可以补多个点）。
         如果没有新的观点，只回复 PASS。
-        有新观点时用用户的语言写 60 到 180 字，不要调用工具，不要重复自己的上一轮。
+        有内容时用用户的语言写，500 字以内，不要调用工具，不要重复自己的上一轮。
 
         用户：
         $userText

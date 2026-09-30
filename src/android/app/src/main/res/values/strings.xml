@@ -2428,6 +2428,7 @@
     <string name="group_chat_need_models">AI group chat needs at least one other model. The current session only opens and closes. Choose teammates in Settings → Multi-agent.</string>
     <string name="group_chat_nothing_to_close">There is no discussion to end.</string>
     <string name="group_chat_no_output">No visible text was produced this turn.</string>
+    <string name="group_chat_queued">Queued…</string>
     <string name="group_chat_no_provider">Can’t end the discussion: no model is available.</string>
     <string name="group_chat_passed">Nothing to add this round.</string>
     <string name="group_chat_member_failed">%1$s could not speak: %2$s</string>
