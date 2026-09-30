@@ -99,6 +99,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -790,18 +791,10 @@ class ChatViewModel(
     // is fine on its own, but the streaming pipeline (combine + sample) and
     // the FlatChat flattening both walk the full list every tick.
     //
-    // Strategy: keep `_messages` as the canonical full list (every legacy
-    // caller — compact / fork / regenerate / agentHistory / send pipeline —
-    // still sees the whole thing) and expose a derived `uiMessages` that
-    // takes the TAIL N. ChatScreen consumes `uiMessages`; everything else
-    // keeps reading `messages`. When the list is short (<= cap) the derived
-    // value IS the source list (same reference), so this is zero-overhead
-    // for normal sessions.
-    //
-    // Users scroll up through the windowed slice; when they reach the top
-    // of the tail-window AND older messages exist, [loadOlderMessages]
-    // bumps the cap by [WINDOW_STEP] and the derived flow re-emits with
-    // the older slice included.
+    // Strategy: `_messages` is one contiguous loaded window, at most
+    // [MAX_LOADED_MESSAGE_WINDOW] rows. `uiMessages` shows that window in
+    // full. Scrolling to either labeled edge pages the database; the page
+    // slide drops the far end so the whole session is never reconstructed.
     //
     // Reset on session load (different sessionId) is wired in loadSession.
 
@@ -832,64 +825,19 @@ class ChatViewModel(
     val visibleMessageCap: StateFlow<Int> = _visibleMessageCap.asStateFlow()
 
     /**
-     * Tail-windowed view of [messages] for ChatScreen's LazyColumn. For
-     * sessions with `count <= LONG_SESSION_THRESHOLD` or `count <= cap`
-     * this returns the EXACT SAME list reference as `_messages.value` —
-     * Compose / collectAsState gets identity-equal snapshots, no extra
-     * allocation, no behavior change for normal sessions.
+     * The contiguous loaded window. A second `takeLast` used to hide the middle
+     * of that window while both ends still looked present. Memory stays bounded
+     * by [MAX_LOADED_MESSAGE_WINDOW] and by paging, not by deleting rows here.
      */
     val uiMessages: StateFlow<List<ChatMessage>> =
-        kotlinx.coroutines.flow.combine(_messages, _visibleMessageCap) { raw, cap ->
+        _messages.map { raw ->
             // [T-bridge-message-ui-leak-android] Single UI-collection sink for
             // EVERY path that pushes messages to the list (loadSession, live
             // stream append, compact rebuild, snapshot reload, sync refresh…).
             // Filter the internal role-alternation bridge here so it can never
-            // surface as a chat bubble regardless of which path produced it —
-            // the Android analog of iOS applySnapshot (T-bridge-message-ui-leak).
-            // Today the bridge lives in agentHistory only (never in _messages),
-            // so this is defensive; it guards against a future refactor routing
-            // the bridge into _messages. Only allocate a new list when a bridge
-            // is actually present, keeping the identity-equal fast path intact.
-            val full = if (raw.any { it.isInternalBridge }) raw.filterNot { it.isInternalBridge } else raw
-            if (full.size <= LONG_SESSION_THRESHOLD || full.size <= cap) full
-            // [T-android-uimessages-sublist-cme] `.toList()` is defensive
-            // hardening, NOT a proven fix for the reported crash. Read the
-            // measured facts before changing it back.
-            //
-            // `subList` returns a live VIEW sharing the parent's modCount, and
-            // emitting it puts that view in Compose state (ChatScreen collects
-            // `uiMessages`). That is a latent hazard worth closing on its own.
-            //
-            // MEASURED, so nobody re-derives it: a SubList only throws
-            // ConcurrentModificationException when its PARENT is structurally
-            // mutated IN PLACE (add/removeAt/clear). Every write here is
-            // `_messages.value = <new list>` via `+` / filterNot / map, and all
-            // of those ALLOCATE A FRESH ArrayList rather than mutating — so the
-            // old view's parent is never touched and no CME results. Verified on
-            // a JVM probe (`base + x`, `filterNot`, `map` all return a new
-            // java.util.ArrayList; comparing a stale window after such a write
-            // returned OK, not CME).
-            //
-            // Also verified end-to-end on device (Pixel 4a, build with this
-            // `.toList()` deliberately REVERTED): create a multi-turn session,
-            // long-press a middle user message → 编辑 → send. `truncateBeforeEdit`
-            // provably ran (8 messages → 4), storing a live SubList as
-            // `_messages.value`, and a further message was sent — NO crash. The
-            // next `+` copies the SubList back into a plain ArrayList, so the
-            // view stops being the state before anything can invalidate it.
-            //
-            // The user's crash (ArrayList$SubList.equals, main thread, realme
-            // RMX5010 / Android 16, 2026-08-10/11/12) therefore still has an
-            // UNIDENTIFIED trigger: something must mutate a subList's parent in
-            // place. That site was not found in ChatViewModel; look next at
-            // ChatFlatItems / ChatScreen and at any long-lived mutableListOf
-            // whose contents reach Compose.
-            //
-            // Keep the copy regardless: the window is a snapshot by definition,
-            // so copying is also the correct semantics. Only long sessions past
-            // the cap allocate; the common path above still returns `raw`
-            // unchanged and stays identity-equal.
-            else full.subList(full.size - cap, full.size).toList()
+            // surface as a chat bubble regardless of which path produced it.
+            // Only allocate a new list when a bridge is actually present.
+            if (raw.any { it.isInternalBridge }) raw.filterNot { it.isInternalBridge } else raw
         }.stateIn(
             viewModelScope,
             kotlinx.coroutines.flow.SharingStarted.Eagerly,
@@ -910,9 +858,8 @@ class ChatViewModel(
         messages.sumOf { it.sourceDbIds.size } + unrepresentedLoadedRows
 
     internal fun refreshHasOlderMessages() {
-        val loadedVisible = _messages.value.count { !it.isInternalBridge }
         val loadedRows = loadedPersistedRowCount()
-        _hasOlderMessages.value = loadedMessageOffset > 0 || loadedVisible > _visibleMessageCap.value
+        _hasOlderMessages.value = loadedMessageOffset > 0
         _hasNewerMessages.value = loadedMessageOffset + loadedRows < loadedMessageTotal
     }
 
@@ -956,6 +903,9 @@ class ChatViewModel(
             refreshHasOlderMessages()
             return
         }
+        // Fetching a page slides the window and drops the newest loaded rows.
+        // A live turn lives on that edge, so wait until it finishes.
+        if (_isStreaming.value) return
 
         loadingOlderMessages = true
         viewModelScope.launch {
@@ -969,7 +919,9 @@ class ChatViewModel(
                     )
                 }
                 if (page.messages.isNotEmpty()) {
-                    val older = withContext(Dispatchers.IO) { page.messages.toChatMessages() }
+                    val older = withContext(Dispatchers.IO) {
+                        chatRepository.hydrateDisplayRows(page.messages).toChatMessages()
+                    }
                     val combined = older + _messages.value
                     // Keep the old side around the viewport. The omitted newer
                     // side remains reachable through the pinned newer control.
@@ -991,7 +943,7 @@ class ChatViewModel(
 
     /** Move the bounded message window toward newer persisted rows. */
     fun loadNewerMessages() {
-        if (loadingOlderMessages) return
+        if (loadingOlderMessages || _isStreaming.value) return
         loadingOlderMessages = true
         viewModelScope.launch {
             try {
@@ -1015,7 +967,9 @@ class ChatViewModel(
                 }
                 if (page.messages.isNotEmpty()) {
                     val knownDbIds = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
-                    val newer = withContext(Dispatchers.IO) { page.messages.toChatMessages() }
+                    val newer = withContext(Dispatchers.IO) {
+                        chatRepository.hydrateDisplayRows(page.messages).toChatMessages()
+                    }
                         .filter { message ->
                             message.sourceDbIds.isEmpty() || message.sourceDbIds.none(knownDbIds::contains)
                         }
@@ -3935,7 +3889,9 @@ class ChatViewModel(
 
                 // Locate the DB assistant row holding the target tool_use, and
                 // the parts-array index of that tool_use within it.
-                val dbMessages = chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES)
+                val dbMessages = chatRepository.hydrateDisplayRows(
+                    chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES),
+                )
                 var cutRow: MessageEntity? = null
                 var cutPartIdx = -1
                 outer@ for (entity in dbMessages) {
@@ -5394,7 +5350,9 @@ class ChatViewModel(
     internal suspend fun awaitBoundedHistoryRebuild(
         sid: String,
     ): List<com.openminis.app.data.db.MessageEntity> {
-        val tail = chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES)
+        val tail = chatRepository.hydrateDisplayRows(
+            chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES),
+        )
         val parsed = tail.map { it.toLLMMessage() }
         agentHistory.clear()
         toolLoopDetector.reset()

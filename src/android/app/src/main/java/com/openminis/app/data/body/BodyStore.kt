@@ -17,12 +17,11 @@ import java.util.zip.InflaterInputStream
  * before inflate.
  */
 open class BodyStore(private val root: File) {
-    init {
-        discardTemps()
-    }
     data class Put(val ok: Boolean, val ref: String? = null, val sha: String? = null, val error: String? = null)
 
     fun put(bytes: ByteArray): Put {
+        // A display read must not construct this and delete an in-flight temp.
+        discardTemps()
         if (bytes.size > ResourceLimits.MAX_DECLARED_UNCOMPRESSED) {
             return Put(ok = false, error = "declared size ${bytes.size} exceeds cap")
         }

@@ -6,6 +6,11 @@ internal data class OlderWindowPlan(
     val fetchCount: Int = 0,
 )
 
+internal data class HistoryEdgeAction(
+    val loadOlder: Boolean,
+    val loadNewer: Boolean,
+)
+
 /**
  * Fixed-capacity movement of a database window.
  *
@@ -37,6 +42,37 @@ internal object ChatHistoryWindow {
             fetchOffset = newOffset,
             fetchCount = loadedOffset - newOffset,
         )
+    }
+
+    /**
+     * Auto-page only after the reader has left the opposite edge. A short list
+     * that already shows both edges must not walk the database by itself.
+     */
+    fun historyEdgeAction(
+        olderSentinelVisible: Boolean,
+        newerSentinelVisible: Boolean,
+        newestEdgeVisible: Boolean,
+        oldestEdgeVisible: Boolean,
+        hasOlder: Boolean,
+        hasNewer: Boolean,
+    ): HistoryEdgeAction {
+        val spansBothEdges = newestEdgeVisible && oldestEdgeVisible
+        return HistoryEdgeAction(
+            loadOlder = hasOlder && olderSentinelVisible && !spansBothEdges,
+            loadNewer = hasNewer && newerSentinelVisible && !spansBothEdges,
+        )
+    }
+
+    /** Index in a reverseLayout list whose message items are newest-first. */
+    fun lazyIndexOfOldestFirstKey(
+        oldestFirstCount: Int,
+        keyIndexInOldestFirst: Int,
+        itemsBeforeMessages: Int,
+    ): Int {
+        require(oldestFirstCount > 0)
+        require(keyIndexInOldestFirst in 0 until oldestFirstCount)
+        require(itemsBeforeMessages >= 0)
+        return itemsBeforeMessages + (oldestFirstCount - 1 - keyIndexInOldestFirst)
     }
 
     /**

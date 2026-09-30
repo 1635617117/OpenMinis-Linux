@@ -19,7 +19,7 @@ SELECT id, session_id, role,
 CASE
   WHEN body_ref IS NOT NULL THEN parts_json
   WHEN body_bytes <= 2048 THEN parts_json
-  ELSE COALESCE(preview, '[{"type":"text","text":"[body kept on disk]"}]')
+  ELSE COALESCE(preview, '[{"type":"text","value":"[body kept on disk]"}]')
 END AS parts_json,
 created_at, token_usage, sort_order, reasoning_content,
 stream_interrupt_count, updated_at, error_info,
@@ -236,6 +236,10 @@ interface ChatDao {
 
     @Query("$SAFE_MESSAGE_FROM WHERE id = :messageId AND session_id = :sessionId LIMIT 1")
     suspend fun getMessage(sessionId: String, messageId: String): MessageEntity?
+
+    /** One cell, for display hydration only. List loads must keep using [SAFE_MESSAGE_FROM]. */
+    @Query("SELECT parts_json FROM messages WHERE id = :id")
+    suspend fun loadRawPartsJson(id: String): String?
 
     @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order DESC LIMIT 1")
     suspend fun lastMessage(sessionId: String): MessageEntity?

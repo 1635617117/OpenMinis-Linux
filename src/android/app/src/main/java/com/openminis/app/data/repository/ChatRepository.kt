@@ -2,7 +2,10 @@ package com.openminis.app.data.repository
 
 import android.database.sqlite.SQLiteBlobTooBigException
 import com.openminis.app.data.body.BodyStore
+import com.openminis.app.data.body.BudgetDecision
+import com.openminis.app.data.body.PreviewBudget
 import com.openminis.app.data.body.ResourceLimits
+import com.openminis.app.data.display.DisplayParts
 import com.openminis.app.data.db.ChatDao
 import com.openminis.app.data.db.GoalDao
 import com.openminis.app.data.db.SessionGoalEntity
@@ -141,15 +144,26 @@ class ChatRepository(
                     for (index in page.indices.reversed()) {
                         val row = page[index]
                         val rowBytes = row.partsJson.length.toLong() * 2L
-                        if (!com.openminis.app.data.body.PreviewBudget.canTake(
-                                previewBytes, rowBytes, ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
-                            )
-                        ) {
-                            stoppedAtBudget = true
-                            break
+                        when (PreviewBudget.decide(
+                            previewBytes,
+                            rowBytes,
+                            ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+                            rows.size,
+                        )) {
+                            BudgetDecision.STOP -> {
+                                stoppedAtBudget = true
+                                break
+                            }
+                            BudgetDecision.TAKE_AND_STOP -> {
+                                rows.add(row)
+                                stoppedAtBudget = true
+                                break
+                            }
+                            BudgetDecision.TAKE -> {
+                                rows.add(row)
+                                previewBytes += rowBytes
+                            }
                         }
-                        rows.add(row)
-                        previewBytes += rowBytes
                     }
                     cursor = pageStart
                     if (stoppedAtBudget || page.size < expected) break
@@ -164,15 +178,26 @@ class ChatRepository(
                 if (page.isEmpty()) break
                 for (row in page) {
                     val rowBytes = row.partsJson.length.toLong() * 2L
-                    if (!com.openminis.app.data.body.PreviewBudget.canTake(
-                            previewBytes, rowBytes, ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
-                        )
-                    ) {
-                        stoppedAtBudget = true
-                        break
+                    when (PreviewBudget.decide(
+                        previewBytes,
+                        rowBytes,
+                        ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+                        rows.size,
+                    )) {
+                        BudgetDecision.STOP -> {
+                            stoppedAtBudget = true
+                            break
+                        }
+                        BudgetDecision.TAKE_AND_STOP -> {
+                            rows.add(row)
+                            stoppedAtBudget = true
+                            break
+                        }
+                        BudgetDecision.TAKE -> {
+                            rows.add(row)
+                            previewBytes += rowBytes
+                        }
                     }
-                    rows.add(row)
-                    previewBytes += rowBytes
                 }
                 cursor += page.size
                 if (stoppedAtBudget) break
@@ -181,6 +206,41 @@ class ChatRepository(
         } finally {
             com.openminis.app.data.body.Admission.release(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())
         }
+    }
+
+    /**
+     * Replace projected stubs with complete, display-sized JSON. One body is
+     * read at a time and discarded after shrinking. The stored row is unchanged.
+     */
+    suspend fun hydrateDisplayRows(rows: List<MessageEntity>): List<MessageEntity> {
+        if (rows.none { DisplayParts.needsHydration(it.bodyRef, it.bodyBytes, it.partsJson) }) {
+            return rows
+        }
+        val store = filesDir?.let { BodyStore(File(it, "bodies")) }
+        return rows.map { row ->
+            if (!DisplayParts.needsHydration(row.bodyRef, row.bodyBytes, row.partsJson)) {
+                row
+            } else {
+                val raw = readDisplayBody(row, store)
+                val parts = if (raw.isNullOrBlank()) {
+                    DisplayParts.note("这条消息的原文在本地，但这次没能读出来。")
+                } else {
+                    DisplayParts.shrink(raw)
+                }
+                if (parts == row.partsJson) row else row.copy(partsJson = parts)
+            }
+        }
+    }
+
+    private suspend fun readDisplayBody(row: MessageEntity, store: BodyStore?): String? {
+        val ref = row.bodyRef
+        if (!ref.isNullOrBlank() && store != null) {
+            val bytes = runCatching {
+                store.read(ref, maxBytes = ResourceLimits.MAX_DECLARED_UNCOMPRESSED)
+            }.getOrNull()
+            if (bytes != null && bytes.isNotEmpty()) return bytes.toString(Charsets.UTF_8)
+        }
+        return runCatching { dao.loadRawPartsJson(row.id) }.getOrNull()
     }
 
     suspend fun loadMessageIds(sessionId: String, pageSize: Int = 500): Set<String> {
@@ -1113,7 +1173,7 @@ class ChatRepository(
         } else {
             "body omitted; store failed"
         }
-        val stub = """[{"type":"text","text":${org.json.JSONObject.quote(note)}}]"""
+        val stub = DisplayParts.note(note)
         return StoredBody(
             inline = stub,
             bodyBytes = bytes.size.toLong(),

@@ -65,6 +65,53 @@ class ChatHistoryWindowTest {
     }
 
     @Test
+    fun `short list that already shows both edges does not walk the database`() {
+        val action = ChatHistoryWindow.historyEdgeAction(
+            olderSentinelVisible = true,
+            newerSentinelVisible = true,
+            newestEdgeVisible = true,
+            oldestEdgeVisible = true,
+            hasOlder = true,
+            hasNewer = true,
+        )
+        assertEquals(false, action.loadOlder)
+        assertEquals(false, action.loadNewer)
+    }
+
+    @Test
+    fun `reaching only the older edge pages toward older rows`() {
+        val action = ChatHistoryWindow.historyEdgeAction(
+            olderSentinelVisible = true,
+            newerSentinelVisible = false,
+            newestEdgeVisible = false,
+            oldestEdgeVisible = true,
+            hasOlder = true,
+            hasNewer = true,
+        )
+        assertEquals(true, action.loadOlder)
+        assertEquals(false, action.loadNewer)
+    }
+
+    @Test
+    fun `reaching only the newer edge pages toward newer rows`() {
+        val action = ChatHistoryWindow.historyEdgeAction(
+            olderSentinelVisible = false,
+            newerSentinelVisible = true,
+            newestEdgeVisible = true,
+            oldestEdgeVisible = false,
+            hasOlder = true,
+            hasNewer = true,
+        )
+        assertEquals(false, action.loadOlder)
+        assertEquals(true, action.loadNewer)
+    }
+
+    @Test
+    fun `reverse layout index keeps the anchored row`() {
+        assertEquals(5, ChatHistoryWindow.lazyIndexOfOldestFirstKey(10, 6, 2))
+    }
+
+    @Test
     fun `appending at the tail evicts the oldest loaded rows`() {
         val move = ChatHistoryWindow.appendTail(
             totalBefore = 4_562,

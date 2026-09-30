@@ -511,14 +511,12 @@ fun ChatScreen(
             mcpRepository = mcpRepository,
         ),
     )
-    // [T-android-larky-longsession-followup] Consume the tail-windowed
-    // view instead of the canonical full list. For sessions with ≤300
-    // messages this is the SAME reference (zero overhead); for longer
-    // sessions (Larky's 600+) it caps at INITIAL_VISIBLE_MESSAGE_CAP and
-    // grows in steps when the user reaches the top via [viewModel.loadOlderMessages].
-    // Callers needing the full history (compact / fork / regenerate / send)
-    // continue to read viewModel.messages directly inside the VM.
+    // The painted list is one contiguous loaded window, not a head+tail splice.
+    // Long sessions start on the newest page. Reaching either labeled edge
+    // pages the other direction; rows outside that window stay in the database.
     val messages by viewModel.uiMessages.collectAsState()
+    val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
+    val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
@@ -3714,6 +3712,64 @@ fun ChatScreen(
                     lastTrailingPinKey = newest.key
                     tracedScrollToItem("trailing-row/${newest.contentType}", 0, 0)
                 }
+                // Keep the same row on screen when a page slide changes item
+                // indices. Streaming token updates do not change the key list,
+                // so they must not scroll.
+                val historyAnchorOldest = remember(sessionId) { mutableStateOf<String?>(null) }
+                val historyAnchorNewest = remember(sessionId) { mutableStateOf<String?>(null) }
+                val historyAnchorOffset = remember(sessionId) { mutableStateOf(0) }
+                var historyKeys by remember(sessionId) { mutableStateOf<List<String>>(emptyList()) }
+                fun historyItemsBeforeMessages(): Int {
+                    var count = 0
+                    if (compactProgress != null) count++
+                    val lastAssistantHasError = messages
+                        .lastOrNull { it.role == "assistant" }
+                        ?.error
+                        ?.isNotBlank() == true
+                    if (canResume && !isStreaming && error == null && !lastAssistantHasError) count++
+                    if (hasNewerMessages) count++
+                    return count
+                }
+                LaunchedEffect(listState) {
+                    snapshotFlow {
+                        val rows = listState.layoutInfo.visibleItemsInfo.filter { item ->
+                            val key = item.key as? String ?: return@filter false
+                            !key.startsWith("__")
+                        }
+                        val oldest = rows.maxByOrNull { it.index }
+                        val newest = rows.minByOrNull { it.index }
+                        if (oldest == null || newest == null) null
+                        else Triple(oldest.key as String, newest.key as String, oldest.offset)
+                    }.collect { anchor ->
+                        if (anchor != null && userScrolledAway) {
+                            historyAnchorOldest.value = anchor.first
+                            historyAnchorNewest.value = anchor.second
+                            historyAnchorOffset.value = anchor.third
+                        }
+                    }
+                }
+                LaunchedEffect(flatItems, userScrolledAway) {
+                    val keys = flatItems.map { it.key }
+                    val previous = historyKeys
+                    historyKeys = keys
+                    if (!userScrolledAway || previous.isEmpty() || previous == keys) return@LaunchedEffect
+                    if (listState.isScrollInProgress) return@LaunchedEffect
+                    val oldestIndex = historyAnchorOldest.value?.let(keys::indexOf) ?: -1
+                    val newestIndex = historyAnchorNewest.value?.let(keys::indexOf) ?: -1
+                    val flatIndex = when {
+                        oldestIndex >= 0 -> oldestIndex
+                        newestIndex >= 0 -> newestIndex
+                        else -> return@LaunchedEffect
+                    }
+                    val target = ChatHistoryWindow.lazyIndexOfOldestFirstKey(
+                        oldestFirstCount = keys.size,
+                        keyIndexInOldestFirst = flatIndex,
+                        itemsBeforeMessages = historyItemsBeforeMessages(),
+                    )
+                    if (listState.firstVisibleItemIndex != target) {
+                        listState.scrollToItem(target, historyAnchorOffset.value)
+                    }
+                }
                 // messageId → isCompactedHistory map. Used to fade entire
                 // assistant-row clusters (header + text + tool pills) at
                 // render time — mirrors iOS isCompactedHistory opacity(0.5).
@@ -3864,6 +3920,29 @@ fun ChatScreen(
                 val perfFirstLayoutFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
                 val perfFirstItemComposeFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
                 val perfFirstItemPlacedFired = remember(sessionId) { java.util.concurrent.atomic.AtomicBoolean(false) }
+                LaunchedEffect(listState) {
+                    snapshotFlow {
+                        val info = listState.layoutInfo
+                        val visible = info.visibleItemsInfo
+                        HistoryEdgeVisible(
+                            olderSentinel = visible.any { it.key == "__load_older__" },
+                            newerSentinel = visible.any { it.key == "__load_newer__" },
+                            newestEdge = visible.any { it.index == 0 },
+                            oldestEdge = visible.any { it.index == info.totalItemsCount - 1 },
+                        )
+                    }.collect { edge ->
+                        val action = ChatHistoryWindow.historyEdgeAction(
+                            olderSentinelVisible = edge.olderSentinel,
+                            newerSentinelVisible = edge.newerSentinel,
+                            newestEdgeVisible = edge.newestEdge,
+                            oldestEdgeVisible = edge.oldestEdge,
+                            hasOlder = viewModel.hasOlderMessages.value,
+                            hasNewer = viewModel.hasNewerMessages.value,
+                        )
+                        if (action.loadOlder) viewModel.loadOlderMessages()
+                        else if (action.loadNewer) viewModel.loadNewerMessages()
+                    }
+                }
                 Box {
                 AlwaysStretchOverscrollBox { sharedEffect ->
                 LazyColumn(
@@ -4007,6 +4086,14 @@ fun ChatScreen(
                                     tracedScrollToItem("RESUME-BANNER/settle", 0, 0)
                                 }
                             })
+                        }
+                    }
+                    if (hasNewerMessages) {
+                        item(key = "__load_newer__", contentType = "history_edge") {
+                            HistoryPageEdge(
+                                text = stringResource(R.string.chat_load_newer_messages),
+                                onClick = { viewModel.loadNewerMessages() },
+                            )
                         }
                     }
                     items(
@@ -4432,6 +4519,14 @@ fun ChatScreen(
                             }
                         }
                         } // Box (alpha wrapper)
+                    }
+                    if (hasOlderMessages) {
+                        item(key = "__load_older__", contentType = "history_edge") {
+                            HistoryPageEdge(
+                                text = stringResource(R.string.chat_load_older_messages),
+                                onClick = { viewModel.loadOlderMessages() },
+                            )
+                        }
                     }
                 }
                 } // AlwaysStretchOverscrollBox
@@ -7384,6 +7479,27 @@ fun ChatScreen(
         )
     }
     } // CompositionLocalProvider
+}
+
+private data class HistoryEdgeVisible(
+    val olderSentinel: Boolean,
+    val newerSentinel: Boolean,
+    val newestEdge: Boolean,
+    val oldestEdge: Boolean,
+)
+
+@Composable
+private fun HistoryPageEdge(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 16.dp),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = TextAlign.Center,
+    )
 }
 
 // [T-android-split-chat] UserMessageBubble / UserAttachmentList /

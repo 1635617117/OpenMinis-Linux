@@ -153,7 +153,7 @@ internal fun ChatViewModel.loadSession() {
             val tIoBeforeLoad = System.currentTimeMillis()
             val tail = chatRepository.loadSessionTail(sessionId)
             val totalMessages = tail.totalMessages
-            val rows = tail.messages
+            val rows = chatRepository.hydrateDisplayRows(tail.messages)
             val firstMessageOffset = tail.firstMessageOffset
             val tIoAfterLoad = System.currentTimeMillis()
             com.openminis.app.diagnostics.PerfLongCtx.step(
@@ -331,12 +331,10 @@ internal fun ChatViewModel.loadSession() {
             "stateflow.emit.begin",
             "count=${ordered.size}",
         )
-        // [T-android-larky-longsession-followup] Reset the tail
-        // window to its initial cap on every session (re)load. Without
-        // this a freshly opened session would inherit the previous
-        // session's enlarged cap (set via loadOlderMessages), defeating
-        // the windowing intent on the first paint of every new session.
-        _visibleMessageCap.value = ChatViewModel.INITIAL_VISIBLE_MESSAGE_CAP
+        // The painted list is the loaded window. A smaller cap used to hide
+        // the middle of that window and make it look deleted. Paging, not a
+        // second cut, is what bounds memory.
+        _visibleMessageCap.value = ChatViewModel.MAX_LOADED_MESSAGE_WINDOW
         _messages.value = if (marker == null) {
             ordered
         } else {
