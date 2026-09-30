@@ -214,6 +214,8 @@ private fun LogsBody(
 ) {
     val anyFiles = dailyLogs.isNotEmpty() || crashLogs.isNotEmpty()
     var showContextSnapshot by remember { mutableStateOf(false) }
+    var showAnswerVersions by remember { mutableStateOf(false) }
+    var selectedVersionFile by remember { mutableStateOf<java.io.File?>(null) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -240,6 +242,80 @@ private fun LogsBody(
                 subtitle = "按来源列出大小与全文（offloads/context-assembly/latest.md）",
                 onClick = { showContextSnapshot = true },
                 showDivider = false,
+            )
+        }
+
+        // [T-answer-versions] 被重试覆盖的旧回答归档入口：不丢数据的第二份保险。
+        SettingsSection(header = "历史回答版本归档") {
+            SettingsRow(
+                title = "浏览被覆盖的旧回答",
+                subtitle = "offloads/answer-versions/ 下重试前归档的上一版回答",
+                onClick = { showAnswerVersions = true },
+                showDivider = false,
+            )
+        }
+
+        if (showAnswerVersions) {
+            val versionsDir = java.io.File("/var/minis/workspace/offloads/answer-versions")
+            val files = remember(showAnswerVersions) {
+                versionsDir.listFiles()?.sortedByDescending { it.lastModified() }?.take(30) ?: emptyList()
+            }
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showAnswerVersions = false },
+                title = { Text("旧回答归档（最近 30 条）") },
+                text = {
+                    if (files.isEmpty()) {
+                        Text("暂无归档。重试某条回答后，被覆盖的上一版会出现在这里。")
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            files.forEach { f ->
+                                TextButton(onClick = { selectedVersionFile = f }) {
+                                    Text(
+                                        f.name,
+                                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showAnswerVersions = false }) { Text("关闭") }
+                },
+            )
+        }
+
+        selectedVersionFile?.let { f ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { selectedVersionFile = null },
+                title = { Text(f.name) },
+                text = {
+                    val body = remember(f) {
+                        runCatching {
+                            val obj = org.json.JSONObject(f.readText())
+                            obj.optString("partsJson", f.readText()).take(3_000)
+                        }.getOrDefault("读取失败")
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(
+                            body,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedVersionFile = null }) { Text("关闭") }
+                },
             )
         }
 

@@ -39,6 +39,7 @@ object AgentTools {
         add(GrepTool.definition())
         add(GlobTool.definition())
         add(UiReadTool.definition())
+        add(UiActionTool.definition())
         if (supportsImageInput || visionGroupConfigured) {
             add(ReadImageTool.definition())
         }

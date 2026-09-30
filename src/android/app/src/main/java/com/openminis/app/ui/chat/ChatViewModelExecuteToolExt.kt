@@ -64,6 +64,9 @@ internal suspend fun ChatViewModel.executeTool(
         // 的 android-a11y-cli 点击/输入形成"看屏→决策→执行→再看"闭环。
         com.openminis.app.tools.UiReadTool.NAME ->
             com.openminis.app.tools.UiReadTool.execute(argsJson)
+        // [T-ui-action] GUI Agent 的手：tap/type/swipe/scroll/back/open_app/open_url。
+        com.openminis.app.tools.UiActionTool.NAME ->
+            com.openminis.app.tools.UiActionTool.execute(argsJson)
         // T178: pass sessionId + context so read_image routes through
         // resolveSessionHostPath like file_read/write/edit do — without
         // these, the tool consults the global last-writer-wins
