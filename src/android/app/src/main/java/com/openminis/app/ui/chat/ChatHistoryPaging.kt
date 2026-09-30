@@ -4,7 +4,13 @@ import com.openminis.app.data.db.MessageEntity
 import com.openminis.app.data.db.MessagePreviewRow
 import com.openminis.app.data.db.MessageSortAnchor
 
-internal data class SortRange(val startInclusive: Int, val endExclusive: Int)
+internal data class SortRange(val startInclusive: Int, val endExclusive: Int) {
+    init {
+        require(startInclusive <= endExclusive) {
+            "Sort range must be half-open and ordered: [$startInclusive, $endExclusive)"
+        }
+    }
+}
 
 internal fun MessageSortAnchor.toWindowAnchor(): ChatHistoryWindow.SortAnchor =
     ChatHistoryWindow.SortAnchor(sortOrder = sortOrder, isUser = role == "user")
@@ -16,14 +22,11 @@ internal fun MessageSortAnchor.toWindowAnchor(): ChatHistoryWindow.SortAnchor =
 internal suspend fun ChatViewModel.olderTurnStart(
     beforeSortOrder: Int,
     turnCount: Int,
-    maxProbes: Int = Int.MAX_VALUE,
 ): Int? {
     var cursor = beforeSortOrder
     var users = 0
     var start: Int? = null
-    var probes = 0
-    while (users < turnCount && probes < maxProbes) {
-        probes++
+    while (users < turnCount) {
         val probe = chatRepository.dao.loadOlderSortAnchors(
             sessionId,
             cursor,
@@ -81,9 +84,10 @@ internal suspend fun ChatViewModel.loadSortRange(range: SortRange): List<Message
  * or at the session start.
  */
 internal suspend fun ChatViewModel.loadSplitTurnPrefix(beforeSortOrder: Int): List<MessageEntity> {
-    // Cold open must not walk a tool-only prefix of the whole session.
-    // Two probes is enough to finish a normal turn; paging continues the rest.
-    val start = olderTurnStart(beforeSortOrder, turnCount = 1, maxProbes = 2) ?: return emptyList()
+    // Complete the cut turn before painting the cold-open tail. The probe
+    // reads only role + sort_order, so a long tool turn does not parse bodies
+    // merely to find its boundary.
+    val start = olderTurnStart(beforeSortOrder, turnCount = 1) ?: return emptyList()
     if (start >= beforeSortOrder) return emptyList()
     return loadSortRange(SortRange(start, beforeSortOrder))
 }

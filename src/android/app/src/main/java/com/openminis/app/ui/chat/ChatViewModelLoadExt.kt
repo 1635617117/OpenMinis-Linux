@@ -181,17 +181,13 @@ internal fun ChatViewModel.loadSession() {
             // runs once at init before any other writer touches
             // agentHistory, so a bulk addAll is race-free.
             //
-            // [T-android-coldopen-window-parse] Only parse the rows the
-            // first paint actually shows. toChatMessages + toLLMMessage on
-            // all ~400 tail rows made every session (re)entry re-parse the
-            // full tail even though uiMessages caps rendering at
-            // INITIAL_VISIBLE_MESSAGE_CAP. Rows beyond the cap are parsed
-            // lazily by loadOlderMessages; for the LLM history the tail
-            // beyond the cap is also what providers need first, so
-            // restricting here keeps first-paint O(window) without
-            // changing send-path behavior.
-            val windowRows = if (rows.size > ChatViewModel.INITIAL_VISIBLE_MESSAGE_CAP) {
-                rows.subList(rows.size - ChatViewModel.INITIAL_VISIBLE_MESSAGE_CAP, rows.size)
+            // [T-android-coldopen-window-parse] The UI tail is retained as
+            // loaded, but request-side history has a smaller parse budget.
+            // Re-parsing every tail row on each session open caused a GC
+            // storm; rows outside this LLM budget are represented by the
+            // request-only role+preview digest below.
+            val windowRows = if (rows.size > ChatViewModel.INITIAL_LLM_HISTORY_ROW_CAP) {
+                rows.subList(rows.size - ChatViewModel.INITIAL_LLM_HISTORY_ROW_CAP, rows.size)
             } else {
                 rows
             }
@@ -229,11 +225,10 @@ internal fun ChatViewModel.loadSession() {
         llmDigestOmitted = 0
         noteLoadedSortBounds(messages)
         // [T-android-coldopen-window-parse] agentHistory covers only the
-        // newest INITIAL_VISIBLE_MESSAGE_CAP DB rows; the skipped prefix
-        // of the tail (if any) is parsed lazily by loadOlderMessages.
-        // Counted in DB rows, not UI messages — toChatMessages merges
-        // tool-result rows, so the UI list is shorter than the tail.
-        val windowedRows = minOf(messages.size, ChatViewModel.INITIAL_VISIBLE_MESSAGE_CAP)
+        // newest request-side DB-row budget. Count in DB rows, not UI
+        // messages — toChatMessages merges tool-result rows, so the UI list
+        // is shorter than the tail.
+        val windowedRows = minOf(messages.size, ChatViewModel.INITIAL_LLM_HISTORY_ROW_CAP)
         llmHistoryStartOffset = (loaded.totalMessages - windowedRows).coerceAtLeast(0)
         loadingOlderMessages = false
         _isLoadingHistory.value = false
@@ -364,7 +359,6 @@ internal fun ChatViewModel.loadSession() {
         // The painted list is the loaded window. A smaller cap used to hide
         // the middle of that window and make it look deleted. Paging, not a
         // second cut, is what bounds memory.
-        _visibleMessageCap.value = ordered.count { !it.isInternalBridge }.coerceAtLeast(1)
         _messages.value = if (marker == null) {
             ordered
         } else {

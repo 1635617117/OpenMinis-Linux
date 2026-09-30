@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.16-linux
+
+- versionCode **216**
+- 在 2.0.15 长会话双向翻页基础上收口：sort_order 范围统一为半开区间，DB 计数不再把聚合 UI 行当作消息行，追加分配与写入串行化；加载行和新旧锚点分别保存偏移，滚动中也能稳定补偿。LLM 摘录继续只在请求时注入，不绘制、不落库。数据库仍是 20。
+
+---
+
 # OpenMinis-Linux 2.0.15-linux
 
 - versionCode **215**

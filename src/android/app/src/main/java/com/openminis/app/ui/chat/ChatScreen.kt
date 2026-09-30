@@ -3718,7 +3718,8 @@ fun ChatScreen(
                 // so they must not scroll.
                 val historyAnchorOldest = remember(sessionId) { mutableStateOf<String?>(null) }
                 val historyAnchorNewest = remember(sessionId) { mutableStateOf<String?>(null) }
-                val historyAnchorOffset = remember(sessionId) { mutableStateOf(0) }
+                val historyAnchorOldestOffset = remember(sessionId) { mutableStateOf(0) }
+                val historyAnchorNewestOffset = remember(sessionId) { mutableStateOf(0) }
                 var historyKeys by remember(sessionId) { mutableStateOf<List<String>>(emptyList()) }
                 fun historyItemsBeforeMessages(): Int {
                     var count = 0
@@ -3731,6 +3732,12 @@ fun ChatScreen(
                     if (hasNewerMessages) count++
                     return count
                 }
+                data class VisibleHistoryAnchor(
+                    val oldestKey: String,
+                    val oldestOffset: Int,
+                    val newestKey: String,
+                    val newestOffset: Int,
+                )
                 LaunchedEffect(listState) {
                     snapshotFlow {
                         val rows = listState.layoutInfo.visibleItemsInfo.filter { item ->
@@ -3740,12 +3747,18 @@ fun ChatScreen(
                         val oldest = rows.maxByOrNull { it.index }
                         val newest = rows.minByOrNull { it.index }
                         if (oldest == null || newest == null) null
-                        else Triple(oldest.key as String, newest.key as String, oldest.offset)
+                        else VisibleHistoryAnchor(
+                            oldestKey = oldest.key as String,
+                            oldestOffset = oldest.offset,
+                            newestKey = newest.key as String,
+                            newestOffset = newest.offset,
+                        )
                     }.collect { anchor ->
                         if (anchor != null && userScrolledAway) {
-                            historyAnchorOldest.value = anchor.first
-                            historyAnchorNewest.value = anchor.second
-                            historyAnchorOffset.value = anchor.third
+                            historyAnchorOldest.value = anchor.oldestKey
+                            historyAnchorNewest.value = anchor.newestKey
+                            historyAnchorOldestOffset.value = anchor.oldestOffset
+                            historyAnchorNewestOffset.value = anchor.newestOffset
                         }
                     }
                 }
@@ -3756,10 +3769,16 @@ fun ChatScreen(
                     if (!userScrolledAway || previous.isEmpty() || previous == keys) return@LaunchedEffect
                     val oldestIndex = historyAnchorOldest.value?.let(keys::indexOf) ?: -1
                     val newestIndex = historyAnchorNewest.value?.let(keys::indexOf) ?: -1
+                    val useOldest = oldestIndex >= 0
                     val flatIndex = when {
-                        oldestIndex >= 0 -> oldestIndex
+                        useOldest -> oldestIndex
                         newestIndex >= 0 -> newestIndex
                         else -> return@LaunchedEffect
+                    }
+                    val anchorOffset = if (useOldest) {
+                        historyAnchorOldestOffset.value
+                    } else {
+                        historyAnchorNewestOffset.value
                     }
                     val target = ChatHistoryWindow.lazyIndexOfOldestFirstKey(
                         oldestFirstCount = keys.size,
@@ -3767,7 +3786,7 @@ fun ChatScreen(
                         itemsBeforeMessages = historyItemsBeforeMessages(),
                     )
                     if (listState.firstVisibleItemIndex != target) {
-                        listState.scrollToItem(target, historyAnchorOffset.value)
+                        listState.scrollToItem(target, anchorOffset)
                     }
                 }
                 // messageId → isCompactedHistory map. Used to fade entire

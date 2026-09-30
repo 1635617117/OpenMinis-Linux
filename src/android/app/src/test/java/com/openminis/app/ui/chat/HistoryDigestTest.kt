@@ -1,6 +1,8 @@
 package com.openminis.app.ui.chat
 
+import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.LLMMessage
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -21,6 +23,29 @@ class HistoryDigestTest {
     fun readablePreviewPullsTextValuesOutOfAJsonStub() {
         val raw = """[{"type":"text","value":"hello \"world\""}]"""
         assertEquals("hello \"world\"", HistoryDigest.readablePreview(raw))
+    }
+
+    @Test
+    fun injectAddsDigestAsAStructuredTextPartWhenPartsAlreadyExist() {
+        val history = listOf(
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = "question",
+                contentParts = listOf(
+                    AgentContentPart.ToolUse(
+                        id = "tool-1",
+                        name = "read",
+                        input = JSONObject(),
+                    ),
+                ),
+            ),
+        )
+        val injected = HistoryDigest.inject(history, "[HISTORY_DIGEST]\nnote")
+        assertEquals(
+            "[HISTORY_DIGEST]\nnote",
+            (injected.single().contentParts.first() as AgentContentPart.Text).text,
+        )
+        assertTrue(injected.single().content.startsWith("[HISTORY_DIGEST]"))
     }
 
     @Test

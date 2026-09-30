@@ -261,11 +261,24 @@ interface ChatDao {
     @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId AND sort_order > :sortOrder")
     suspend fun countMessagesAfterSort(sessionId: String, sortOrder: Int): Int
 
+    /** Count a half-open stable-sequence range: [startInclusive, endExclusive). */
+    @Query("""
+        SELECT COUNT(*) FROM messages
+        WHERE session_id = :sessionId
+          AND sort_order >= :startInclusive
+          AND sort_order < :endExclusive
+    """)
+    suspend fun countMessagesInSortRange(
+        sessionId: String,
+        startInclusive: Int,
+        endExclusive: Int,
+    ): Int
+
     /** Role + sort_order only. Used to align a page to a user turn without reading bodies. */
     @Query("""
         SELECT sort_order, role FROM messages
         WHERE session_id = :sessionId AND sort_order < :beforeSortOrder
-        ORDER BY sort_order DESC, created_at DESC
+        ORDER BY sort_order DESC, created_at DESC, id DESC
         LIMIT :limit
     """)
     suspend fun loadOlderSortAnchors(
@@ -277,7 +290,7 @@ interface ChatDao {
     @Query("""
         SELECT sort_order, role FROM messages
         WHERE session_id = :sessionId AND sort_order > :afterSortOrder
-        ORDER BY sort_order ASC, created_at ASC
+        ORDER BY sort_order ASC, created_at ASC, id ASC
         LIMIT :limit
     """)
     suspend fun loadNewerSortAnchors(
@@ -291,7 +304,7 @@ interface ChatDao {
         WHERE session_id = :sessionId
           AND sort_order >= :startInclusive
           AND sort_order < :endExclusive
-        ORDER BY sort_order ASC, created_at ASC
+        ORDER BY sort_order ASC, created_at ASC, id ASC
         LIMIT :limit
     """)
     suspend fun loadMessagesFromSortOrder(
@@ -305,7 +318,7 @@ interface ChatDao {
     @Query("""
         SELECT role, preview, sort_order FROM messages
         WHERE session_id = :sessionId AND sort_order < :beforeSortOrder
-        ORDER BY sort_order DESC, created_at DESC
+        ORDER BY sort_order DESC, created_at DESC, id DESC
         LIMIT :limit
     """)
     suspend fun loadPreviewPageBefore(

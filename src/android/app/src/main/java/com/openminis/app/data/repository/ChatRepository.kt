@@ -20,6 +20,8 @@ import com.openminis.app.sandbox.SessionWorkspace
 import com.openminis.app.sandbox.WorkspaceMover
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -29,6 +31,13 @@ class ChatRepository(
     internal val goalDao: GoalDao,
     private val filesDir: File? = null,
 ) {
+    /**
+     * `MAX(sort_order) + 1` is only safe when allocation and insertion are
+     * one serialized critical section. A concurrent tool/result writer could
+     * otherwise receive the same cursor and make range paging ambiguous.
+     * The lock is process-local; all normal app writes share this repository.
+     */
+    private val messageAppendMutex = Mutex()
 
     fun observeSessions(): Flow<List<ChatSessionEntity>> = dao.observeSessions()
 
@@ -114,13 +123,16 @@ class ChatRepository(
         startInclusive: Int,
         endExclusive: Int,
     ): List<com.openminis.app.data.db.MessageEntity> {
-        if (startInclusive >= endExclusive) return emptyList()
+        require(startInclusive <= endExclusive) { "Invalid sort range: [$startInclusive, $endExclusive)" }
+        if (startInclusive == endExclusive) return emptyList()
         val rows = ArrayList<com.openminis.app.data.db.MessageEntity>()
         var cursor = startInclusive
         while (cursor < endExclusive) {
             val page = dao.loadMessagesFromSortOrder(sessionId, cursor, endExclusive, limit = 50)
             if (page.isEmpty()) break
             rows.addAll(page)
+            // sort_order is allocated uniquely by appendMessage. The +1
+            // advance therefore cannot skip a row and makes gaps harmless.
             val next = page.last().sortOrder + 1
             if (next <= cursor) break
             cursor = next
@@ -797,15 +809,16 @@ class ChatRepository(
         modelSnapshot: ModelAttributionSnapshot? = null,
         errorInfo: String? = null,
     ): MessageEntity {
-        val sortOrder = dao.nextSortOrder(sessionId)
-        val now = System.currentTimeMillis()
+        val stored = storeBody(partsJson)
+        return messageAppendMutex.withLock {
+            val sortOrder = dao.nextSortOrder(sessionId)
+            val now = System.currentTimeMillis()
         // Cap the body so a runaway tool_result (e.g. a 13 MB browser_use
         // dump — Issue #17) cannot land an oversize blob into a Room row
         // that later fails CursorWindow's 2 MB ceiling on read. We keep
         // the row in the same parts_json shape (text part) so downstream
         // parsers — UI rendering and JSON-array consumers in DAO/search
         // — never break on the truncated payload.
-        val stored = storeBody(partsJson)
         val message = MessageEntity(
             id = UUID.randomUUID().toString(),
             sessionId = sessionId,
@@ -845,6 +858,7 @@ class ChatRepository(
             dao.touchSession(sessionId, now)
         }
         return message
+        }
     }
 
     /**

@@ -57,6 +57,42 @@ class ChatHistoryWindowTest {
     }
 
     @Test
+    fun olderTurnCountContinuesAcrossAnchorProbes() {
+        val first = ChatHistoryWindow.absorbOlder(
+            listOf(other(100), user(90), other(80), user(70)),
+            turnCount = 3,
+        )
+        assertEquals(2, first.usersIncluded)
+        assertTrue(first.needsMore)
+        val second = ChatHistoryWindow.absorbOlder(
+            listOf(other(60), user(50), other(40)),
+            turnCount = 3,
+            usersAlready = first.usersIncluded,
+        )
+        assertEquals(50, second.startSortOrder)
+        assertEquals(3, second.usersIncluded)
+        assertFalse(second.needsMore)
+    }
+
+    @Test
+    fun newerTurnCountStopsAtTheNextUserAcrossAnchorProbes() {
+        val first = ChatHistoryWindow.absorbNewer(
+            listOf(user(10), other(11), user(12)),
+            turnCount = 2,
+        )
+        assertEquals(2, first.usersIncluded)
+        assertTrue(first.needsMore)
+        val second = ChatHistoryWindow.absorbNewer(
+            listOf(other(13), user(14), other(15)),
+            turnCount = 2,
+            usersAlready = first.usersIncluded,
+        )
+        assertEquals(13, second.endSortOrder)
+        assertEquals(2, second.usersIncluded)
+        assertFalse(second.needsMore)
+    }
+
+    @Test
     fun prependCompensationDoesNotMoveTheVisibleIndex() {
         assertEquals(4, ChatHistoryWindow.compensatedLazyIndex(4, insertedBeforeAnchor = 0))
     }
@@ -92,6 +128,18 @@ class ChatHistoryWindowTest {
         )
         assertTrue(request.loadOlder)
         assertFalse(request.loadNewer)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun sortRangeRejectsReversedBounds() {
+        SortRange(8, 3)
+    }
+
+    @Test
+    fun sortRangeUsesHalfOpenBounds() {
+        val range = SortRange(3, 8)
+        assertEquals(3, range.startInclusive)
+        assertEquals(8, range.endExclusive)
     }
 
     @Test

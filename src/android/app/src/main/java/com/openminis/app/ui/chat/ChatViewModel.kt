@@ -653,20 +653,9 @@ class ChatViewModel(
         // [T-android-stream-flush-dualpath] Newline fast-path thresholds (iOS parity).
         private const val NEWLINE_FLUSH_MIN_CHARS = 50
         private const val NEWLINE_FLUSH_MAX_LEN = 5_000
-        // [T-android-larky-longsession-followup] see uiMessages / hasOlderMessages.
-        /** Tail window size used by [uiMessages] when a session exceeds it. */
-        const val INITIAL_VISIBLE_MESSAGE_CAP: Int = 200
-        /** Each "load older" tap grows the cap by this many messages. */
-        const val VISIBLE_MESSAGE_CAP_STEP: Int = 100
-        const val MAX_LOADED_MESSAGE_WINDOW: Int = 400
+        /** Initial parsed DB-row budget for the request-side LLM history. */
+        const val INITIAL_LLM_HISTORY_ROW_CAP: Int = 200
         internal const val MAX_AGENT_HISTORY_MESSAGES: Int = 400
-        /**
-         * Sessions with this many or fewer messages bypass the windowing
-         * machinery entirely — the derived `uiMessages` returns the same
-         * list reference as `messages`, so Compose sees identity-equal
-         * snapshots and the existing flat/stream pipeline is untouched.
-         */
-        const val LONG_SESSION_THRESHOLD: Int = 300
         // T258: tool block statuses with no committed tool_result. retryLast()
         // drops blocks in any of these states because they would orphan the
         // assistant tool_use entry on retry (the API rejects unmatched
@@ -799,8 +788,6 @@ class ChatViewModel(
     //
     // Reset on session load (different sessionId) is wired in loadSession.
 
-    internal val _visibleMessageCap = MutableStateFlow(INITIAL_VISIBLE_MESSAGE_CAP)
-
     // Database window state. The canonical UI list contains only this loaded
     // window; older rows are fetched on demand instead of retaining the whole
     // session and its parsed LLM representation in memory.
@@ -821,15 +808,6 @@ class ChatViewModel(
      * UI history; their LLM forms are parsed on demand before send.
      */
     internal var llmHistoryStartOffset = 0
-    /**
-     * Current tail cap. Reflective via [uiMessages]; bump with
-     * [loadOlderMessages] when the user scrolls past the windowed top.
-     * Reset to [INITIAL_VISIBLE_MESSAGE_CAP] each time [loadSession]
-     * (re)mounts a session — different sessions shouldn't inherit each
-     * other's caps.
-     */
-    val visibleMessageCap: StateFlow<Int> = _visibleMessageCap.asStateFlow()
-
     /**
      * The contiguous loaded slice. Cold open is a tail; paging extends it
      * without a second cut. A takeLast here used to hide the middle while
@@ -888,8 +866,20 @@ class ChatViewModel(
         }
         val before = chatRepository.dao.countMessagesBeforeSort(sessionId, oldest)
         val after = chatRepository.dao.countMessagesAfterSort(sessionId, newest)
+        val loadedDbRows = if (newest == Int.MAX_VALUE) {
+            // Avoid overflowing the half-open upper bound at the integer edge.
+            chatRepository.dao.messageCountForSession(sessionId) - before - after
+        } else {
+            chatRepository.dao.countMessagesInSortRange(
+                sessionId = sessionId,
+                startInclusive = oldest,
+                endExclusive = newest + 1,
+            )
+        }
         loadedMessageOffset = before
-        loadedMessageTotal = before + loadedPersistedRowCount() + after
+        // Derive the total from DB sequence ranges, never from the number of
+        // painted rows. One ChatMessage can represent several DB rows.
+        loadedMessageTotal = before + loadedDbRows + after
         _hasOlderMessages.value = before > 0
         _hasNewerMessages.value = after > 0
     }
@@ -965,7 +955,6 @@ class ChatViewModel(
                     }
                     _messages.value = older + _messages.value
                     noteLoadedSortBounds(rows)
-                    _visibleMessageCap.value = _messages.value.count { !it.isInternalBridge }
                 }
                 refreshHistoryEdges()
             } finally {
@@ -1002,7 +991,6 @@ class ChatViewModel(
                     }
                     _messages.value = _messages.value + newer
                     noteLoadedSortBounds(rows)
-                    _visibleMessageCap.value = _messages.value.count { !it.isInternalBridge }
                 }
                 refreshHistoryEdges()
             } finally {
