@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.17-linux
+
+- versionCode **217**
+- 打开会话和向上翻页都必须带着会话尾部。较新的记录如果还在数据库里、却不在当前窗口，会按 sort_order 自动补进列表，不再留在「较新的对话仍在本地」后面。右侧原有的向下按钮负责回到这个真正的最新处。数据库仍是 20。
+
+---
+
 # OpenMinis-Linux 2.0.16-linux
 
 - versionCode **216**

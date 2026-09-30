@@ -2,6 +2,7 @@ package com.openminis.app.ui.chat
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -140,6 +141,39 @@ class ChatHistoryWindowTest {
         val range = SortRange(3, 8)
         assertEquals(3, range.startInclusive)
         assertEquals(8, range.endExclusive)
+    }
+
+    @Test
+    fun missingTailRangeIsEmptyWhenTheCursorIsTheSessionEnd() {
+        assertNull(ChatHistoryWindow.missingTailRange(40, 41))
+        assertNull(ChatHistoryWindow.missingTailRange(null, 12))
+    }
+
+    @Test
+    fun missingTailRangeStartsOnTheNextSortOrder() {
+        val range = ChatHistoryWindow.missingTailRange(40, 90)
+        assertEquals(41, range?.startInclusive)
+        assertEquals(90, range?.endExclusive)
+    }
+
+    @Test
+    fun missingTailInsertsBeforeALiveRowThatSkippedTheGap() {
+        val index = ChatHistoryWindow.missingTailInsertIndex(
+            currentSourceIds = listOf(listOf("a"), listOf("live")),
+            missingSourceIds = listOf(listOf("gap"), listOf("live")),
+        )
+        assertEquals(1, index)
+    }
+
+    @Test
+    fun missingTailAppendsWhenNothingPaintedRepresentsIt() {
+        assertEquals(
+            -1,
+            ChatHistoryWindow.missingTailInsertIndex(
+                currentSourceIds = listOf(listOf("a")),
+                missingSourceIds = listOf(listOf("gap")),
+            ),
+        )
     }
 
     @Test

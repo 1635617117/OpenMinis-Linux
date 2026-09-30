@@ -511,9 +511,10 @@ fun ChatScreen(
             mcpRepository = mcpRepository,
         ),
     )
-    // The painted list is one contiguous loaded window, not a head+tail splice.
-    // Long sessions start on the newest page. Reaching either labeled edge
-    // pages the other direction; rows outside that window stay in the database.
+    // The painted list is one contiguous suffix of the session, not a head+tail
+    // splice. Opening starts on the newest rows. Older pages prepend. Rows after
+    // the loaded cursor are attached automatically, so the tail is not left
+    // behind a second control.
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
@@ -1315,6 +1316,14 @@ fun ChatScreen(
     // previous item — that is NOT user intent. Drive auto-follow off
     // `userScrolledAway` which only toggles on real user drags.
     var userScrolledAway by remember { mutableStateOf(false) }
+    var pinRealLatest by remember(sessionId) { mutableStateOf(false) }
+    LaunchedEffect(hasNewerMessages, pinRealLatest) {
+        if (!pinRealLatest || hasNewerMessages) return@LaunchedEffect
+        pinRealLatest = false
+        tracedScrollToItem("FAB-DOWN/tail", 0, 0)
+        kotlinx.coroutines.delay(100)
+        tracedScrollToItem("FAB-DOWN/tail-settle", 0, 0)
+    }
 
     // [T-android-scrollbtn-turn-walk] Up-button turn-walk state, mirroring iOS
     // `lastJumpedUserId` (dcdec3c5). Holds the id of the user message the
@@ -3729,7 +3738,6 @@ fun ChatScreen(
                         ?.error
                         ?.isNotBlank() == true
                     if (canResume && !isStreaming && error == null && !lastAssistantHasError) count++
-                    if (hasNewerMessages) count++
                     return count
                 }
                 data class VisibleHistoryAnchor(
@@ -3945,7 +3953,9 @@ fun ChatScreen(
                         val visible = info.visibleItemsInfo
                         HistoryEdgeVisible(
                             olderSentinel = visible.any { it.key == "__load_older__" },
-                            newerSentinel = visible.any { it.key == "__load_newer__" },
+                            // The newer edge is not a sentinel. A gap after the
+                            // loaded cursor is attached by the view model.
+                            newerSentinel = false,
                             newestEdge = visible.any { it.index == 0 },
                             oldestEdge = visible.any { it.index == info.totalItemsCount - 1 },
                         )
@@ -3959,7 +3969,6 @@ fun ChatScreen(
                             hasNewer = viewModel.hasNewerMessages.value,
                         )
                         if (action.loadOlder) viewModel.loadOlderMessages()
-                        else if (action.loadNewer) viewModel.loadNewerMessages()
                     }
                 }
                 Box {
@@ -4105,17 +4114,6 @@ fun ChatScreen(
                                     tracedScrollToItem("RESUME-BANNER/settle", 0, 0)
                                 }
                             })
-                        }
-                    }
-                    if (hasNewerMessages) {
-                        item(key = "__load_newer__", contentType = "history_edge") {
-                            HistoryPageEdge(
-                                text = stringResource(
-                                    if (isLoadingHistory) R.string.chat_loading_newer_messages
-                                    else R.string.chat_load_newer_messages,
-                                ),
-                                onClick = { viewModel.loadNewerMessages() },
-                            )
                         }
                     }
                     items(
@@ -4735,8 +4733,9 @@ fun ChatScreen(
                 // protectedRects: derived from the same layout constants
                 // instead of measured rects, which keeps it deterministic.
                 val upFabVisible = messages.isNotEmpty() && !isNearBottom.value
-                val downFabVisible =
-                    userScrolledAway && contentOverflows.value && messages.isNotEmpty()
+                val downFabVisible = messages.isNotEmpty() && (
+                    hasNewerMessages || (userScrolledAway && contentOverflows.value)
+                    )
                 val fabBaseDp = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                 val fabStackTopDp = when {
                     upFabVisible -> fabBaseDp + 46.dp + 36.dp
@@ -4877,13 +4876,13 @@ fun ChatScreen(
                     }
                 }
 
-                if (userScrolledAway && contentOverflows.value && messages.isNotEmpty()) {
+                if (downFabVisible) {
                     val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
                             // [T-android-scroll-fab-down-stuck] Clear the
                             // scrolled-away intent SYNCHRONOUSLY on tap — that
-                            // alone hides the FAB (its gate is userScrolledAway).
+                            // alone hides the FAB when the tail is already loaded.
                             // Don't rely on the at-bottom auto-reset LE
                             // (`isNearBottom && userScrolledAway → false`): on a
                             // long reverseLayout session scrollToItem(0,0) can
@@ -4894,6 +4893,10 @@ fun ChatScreen(
                             // stuck visible. The user tapped "go to bottom" — the
                             // intent is unambiguous, so reset directly.
                             userScrolledAway = false
+                            // The same button reaches the real session tail, not
+                            // only the currently painted suffix.
+                            pinRealLatest = true
+                            viewModel.ensureSessionTailLoaded()
                             // [T-android-scrollbtn-turn-walk] Jumping to the
                             // bottom resets the up-button's turn-walk (iOS does
                             // the same in its forceScrollToBottom handler).

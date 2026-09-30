@@ -4,9 +4,10 @@ package com.openminis.app.ui.chat
  * Display-window paging. The database stays the full transcript.
  *
  * A page is a contiguous slice of complete user turns. Loading older prepends
- * that slice and keeps the newer side. Loading newer appends and keeps the
- * older side. Nothing in this type drops a side to stay under a capacity:
- * that kick is what made the middle of a long chat unreachable.
+ * that slice and keeps the newer side. The loaded window is always a suffix
+ * of the session: rows after the newest loaded sort_order are attached, not
+ * left behind a control. Nothing in this type drops a side to stay under a
+ * capacity: that kick is what made the middle of a long chat unreachable.
  *
  * The cursor is [SortAnchor.sortOrder], not an offset and not created_at.
  * Offsets move when a row is inserted or deleted. created_at moves when a
@@ -14,7 +15,35 @@ package com.openminis.app.ui.chat
  */
 internal object ChatHistoryWindow {
     const val TURN_PAGE_SIZE = 5
+    const val TAIL_ATTACH_CHUNK = 50
     private const val ANCHOR_PROBE = 200
+
+    /**
+     * Rows with sort_order in `[loadedNewest + 1, sessionEndExclusive)`.
+     * Null means the loaded cursor already covers the session tail.
+     */
+    fun missingTailRange(loadedNewestSortOrder: Int?, sessionEndExclusive: Int): SortRange? {
+        val newest = loadedNewestSortOrder ?: return null
+        if (newest == Int.MAX_VALUE) return null
+        val start = newest + 1
+        if (start >= sessionEndExclusive) return null
+        return SortRange(start, sessionEndExclusive)
+    }
+
+    /**
+     * Insertion index for rows that belong after the loaded cursor.
+     * -1 means append. A non-negative index is the first painted row that
+     * already represents one of those DB ids; the missing rows go immediately
+     * before it so a live turn is not placed under the gap it skipped.
+     */
+    fun missingTailInsertIndex(
+        currentSourceIds: List<List<String>>,
+        missingSourceIds: List<List<String>>,
+    ): Int {
+        val missing = missingSourceIds.flatten().toSet()
+        if (missing.isEmpty()) return -1
+        return currentSourceIds.indexOfFirst { ids -> ids.any(missing::contains) }
+    }
 
     data class SortAnchor(val sortOrder: Int, val isUser: Boolean)
 

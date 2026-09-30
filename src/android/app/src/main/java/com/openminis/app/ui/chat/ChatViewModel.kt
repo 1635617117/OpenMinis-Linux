@@ -795,6 +795,8 @@ class ChatViewModel(
     internal var loadedMessageTotal = 0
     internal var unrepresentedLoadedRows = 0
     internal var loadingOlderMessages = false
+    private var tailAttachJob: kotlinx.coroutines.Job? = null
+    private var tailAttachQueued = false
     /** Stable page cursor. Not an offset, not created_at. */
     internal var loadedOldestSortOrder: Int? = null
     internal var loadedNewestSortOrder: Int? = null
@@ -855,7 +857,7 @@ class ChatViewModel(
         _hasNewerMessages.value = loadedMessageOffset + loadedPersistedRowCount() < loadedMessageTotal
     }
 
-    internal suspend fun refreshHistoryEdges() {
+    internal suspend fun refreshHistoryEdges(scheduleTail: Boolean = true) {
         val oldest = loadedOldestSortOrder
         val newest = loadedNewestSortOrder
         if (oldest == null || newest == null) {
@@ -882,6 +884,9 @@ class ChatViewModel(
         loadedMessageTotal = before + loadedDbRows + after
         _hasOlderMessages.value = before > 0
         _hasNewerMessages.value = after > 0
+        // A newer gap means the painted window is not the session tail.
+        // Attach it. Do not wait for a second control.
+        if (scheduleTail && after > 0) ensureSessionTailLoaded()
     }
 
     internal fun rememberDigestLines(lines: List<HistoryDigest.Line>) {
@@ -918,7 +923,13 @@ class ChatViewModel(
             val sort = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 chatRepository.dao.sortOrderOf(dbMessageId)
             }
-            if (sort != null && (loadedNewestSortOrder == null || sort > loadedNewestSortOrder!!)) {
+            val newest = loadedNewestSortOrder
+            // count == 1 is this row alone. Anything larger is a gap under it.
+            // Jumping the cursor over that gap would hide the missing rows.
+            val skipped = newest != null && withContext(kotlinx.coroutines.Dispatchers.IO) {
+                chatRepository.dao.countMessagesAfterSort(sessionId, newest) > 1
+            }
+            if (!skipped && sort != null && (newest == null || sort > newest)) {
                 loadedNewestSortOrder = sort
             }
             refreshHistoryEdges()
@@ -960,43 +971,96 @@ class ChatViewModel(
             } finally {
                 loadingOlderMessages = false
                 _isLoadingHistory.value = false
+                if (tailAttachQueued) ensureSessionTailLoaded()
             }
         }
     }
 
-    /** Append one turn-aligned page. The older side stays on screen. */
-    fun loadNewerMessages() {
-        if (loadingOlderMessages || _isStreaming.value) return
-        val after = loadedNewestSortOrder ?: return
-        loadingOlderMessages = true
-        _isLoadingHistory.value = true
-        viewModelScope.launch {
+    /**
+     * The painted window must include the session tail. If rows exist after
+     * [loadedNewestSortOrder], append them. A click that only loads five turns
+     * is what left the newer transcript off screen.
+     */
+    fun ensureSessionTailLoaded() {
+        if (sessionId.isEmpty()) return
+        if (_isStreaming.value || loadingOlderMessages || tailAttachJob?.isActive == true) {
+            tailAttachQueued = true
+            return
+        }
+        tailAttachQueued = false
+        tailAttachJob = viewModelScope.launch {
+            loadingOlderMessages = true
+            _isLoadingHistory.value = true
             try {
-                val end = withContext(Dispatchers.IO) {
-                    newerTurnEnd(after, ChatHistoryWindow.TURN_PAGE_SIZE)
+                var idlePasses = 0
+                while (!_isStreaming.value && idlePasses < 3) {
+                    val before = loadedNewestSortOrder
+                    drainMissingTail()
+                    refreshHistoryEdges(scheduleTail = false)
+                    val again = tailAttachQueued || _hasNewerMessages.value
+                    tailAttachQueued = false
+                    if (!again) break
+                    if (loadedNewestSortOrder == before) idlePasses++ else idlePasses = 0
                 }
-                if (end == null || end <= after) {
-                    refreshHistoryEdges()
-                    return@launch
-                }
-                val rows = withContext(Dispatchers.IO) {
-                    chatRepository.hydrateDisplayRows(
-                        loadSortRange(SortRange(after + 1, end + 1)),
-                    )
-                }
-                if (rows.isNotEmpty()) {
-                    val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
-                    val newer = rows.toChatMessages().filter { message ->
-                        message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
-                    }
-                    _messages.value = _messages.value + newer
-                    noteLoadedSortBounds(rows)
-                }
-                refreshHistoryEdges()
             } finally {
+                val restart = tailAttachQueued && !_isStreaming.value
                 loadingOlderMessages = false
                 _isLoadingHistory.value = false
+                tailAttachJob = null
+                tailAttachQueued = false
+                if (restart) ensureSessionTailLoaded()
             }
+        }
+    }
+
+    private suspend fun drainMissingTail() {
+        var chunks = 0
+        while (!_isStreaming.value && chunks < 10_000) {
+            val endExclusive = withContext(Dispatchers.IO) {
+                chatRepository.dao.nextSortOrder(sessionId)
+            }
+            val missing = ChatHistoryWindow.missingTailRange(
+                loadedNewestSortOrder,
+                endExclusive,
+            ) ?: return
+            val chunkEnd = minOf(
+                missing.endExclusive.toLong(),
+                missing.startInclusive.toLong() + ChatHistoryWindow.TAIL_ATTACH_CHUNK.toLong(),
+            ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            if (chunkEnd <= missing.startInclusive) return
+            val rows = withContext(Dispatchers.IO) {
+                chatRepository.hydrateDisplayRows(
+                    loadSortRange(SortRange(missing.startInclusive, chunkEnd)),
+                )
+            }
+            if (rows.isEmpty()) {
+                loadedNewestSortOrder = chunkEnd - 1
+                chunks++
+                continue
+            }
+            val missingMessages = rows.toChatMessages()
+            val current = _messages.value
+            val insertAt = ChatHistoryWindow.missingTailInsertIndex(
+                currentSourceIds = current.map { it.sourceDbIds },
+                missingSourceIds = missingMessages.map { it.sourceDbIds },
+            )
+            val present = current.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+            val fresh = missingMessages.filter { message ->
+                message.sourceDbIds.none(present::contains)
+            }
+            if (fresh.isNotEmpty()) {
+                _messages.value = if (insertAt < 0) {
+                    current + fresh
+                } else {
+                    current.take(insertAt) + fresh + current.drop(insertAt)
+                }
+            }
+            val previous = loadedNewestSortOrder
+            noteLoadedSortBounds(rows)
+            if (loadedNewestSortOrder == previous) {
+                loadedNewestSortOrder = maxOf(previous ?: chunkEnd - 1, chunkEnd - 1)
+            }
+            chunks++
         }
     }
 
@@ -3159,7 +3223,12 @@ class ChatViewModel(
 
     init {
         viewModelScope.launch {
-            _isStreaming.collect { if (!it) ChatViewModelStore.scheduleTrim() }
+            _isStreaming.collect { streaming ->
+                if (!streaming) {
+                    ChatViewModelStore.scheduleTrim()
+                    if (tailAttachQueued || _hasNewerMessages.value) ensureSessionTailLoaded()
+                }
+            }
         }
         loadSession()
         // [T-session-paused-badge-active-false-positive] Drive the session-list
