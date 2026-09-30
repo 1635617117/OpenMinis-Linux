@@ -2425,7 +2425,7 @@
     <string name="group_chat_framing">Framing the question…</string>
     <string name="group_chat_summarizing">Summarizing the discussion…</string>
     <string name="group_chat_host_suffix">Host</string>
-    <string name="group_chat_need_models">AI group chat needs at least two different models. Choose teammates in Settings → Multi-agent.</string>
+    <string name="group_chat_need_models">AI group chat needs at least one other model. The current session only opens and closes. Choose teammates in Settings → Multi-agent.</string>
     <string name="group_chat_nothing_to_close">There is no discussion to end.</string>
     <string name="group_chat_no_provider">Can’t end the discussion: no model is available.</string>
     <string name="group_chat_passed">Nothing to add this round.</string>

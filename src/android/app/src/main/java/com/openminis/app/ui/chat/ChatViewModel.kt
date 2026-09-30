@@ -2140,6 +2140,10 @@ class ChatViewModel(
             editor.putString("round:$toId", round)
             editor.remove("round:$fromId")
         }
+        prefs.getString("opening:$fromId", null)?.let { opening ->
+            editor.putString("opening:$toId", opening)
+            editor.remove("opening:$fromId")
+        }
         editor.apply()
         groupChatPrefsId = toId
     }

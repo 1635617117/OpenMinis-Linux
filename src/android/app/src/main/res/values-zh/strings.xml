@@ -2248,7 +2248,7 @@
     <string name="group_chat_framing">正在整理问题…</string>
     <string name="group_chat_summarizing">正在汇总讨论…</string>
     <string name="group_chat_host_suffix">主持</string>
-    <string name="group_chat_need_models">AI 群聊需要至少两个不同模型。请先到设置 → 多智能体，为团队模型选择其他模型。</string>
+    <string name="group_chat_need_models">AI 群聊需要至少一个其他模型。主会话只负责开场和结束汇总。请到设置 → 多智能体选择队友。</string>
     <string name="group_chat_nothing_to_close">当前没有可结束的讨论。</string>
     <string name="group_chat_no_provider">结束讨论失败：当前没有可用模型。</string>
     <string name="group_chat_passed">本轮不补充。</string>

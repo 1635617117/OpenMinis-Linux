@@ -176,4 +176,34 @@ class GroupChatTest {
         assertEquals("deepseek-reasoner", GroupChat.resolveTarget("@deepseek-reasoner 你说", targets)?.key)
         assertEquals("deepseek-chat", GroupChat.resolveTarget("@DeepSeek V3 你说", targets)?.key)
     }
+
+    @Test
+    fun oneCharacterReplyIsNotASpeech() {
+        assertFalse(GroupChat.isSubstantive("对"))
+        assertFalse(GroupChat.isSubstantive("同意"))
+        assertEquals("", GroupChat.recoverUtterance("对", ""))
+    }
+
+    @Test
+    fun shortTextRecoversTheThinkingConclusion() {
+        val thinking = "先核对进程是否还在。\n\n真正要看的是 pid 和容器命名空间，不能只杀宿主机上的同名进程。"
+        val recovered = GroupChat.recoverUtterance("对", thinking)
+        assertTrue(recovered.contains("pid"))
+        assertFalse(recovered == "对")
+    }
+
+    @Test
+    fun substantiveTextIsKept() {
+        val text = "先确认容器里的 pid，再决定要不要杀进程。宿主机同名进程不一定是目标。"
+        assertTrue(GroupChat.isSubstantive(text))
+        assertEquals(text, GroupChat.recoverUtterance(text, "很长的思考过程"))
+    }
+
+    @Test
+    fun openingPromptDoesNotAskTheHostToConclude() {
+        val prompt = GroupChat.openingPrompt("这个报错怎么看？", "")
+        assertTrue(prompt.contains("不要给结论"))
+        assertTrue(prompt.contains("不要参与"))
+        assertFalse(prompt.contains("你的立场"))
+    }
 }

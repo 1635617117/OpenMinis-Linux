@@ -17,9 +17,6 @@ import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -64,16 +61,16 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
             ?: com.openminis.app.data.model.ThinkingLevel.OFF,
     )
-    val members = listOf(hostMember) + slotMembers.filter { slot ->
-        slot.modelId != hostMember.modelId || slot.name != hostMember.name
-    }
+    // The main session only opens and closes. Selected teammates are the speakers.
+    val speakers = slotMembers
+    val roster = listOf(hostMember) + speakers
     val wantsClose = closingNow
     val spoken = prior.toMutableList()
     val contextText = recentContext()
     val addressed = if (!wantsClose) {
         GroupChat.resolveTarget(
             userText,
-            members.map { member ->
+            roster.map { member ->
                 GroupChat.Addressable(
                     name = member.name,
                     key = member.modelId.ifBlank { member.name },
@@ -92,49 +89,62 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     } else {
         null
     }
-    if (!wantsClose && addressed == null && members.size < 2) {
+    if (!wantsClose && addressed == null && speakers.isEmpty()) {
         publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_need_models))
         return
     }
     // A resolved @ names exactly one speaker. Do not fall through into the
     // all-members round — the others must not start, not even to say PASS.
     if (!wantsClose && addressed != null && !groupChatCloseRequested) {
-        val member = members.find { (it.modelId.ifBlank { it.name }) == addressed.key }
-            ?: members.find { it.name == addressed.name }
-        if (member != null) {
-            spoken += speakMembers(listOf(member), analyzing) {
-                GroupChat.directPrompt(it.name, userText, GroupChat.transcript(prior), contextText)
-            }
-        } else {
+        val member = roster.find { (it.modelId.ifBlank { it.name }) == addressed.key }
+            ?: roster.find { it.name == addressed.name }
+        if (member != null && member.modelId == hostMember.modelId && member.name == hostMember.name) {
             val answer = speakVisible(
                 speaker = hostName,
                 vendor = hostVendor,
                 snapshot = hostSnapshot,
                 provider = provider,
-                system = GroupChat.memberSystem(hostPlain),
-                user = GroupChat.directPrompt(hostPlain, userText, GroupChat.transcript(prior), contextText),
-                tools = groupTools(provider),
+                system = GroupChat.HOST_DIRECT_SYSTEM,
+                user = GroupChat.directPrompt(hostPlain, userText, GroupChat.transcript(spoken), contextText),
+                tools = emptyList(),
                 placeholder = analyzing,
-                thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
-                    ?: com.openminis.app.data.model.ThinkingLevel.OFF,
             )
             if (answer.isNotBlank()) spoken += GroupChat.Line(hostName, answer)
+        } else if (member != null) {
+            spoken += speakMembers(listOf(member), analyzing) {
+                GroupChat.directPrompt(it.name, userText, GroupChat.transcript(spoken), contextText)
+            }
         }
-    } else if (!wantsClose && !groupChatCloseRequested && members.isNotEmpty()) {
-        val firstRound = speakMembers(members, analyzing) { member ->
-            val index = members.indexOf(member)
-            GroupChat.opinionPrompt(
-                member.name,
-                GroupChat.stance(index),
-                userText,
-                GroupChat.transcript(spoken),
-                contextText,
+    } else if (!wantsClose && !groupChatCloseRequested && speakers.isNotEmpty()) {
+        val savedOpening = savedHostOpening()
+        if (savedOpening != null) {
+            spoken.add(0, GroupChat.Line(hostName, savedOpening))
+        } else {
+            val opening = speakVisible(
+                speaker = hostName,
+                vendor = hostVendor,
+                snapshot = hostSnapshot,
+                provider = provider,
+                system = GroupChat.OPENING_SYSTEM,
+                user = GroupChat.openingPrompt(userText, contextText),
+                tools = emptyList(),
+                placeholder = analyzing,
             )
+            if (opening.isNotBlank()) {
+                rememberHostOpening(opening)
+                spoken.add(0, GroupChat.Line(hostName, opening))
+            }
         }
-        spoken += firstRound
-        if (!groupChatCloseRequested && firstRound.size >= 2) {
-            spoken += speakMembers(members, analyzing, deferBubble = true, allowPass = true) { member ->
-                GroupChat.replyPrompt(member.name, userText, GroupChat.transcript(spoken))
+        for ((index, member) in speakers.withIndex()) {
+            if (groupChatCloseRequested) break
+            spoken += speakMembers(listOf(member), analyzing) {
+                GroupChat.opinionPrompt(
+                    it.name,
+                    GroupChat.stance(index),
+                    userText,
+                    GroupChat.transcript(spoken),
+                    contextText,
+                )
             }
         }
     }
@@ -256,19 +266,32 @@ private fun ChatViewModel.groupTools(provider: LLMProvider) = AgentTools.makeAge
     subAgentEnabled = false,
 ).filter { !SubAgentKind.blocks(SubAgentKind.PLAN, it.name) }
 
+private fun ChatViewModel.openingKey() = "opening:$groupChatPrefsId"
+
+private fun ChatViewModel.savedHostOpening(): String? =
+    groupChatPrefs().getString(openingKey(), null)?.trim()?.takeIf { it.isNotEmpty() }
+
+private fun ChatViewModel.rememberHostOpening(text: String) {
+    groupChatPrefs().edit().putString(openingKey(), text).apply()
+}
+
+internal fun ChatViewModel.clearHostOpening() {
+    groupChatPrefs().edit().remove(openingKey()).apply()
+}
+
 private suspend fun ChatViewModel.speakMembers(
     members: List<GroupMember>,
     analyzing: String,
     deferBubble: Boolean = false,
     allowPass: Boolean = false,
     promptFor: (GroupMember) -> String,
-): List<GroupChat.Line> = supervisorScope {
+): List<GroupChat.Line> {
     val gate = Mutex()
-    members.map { member ->
-        async {
-            if (groupChatCloseRequested) return@async null
-            val text = try {
-                speakVisible(
+    val lines = mutableListOf<GroupChat.Line>()
+    for (member in members) {
+        if (groupChatCloseRequested) break
+        val text = try {
+            speakVisible(
                 speaker = member.name,
                 snapshot = member.snapshot,
                 provider = member.provider,
@@ -282,25 +305,25 @@ private suspend fun ChatViewModel.speakMembers(
                 vendor = member.vendor,
                 deferBubble = deferBubble,
             )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                upsertGroupBubble(
-                    UUID.randomUUID().toString(),
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            upsertGroupBubble(
+                UUID.randomUUID().toString(),
+                member.name,
+                context.getString(
+                    com.openminis.app.R.string.group_chat_member_failed,
                     member.name,
-                    context.getString(
-                        com.openminis.app.R.string.group_chat_member_failed,
-                        member.name,
-                        e.message ?: e.javaClass.simpleName,
-                    ),
-                    analyzing = false,
-                    vendor = member.vendor,
-                )
-                return@async null
-            }
-            text.takeIf { it.isNotBlank() }?.let { GroupChat.Line(member.name, it) }
+                    e.message ?: e.javaClass.simpleName,
+                ),
+                analyzing = false,
+                vendor = member.vendor,
+            )
+            continue
         }
-    }.awaitAll().filterNotNull()
+        text.takeIf { it.isNotBlank() }?.let { lines += GroupChat.Line(member.name, it) }
+    }
+    return lines
 }
 
 private suspend fun ChatViewModel.speakVisible(
@@ -322,14 +345,28 @@ private suspend fun ChatViewModel.speakVisible(
     val id = UUID.randomUUID().toString()
     if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
-        speakModel(provider, system, user, tools, toolGate, thinkingLevel, stopWhenClosing = allowPass) { block ->
+        var spoken = speakModel(provider, system, user, tools, toolGate, thinkingLevel, stopWhenClosing = allowPass) { block ->
             showGroupStatus(id, speaker, vendor, block)
         }
+        if (!allowPass && !GroupChat.isSubstantive(spoken) && !groupChatCloseRequested) {
+            spoken = speakModel(
+                provider,
+                system,
+                user + "\n\n上一句不是发言。请按上面的字数写成完整的一段，不要只回一个字或「对」。",
+                emptyList(),
+                toolGate = null,
+                thinkingLevel = thinkingLevel,
+                stopWhenClosing = false,
+            ) { block ->
+                showGroupStatus(id, speaker, vendor, block)
+            }
+        }
+        spoken
     } catch (e: CancellationException) {
         removeGroupBubble(id)
         throw e
     }
-    if (text.isBlank() || (allowPass && GroupChat.isPass(text))) {
+    if (!GroupChat.isSubstantive(text)) {
         if (allowPass) {
             upsertGroupBubble(
                 id,
@@ -373,8 +410,11 @@ private suspend fun ChatViewModel.speakModel(
 ): String {
     val history = mutableListOf(LLMMessage(role = LLMMessage.Role.USER, content = user))
     val report = StringBuilder()
+    var lastThinking = ""
     repeat(3) {
-        if (stopWhenClosing && groupChatCloseRequested) return report.toString().trim()
+        if (stopWhenClosing && groupChatCloseRequested) {
+            return GroupChat.recoverUtterance(report.toString(), lastThinking)
+        }
         val textSb = StringBuilder()
         val thinking = StringBuilder()
         val calls = mutableListOf<Triple<String, String, JSONObject>>()
@@ -413,13 +453,14 @@ private suspend fun ChatViewModel.speakModel(
             }
         }
         if (thinking.isNotEmpty()) onStatus(thinkingStatus(thinking))
+        lastThinking = thinking.toString()
         val text = textSb.toString().trim()
         if (calls.isEmpty() || tools.isEmpty()) {
             if (text.isNotEmpty()) {
                 if (report.isNotEmpty()) report.append("\n\n")
                 report.append(text)
             }
-            return report.toString().trim()
+            return GroupChat.recoverUtterance(report.toString(), lastThinking)
         }
         val assistantParts = mutableListOf<AgentContentPart>()
         if (text.isNotEmpty()) assistantParts += AgentContentPart.Text(text)
@@ -442,7 +483,7 @@ private suspend fun ChatViewModel.speakModel(
         }
         history += LLMMessage(role = LLMMessage.Role.USER, content = "", contentParts = results)
     }
-    return report.toString().trim()
+    return GroupChat.recoverUtterance(report.toString(), lastThinking)
 }
 
 private fun thinkingStatus(thinking: StringBuilder) = AssistantBlock(
@@ -623,6 +664,7 @@ internal fun ChatViewModel.anchorGroupRound(): Boolean {
         ?: return false
     groupChatRoundStartId = anchor
     groupChatPrefs().edit().putString(roundStartKey(), anchor).apply()
+    clearHostOpening()
     groupChatAnchorPending = false
     return true
 }

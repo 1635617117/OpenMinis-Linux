@@ -86,6 +86,29 @@ object GroupChat {
             normalized == "（无补充）"
     }
 
+    /** A visible stance, not a one-word agreement or a pass. */
+    fun isSubstantive(text: String): Boolean {
+        if (isPass(text)) return false
+        return text.trim().length >= 8
+    }
+
+    /**
+     * Reasoning models often leave the stance in thinking and a stub such as
+     * 「对」 in the text channel. Keep a real text answer; otherwise use the
+     * last substantial thinking paragraph. A stub with no thinking is not a speech.
+     */
+    fun recoverUtterance(text: String, thinking: String): String {
+        val spoken = text.trim()
+        if (isSubstantive(spoken)) return spoken
+        val thought = thinking.trim()
+        if (thought.length < 12) return ""
+        val paragraphs = thought.split(Regex("\n{2,}"))
+            .map { it.trim() }
+            .filter { it.length >= 12 }
+        val chosen = paragraphs.lastOrNull() ?: thought
+        return chosen.takeLast(400).trim()
+    }
+
     /**
      * One loaded chat row, reduced so the round boundary can be tested without
      * Android message types. [sourceIds] are the persisted row ids. The UI id
@@ -197,7 +220,7 @@ object GroupChat {
     fun shouldMergeAssistantTurns(prevSpeaker: String?, nextSpeaker: String?): Boolean =
         prevSpeaker.isNullOrBlank() && nextSpeaker.isNullOrBlank()
 
-    /** Four lenses so parallel speakers do not write the same essay. */
+    /** Ordered roles so later speakers do not repeat the same essay. */
     fun stance(index: Int): String = STANCES[index.mod(STANCES.size).let { if (it < 0) it + STANCES.size else it }]
 
     fun isCloseRequest(text: String): Boolean {
@@ -336,9 +359,10 @@ object GroupChat {
     }
 
     fun opinionPrompt(name: String, stance: String, userText: String, prior: String, context: String): String = """
-        你是 $name。本轮你的立场是「$stance」，不要改成和其他人一样的综述。
+        你是 $name。按名单顺序发言，你的角色是「$stance」，不要改成和其他人一样的综述。
         ${stanceGuide(stance)}
-        可以同意或反对已有发言，但必须写出依据。不要扮演其他人。
+        先读已有发言。主持人的开场只是焦点，不是观点，不要和主持人辩论。
+        可以同意或反对其他模型，但必须写出依据。不要扮演其他人，不要只回一个字。
         需要查资料时可以调用工具；工具过程不会展示，正文里不要描述工具调用。
         用用户的语言，80 到 180 字。没有把握的地方直接说不确定。
 
@@ -380,6 +404,19 @@ object GroupChat {
         $prior
     """.trimIndent()
 
+    fun openingPrompt(userText: String, context: String): String = """
+        你是主持人，只负责这场讨论的开场。后面的模型会按顺序发言。
+        不要表态，不要给结论，不要参与后面的讨论。
+        用用户的语言，60 到 120 字：点明用户在问什么，列出要分清的 2 到 3 个焦点。
+        不要扮演其他模型，不要调用工具，不要只回一个字。
+
+        用户：
+        $userText
+
+        近期上下文：
+        ${context.ifBlank { "（无）" }}
+    """.trimIndent()
+
     fun summaryPrompt(userText: String, prior: String): String = """
         你是主持人。请把这场群聊整理成给用户的汇报，不要编造没人说过的观点。
         用用户的语言，分成三段：共识、分歧、建议。分歧要写清是谁和谁不同。
@@ -392,6 +429,12 @@ object GroupChat {
         讨论记录：
         $prior
     """.trimIndent()
+
+    const val OPENING_SYSTEM =
+        "你是 AI 群聊的主持人。开场只框定问题和焦点，不表态，不给结论，不扮演其他模型，也不参与后面的讨论。"
+
+    const val HOST_DIRECT_SYSTEM =
+        "你是这场群聊的主持人。只有用户点名时才直接回答，不参与其他人的讨论，不扮演其他模型。"
 
     const val HOST_SYSTEM = "你是 AI 群聊的主持人。只在讨论结束时汇报，不扮演其他模型，不编造他人没说过的话。"
 
@@ -416,6 +459,6 @@ object GroupChat {
     fun memberSystem(name: String): String = """
         你是 $name，正在和其他模型的同一场群聊里发言。
         只代表你自己。可以调用分析工具。界面会显示你当前的思考或工具，正文出来后这些状态会收起。
-        正文不要出现工具名、参数或“正在调用”。只有补充轮明确要求时，才用 PASS 表示没有新观点。
+        正文不要出现工具名、参数或“正在调用”。不要用一个字或 PASS 代替发言。
     """.trimIndent()
 }
