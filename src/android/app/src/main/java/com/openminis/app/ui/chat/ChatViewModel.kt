@@ -2105,6 +2105,8 @@ class ChatViewModel(
 
     internal fun closedKey() = "closed:$groupChatPrefsId"
 
+    internal fun roundStartKey() = "round:$groupChatPrefsId"
+
     private val _groupChatEnabled = MutableStateFlow(groupChatPrefs().getBoolean(groupChatKey(), false))
     val groupChatEnabled: StateFlow<Boolean> = _groupChatEnabled.asStateFlow()
 
@@ -2113,6 +2115,14 @@ class ChatViewModel(
 
     @Volatile
     internal var groupChatClosedAfterId: String? = groupChatPrefs().getString(closedKey(), null)
+
+    /** Tail when this open began. Keeps an unfinished previous round out of the new one. */
+    @Volatile
+    internal var groupChatRoundStartId: String? = groupChatPrefs().getString(roundStartKey(), null)
+
+    /** Set when group chat is opened before any message is loaded. */
+    @Volatile
+    internal var groupChatAnchorPending: Boolean = false
 
     internal fun migrateGroupChatPrefs(fromId: String, toId: String) {
         if (fromId == toId || fromId.isEmpty() || toId.isEmpty()) return
@@ -2126,14 +2136,20 @@ class ChatViewModel(
             editor.putString("closed:$toId", closed)
             editor.remove("closed:$fromId")
         }
+        prefs.getString("round:$fromId", null)?.let { round ->
+            editor.putString("round:$toId", round)
+            editor.remove("round:$fromId")
+        }
         editor.apply()
         groupChatPrefsId = toId
     }
 
     fun setGroupChatEnabled(enabled: Boolean) {
+        val opening = enabled && !_groupChatEnabled.value
         groupChatPrefs().edit().putBoolean(groupChatKey(), enabled).apply()
         _groupChatEnabled.value = enabled
         if (!enabled) groupChatCloseRequested = false
+        if (opening) groupChatAnchorPending = !anchorGroupRound()
         dismissMentionMenu()
     }
 

@@ -86,6 +86,113 @@ object GroupChat {
             normalized == "（无补充）"
     }
 
+    /**
+     * One loaded chat row, reduced so the round boundary can be tested without
+     * Android message types. [sourceIds] are the persisted row ids. The UI id
+     * changes across a reload and must not be the only marker.
+     */
+    data class ContextMessage(
+        val id: String,
+        val role: String,
+        val content: String,
+        val speakerName: String? = null,
+        val sourceIds: List<String> = emptyList(),
+        val queued: Boolean = false,
+        val awaiting: Boolean = false,
+    )
+
+    fun isHostSpeaker(speaker: String?, hostSuffix: String): Boolean {
+        val name = speaker?.trim().orEmpty()
+        val suffix = hostSuffix.trim()
+        if (name.isEmpty() || suffix.isEmpty()) return false
+        return name == suffix || name.endsWith(" · $suffix")
+    }
+
+    fun matchesMarker(message: ContextMessage, marker: String): Boolean {
+        if (marker.isBlank()) return false
+        return message.id == marker || message.sourceIds.any { it == marker }
+    }
+
+    /**
+     * First index that belongs to the current group round.
+     *
+     * A stored close id often misses after reload. Starting at 0 in that case
+     * feeds the previous group chat into the new round, so members pass and
+     * the host still writes a report from the old transcript. Use the latest
+     * resolved marker or host report instead. If this window contains neither,
+     * it is already the current tail.
+     */
+    fun roundStartIndex(
+        messages: List<ContextMessage>,
+        markers: List<String?>,
+        hostSuffix: String = "",
+    ): Int {
+        val found = markers.mapNotNull { marker ->
+            val id = marker?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            messages.indexOfLast { matchesMarker(it, id) }.takeIf { it >= 0 }
+        }
+        val host = if (hostSuffix.isBlank()) {
+            -1
+        } else {
+            messages.indexOfLast { isHostSpeaker(it.speakerName, hostSuffix) }
+        }
+        val boundaries = found + listOfNotNull(host.takeIf { it >= 0 })
+        if (boundaries.isEmpty()) return 0
+        return boundaries.max() + 1
+    }
+
+    fun currentSpeeches(
+        messages: List<ContextMessage>,
+        markers: List<String?>,
+        hostSuffix: String = "",
+        hiddenTexts: Set<String> = emptySet(),
+    ): List<Line> {
+        val hidden = hiddenTexts.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        return messages.drop(roundStartIndex(messages, markers, hostSuffix)).mapNotNull { message ->
+            if (message.queued || message.awaiting) return@mapNotNull null
+            val speaker = message.speakerName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            val text = message.content.trim()
+            if (text.isBlank() || isPass(text) || text in hidden || isHostSpeaker(speaker, hostSuffix)) {
+                null
+            } else {
+                Line(speaker, text)
+            }
+        }
+    }
+
+    /**
+     * Main-chat turns only. Group bubbles and the previous host report carry a
+     * speaker name; taking the last few rows made a new round discuss that
+     * previous round instead of the conversation the user is looking at.
+     */
+    fun currentConversation(
+        messages: List<ContextMessage>,
+        maxMessages: Int = 6,
+        maxCharsPerMessage: Int = 2000,
+        maxChars: Int = 8000,
+    ): String {
+        val selected = messages.filter { message ->
+            !message.queued &&
+                message.speakerName.isNullOrBlank() &&
+                (message.role == "user" || message.role == "assistant") &&
+                message.content.isNotBlank()
+        }.takeLast(maxMessages.coerceAtLeast(1))
+        val clipped = selected.map { message ->
+            message.copy(content = message.content.trim().take(maxCharsPerMessage.coerceAtLeast(1)))
+        }
+        val kept = mutableListOf<ContextMessage>()
+        var used = 0
+        for (message in clipped.asReversed()) {
+            val extra = message.content.length + if (kept.isEmpty()) 0 else 1
+            if (kept.isNotEmpty() && used + extra > maxChars) break
+            kept += message
+            used += extra
+        }
+        return kept.asReversed().joinToString("\n") { message ->
+            "${message.role}: ${message.content}"
+        }
+    }
+
     /** Group utterances stay separate so each model keeps its own bubble. */
     fun shouldMergeAssistantTurns(prevSpeaker: String?, nextSpeaker: String?): Boolean =
         prevSpeaker.isNullOrBlank() && nextSpeaker.isNullOrBlank()

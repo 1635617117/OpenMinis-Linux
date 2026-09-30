@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.18-linux
+
+- versionCode **218**
+- 新开一场 AI 群聊只带当前对话，不再把上一场成员发言和主持汇报当作这一轮的记录。结束时如果这一轮没有新发言，主持人不会再据此写共识、分歧和建议。数据库仍是 20。
+
+---
+
 # OpenMinis-Linux 2.0.17-linux
 
 - versionCode **217**

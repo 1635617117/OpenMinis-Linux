@@ -29,6 +29,7 @@ import java.util.UUID
 
 internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: Boolean) {
     if (closing) groupChatCloseRequested = true
+    if (groupChatAnchorPending) anchorGroupRound()
     val analyzing = context.getString(com.openminis.app.R.string.group_chat_analyzing)
     val userText = _messages.value.lastOrNull { it.role == "user" && !it.isQueued }?.content.orEmpty()
     val closingNow = closing || GroupChat.isCloseRequest(userText)
@@ -132,7 +133,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         }
         spoken += firstRound
         if (!groupChatCloseRequested && firstRound.size >= 2) {
-            spoken += speakMembers(members, analyzing, deferBubble = true) { member ->
+            spoken += speakMembers(members, analyzing, deferBubble = true, allowPass = true) { member ->
                 GroupChat.replyPrompt(member.name, userText, GroupChat.transcript(spoken))
             }
         }
@@ -150,8 +151,10 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
             placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
         )
         if (summary.isNotBlank()) {
-            groupChatClosedAfterId = _messages.value.lastOrNull { it.speakerName == hostName }?.id
-            groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
+            _messages.value.lastOrNull { it.speakerName == hostName }?.let { closed ->
+                groupChatClosedAfterId = stableGroupMessageId(closed)
+                groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
+            }
             withContext(Dispatchers.Main) {
                 _promptQueue.value = emptyList()
                 _messages.value = _messages.value.filterNot { it.isQueued }
@@ -257,6 +260,7 @@ private suspend fun ChatViewModel.speakMembers(
     members: List<GroupMember>,
     analyzing: String,
     deferBubble: Boolean = false,
+    allowPass: Boolean = false,
     promptFor: (GroupMember) -> String,
 ): List<GroupChat.Line> = supervisorScope {
     val gate = Mutex()
@@ -273,7 +277,7 @@ private suspend fun ChatViewModel.speakMembers(
                 tools = groupTools(member.provider),
                 placeholder = analyzing,
                 toolGate = gate,
-                allowPass = true,
+                allowPass = allowPass,
                 thinkingLevel = member.thinkingLevel,
                 vendor = member.vendor,
                 deferBubble = deferBubble,
@@ -493,22 +497,32 @@ private suspend fun ChatViewModel.showGroupStatus(
 private fun ChatViewModel.closeRecord(): List<GroupChat.Line> {
     val windowed = groupTranscript()
     if (windowed.isNotEmpty()) return windowed
-    val lastTopic = _messages.value.indexOfLast { message ->
-        message.role == "user" && !message.isQueued && !GroupChat.isCloseRequest(message.content)
-    }
-    val slice = if (lastTopic >= 0) _messages.value.drop(lastTopic + 1) else _messages.value
-    return slice.mapNotNull { message ->
-        if (message.role != "assistant") return@mapNotNull null
+    // Do not walk back to the previous user question. That slice is the last
+    // group chat, and ending an empty new round would make the host report it.
+    val start = GroupChat.roundStartIndex(groupSlices(), groupRoundMarkers(), hostSuffix())
+    val placeholder = context.getString(com.openminis.app.R.string.group_chat_analyzing)
+    val passed = context.getString(com.openminis.app.R.string.group_chat_passed).trim()
+    return _messages.value.drop(start).mapNotNull { message ->
+        if (message.role != "assistant" || message.isQueued) return@mapNotNull null
         val speaker = message.speakerName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+        if (GroupChat.isHostSpeaker(speaker, hostSuffix())) return@mapNotNull null
         val text = message.content.trim().ifBlank {
             message.toolBlocks
                 .filter { it.kind == "text" || it.kind == "thinking" }
                 .joinToString("\n") { it.content }
                 .trim()
         }
-        val placeholder = context.getString(com.openminis.app.R.string.group_chat_analyzing)
-        if (text.isBlank() || text == placeholder || message.isAwaitingModelResponse) null
-        else GroupChat.Line(speaker, text)
+        if (
+            text.isBlank() ||
+            text == placeholder ||
+            text == passed ||
+            GroupChat.isPass(text) ||
+            message.isAwaitingModelResponse
+        ) {
+            null
+        } else {
+            GroupChat.Line(speaker, text)
+        }
     }
 }
 
@@ -602,22 +616,49 @@ private fun ChatViewModel.snapshotFor(entry: ModelEntry?): ModelAttributionSnaps
     )
 }
 
-private fun ChatViewModel.groupTranscript(): List<GroupChat.Line> {
-    val messages = _messages.value
-    val start = groupChatClosedAfterId?.let { marker ->
-        val index = messages.indexOfLast { it.id == marker }
-        if (index >= 0) index + 1 else 0
-    } ?: 0
-    return messages.drop(start).mapNotNull { message ->
-        val speaker = message.speakerName?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-        val text = message.content.trim()
-        if (text.isBlank() || message.isAwaitingModelResponse) null
-        else GroupChat.Line(speaker, text)
-    }
+internal fun ChatViewModel.anchorGroupRound(): Boolean {
+    val anchor = _messages.value.lastOrNull { !it.isQueued }
+        ?.let { stableGroupMessageId(it) }
+        ?.takeIf { it.isNotBlank() }
+        ?: return false
+    groupChatRoundStartId = anchor
+    groupChatPrefs().edit().putString(roundStartKey(), anchor).apply()
+    groupChatAnchorPending = false
+    return true
 }
 
-private fun ChatViewModel.recentContext(): String =
-    _messages.value.takeLast(8).joinToString("\n") { message ->
-        val who = message.speakerName ?: message.role
-        "$who: ${message.content.take(400)}"
+internal fun ChatViewModel.stableGroupMessageId(message: ChatMessage): String =
+    message.sourceDbIds.lastOrNull { it.isNotBlank() } ?: message.id
+
+private fun ChatViewModel.hostSuffix(): String =
+    context.getString(com.openminis.app.R.string.group_chat_host_suffix)
+
+private fun ChatViewModel.groupRoundMarkers(): List<String?> =
+    listOf(groupChatClosedAfterId, groupChatRoundStartId)
+
+private fun ChatViewModel.groupSlices(): List<GroupChat.ContextMessage> =
+    _messages.value.map { message ->
+        GroupChat.ContextMessage(
+            id = message.id,
+            role = message.role,
+            content = message.content,
+            speakerName = message.speakerName,
+            sourceIds = message.sourceDbIds,
+            queued = message.isQueued,
+            awaiting = message.isAwaitingModelResponse,
+        )
     }
+
+private fun ChatViewModel.groupTranscript(): List<GroupChat.Line> =
+    GroupChat.currentSpeeches(
+        groupSlices(),
+        groupRoundMarkers(),
+        hostSuffix(),
+        hiddenTexts = setOf(
+            context.getString(com.openminis.app.R.string.group_chat_passed),
+            context.getString(com.openminis.app.R.string.group_chat_analyzing),
+        ),
+    )
+
+private fun ChatViewModel.recentContext(): String =
+    GroupChat.currentConversation(groupSlices())

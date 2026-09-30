@@ -105,6 +105,61 @@ class GroupChatTest {
     }
 
     @Test
+    fun newRoundDoesNotReuseThePreviousGroupChat() {
+        val history = listOf(
+            GroupChat.ContextMessage("u1", "user", "上一场：怎么改 deps"),
+            GroupChat.ContextMessage("m1", "assistant", "上一场主张：先改 prompt", speakerName = "glm-5.3"),
+            GroupChat.ContextMessage("h1", "assistant", "共识\n上一场结论", speakerName = "mimo · 主持", sourceIds = listOf("db-h1")),
+            GroupChat.ContextMessage("u2", "user", "当前问题：这场构建为什么失败"),
+            GroupChat.ContextMessage("a2", "assistant", "当前分析：缺的是本地模块，不是 deps"),
+            GroupChat.ContextMessage("pass", "assistant", "本轮不补充。", speakerName = "deepseek"),
+        )
+        val speeches = GroupChat.currentSpeeches(
+            history,
+            markers = listOf("ui-only-id", "h1"),
+            hostSuffix = "主持",
+            hiddenTexts = setOf("本轮不补充。"),
+        )
+        assertEquals(emptyList<GroupChat.Line>(), speeches)
+        val context = GroupChat.currentConversation(history)
+        assertTrue(context.contains("当前问题：这场构建为什么失败"))
+        assertTrue(context.contains("当前分析：缺的是本地模块，不是 deps"))
+        assertFalse(context.contains("上一场主张"))
+        assertFalse(context.contains("上一场结论"))
+        assertFalse(context.contains("本轮不补充"))
+    }
+
+    @Test
+    fun staleCloseIdStillStopsAtTheHostReport() {
+        val history = listOf(
+            GroupChat.ContextMessage("old", "assistant", "上一场发言", speakerName = "glm"),
+            GroupChat.ContextMessage("host", "assistant", "共识", speakerName = "mimo · 主持", sourceIds = listOf("db-host")),
+            GroupChat.ContextMessage("now", "assistant", "这一轮才说的", speakerName = "deepseek"),
+        )
+        val speeches = GroupChat.currentSpeeches(
+            history,
+            markers = listOf("missing-ui-id"),
+            hostSuffix = "主持",
+        )
+        assertEquals(listOf(GroupChat.Line("deepseek", "这一轮才说的")), speeches)
+        assertEquals(
+            2,
+            GroupChat.roundStartIndex(history, listOf("db-host"), "主持"),
+        )
+    }
+
+    @Test
+    fun openAnchorDropsAnUnfinishedPreviousRound() {
+        val history = listOf(
+            GroupChat.ContextMessage("old", "assistant", "没结束的上一场", speakerName = "glm"),
+            GroupChat.ContextMessage("tail", "assistant", "当前对话", sourceIds = listOf("db-tail")),
+            GroupChat.ContextMessage("now", "assistant", "新一轮发言", speakerName = "deepseek"),
+        )
+        val speeches = GroupChat.currentSpeeches(history, markers = listOf("db-tail"), hostSuffix = "主持")
+        assertEquals(listOf(GroupChat.Line("deepseek", "新一轮发言")), speeches)
+    }
+
+    @Test
     fun collidingDisplayNamesStillAddressOneModel() {
         val targets = listOf(
             GroupChat.Addressable(
