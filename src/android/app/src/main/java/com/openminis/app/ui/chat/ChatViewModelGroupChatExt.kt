@@ -56,7 +56,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         vendor = hostVendor,
         provider = provider,
         snapshot = hostSnapshot,
-        maxTokens = (mainEntry?.model?.maxOutputTokens ?: 1024).coerceIn(256, 2048),
+        maxTokens = (mainEntry?.model?.maxOutputTokens ?: 4096).coerceIn(1024, 16384),
         temperature = mainEntry?.overrides?.temperature,
         thinkingLevel = mainEntry?.effectiveMaxThinkingLevel
             ?: com.openminis.app.data.model.ThinkingLevel.OFF,
@@ -108,6 +108,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
                 user = GroupChat.directPrompt(hostPlain, userText, GroupChat.transcript(spoken), contextText),
                 tools = emptyList(),
                 placeholder = analyzing,
+                maxTokens = hostMember.maxTokens,
             )
             if (answer.isNotBlank()) spoken += GroupChat.Line(hostName, answer)
         } else if (member != null) {
@@ -129,6 +130,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
                 user = GroupChat.openingPrompt(userText, contextText),
                 tools = emptyList(),
                 placeholder = analyzing,
+                maxTokens = hostMember.maxTokens,
             )
             if (opening.isNotBlank()) {
                 rememberHostOpening(opening)
@@ -159,6 +161,7 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
             user = GroupChat.summaryPrompt(userText, GroupChat.transcript(spoken)),
             tools = emptyList(),
             placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
+            maxTokens = hostMember.maxTokens,
         )
         if (summary.isNotBlank()) {
             _messages.value.lastOrNull { it.speakerName == hostName }?.let { closed ->
@@ -250,7 +253,7 @@ private fun ChatViewModel.groupMembers(
             ),
             provider = provider,
             snapshot = snapshotFor(entry),
-            maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(256, 2048),
+            maxTokens = (entry.model.maxOutputTokens ?: 4096).coerceIn(1024, 16384),
             temperature = entry.overrides.temperature,
             thinkingLevel = entry.effectiveMaxThinkingLevel,
         )
@@ -304,6 +307,7 @@ private suspend fun ChatViewModel.speakMembers(
                 thinkingLevel = member.thinkingLevel,
                 vendor = member.vendor,
                 deferBubble = deferBubble,
+                maxTokens = member.maxTokens,
             )
         } catch (e: CancellationException) {
             throw e
@@ -340,12 +344,16 @@ private suspend fun ChatViewModel.speakVisible(
         com.openminis.app.data.model.ThinkingLevel.OFF,
     vendor: String = GroupChat.VENDOR_UNKNOWN,
     deferBubble: Boolean = false,
+    maxTokens: Int = 4096,
 ): String {
     if (groupChatCloseRequested && allowPass) return ""
     val id = UUID.randomUUID().toString()
     if (!deferBubble) upsertGroupBubble(id, speaker, placeholder, analyzing = true, vendor = vendor)
     val text = try {
-        var spoken = speakModel(provider, system, user, tools, toolGate, thinkingLevel, stopWhenClosing = allowPass) { block ->
+        var spoken = speakModel(
+            provider, system, user, tools, toolGate, thinkingLevel,
+            stopWhenClosing = allowPass, maxTokens = maxTokens,
+        ) { block ->
             showGroupStatus(id, speaker, vendor, block)
         }
         if (!allowPass && !GroupChat.isSubstantive(spoken) && !groupChatCloseRequested) {
@@ -357,6 +365,7 @@ private suspend fun ChatViewModel.speakVisible(
                 toolGate = null,
                 thinkingLevel = thinkingLevel,
                 stopWhenClosing = false,
+                maxTokens = maxTokens,
             ) { block ->
                 showGroupStatus(id, speaker, vendor, block)
             }
@@ -376,7 +385,15 @@ private suspend fun ChatViewModel.speakVisible(
                 vendor = vendor,
             )
         } else if (!deferBubble) {
-            removeGroupBubble(id)
+            // [group-chat-empty-fix] 空白发言不再静默删气泡：留痕，让“过程可见结果为空”
+            // 可以被看见和排查。
+            upsertGroupBubble(
+                id,
+                speaker,
+                context.getString(com.openminis.app.R.string.group_chat_no_output),
+                analyzing = false,
+                vendor = vendor,
+            )
         }
         return ""
     }
@@ -406,12 +423,18 @@ private suspend fun ChatViewModel.speakModel(
     toolGate: Mutex?,
     thinkingLevel: com.openminis.app.data.model.ThinkingLevel,
     stopWhenClosing: Boolean,
+    maxTokens: Int = 4096,
     onStatus: suspend (AssistantBlock) -> Unit,
 ): String {
     val history = mutableListOf(LLMMessage(role = LLMMessage.Role.USER, content = user))
     val report = StringBuilder()
     var lastThinking = ""
-    repeat(3) {
+    // [group-chat-empty-fix] 轮次上限 3→6，另加 3 分钟总时长兜底：工具密集的发言
+    // 以前跑满 3 轮就只剩思考兑底。思考档不降级，靠预算和记账给正文留位置。
+    val deadline = android.os.SystemClock.elapsedRealtime() + 180_000L
+    var round = 0
+    while (round < 6 && android.os.SystemClock.elapsedRealtime() < deadline) {
+        round++
         if (stopWhenClosing && groupChatCloseRequested) {
             return GroupChat.recoverUtterance(report.toString(), lastThinking)
         }
@@ -422,7 +445,7 @@ private suspend fun ChatViewModel.speakModel(
         provider.streamMessage(
             messages = history,
             systemPrompt = system,
-            maxTokens = 1024,
+            maxTokens = maxTokens,
             temperature = null,
             tools = tools,
             thinkingLevel = thinkingLevel,
@@ -455,11 +478,13 @@ private suspend fun ChatViewModel.speakModel(
         if (thinking.isNotEmpty()) onStatus(thinkingStatus(thinking))
         lastThinking = thinking.toString()
         val text = textSb.toString().trim()
+        // [group-chat-empty-fix] 每轮正文都记账：带工具调用的轮次同样有话要说，
+        // 以前只收“干净轮”的正文，工具密集的发言整段丢失。
+        if (text.isNotEmpty()) {
+            if (report.isNotEmpty()) report.append("\n\n")
+            report.append(text)
+        }
         if (calls.isEmpty() || tools.isEmpty()) {
-            if (text.isNotEmpty()) {
-                if (report.isNotEmpty()) report.append("\n\n")
-                report.append(text)
-            }
             return GroupChat.recoverUtterance(report.toString(), lastThinking)
         }
         val assistantParts = mutableListOf<AgentContentPart>()
