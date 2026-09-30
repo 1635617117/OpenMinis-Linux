@@ -70,13 +70,24 @@ internal suspend fun ChatViewModel.executeTool(
         // bindMounts map and would surface another session's
         // /var/minis/{workspace,attachments,offloads,browser} files.
         ReadImageTool.NAME -> executeReadImageTool(argsJson)
-        "shell_execute", "shell_exec", "env_exec" -> executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+        "shell_execute", "shell_exec", "env_exec" -> {
+            // [T-tool-approval] 审批门开着时，shell 类工具执行前挂起等人批。
+            if (!com.openminis.app.tools.ToolApprovalGate.awaitApproval("shell_execute", argsJson.take(400))) {
+                ToolExecutionResult("工具调用被用户拒绝。", false)
+            } else {
+                executeShellCommand(argsJson, toolId, toolBlocks, assistantId, currentText)
+            }
+        }
         "su_exec" -> {
-            val o = JSONObject(argsJson)
-            val cmd = o.optString("command")
-            val quoted = "'" + cmd.replace("'", "'\\''") + "'"
-            o.put("command", "android-su -c " + quoted)
-            executeShellCommand(o.toString(), toolId, toolBlocks, assistantId, currentText)
+            if (!com.openminis.app.tools.ToolApprovalGate.awaitApproval("su_exec", argsJson.take(400))) {
+                ToolExecutionResult("工具调用被用户拒绝。", false)
+            } else {
+                val o = JSONObject(argsJson)
+                val cmd = o.optString("command")
+                val quoted = "'" + cmd.replace("'", "'\\''") + "'"
+                o.put("command", "android-su -c " + quoted)
+                executeShellCommand(o.toString(), toolId, toolBlocks, assistantId, currentText)
+            }
         }
         "browser_use" -> executeBrowserUseTool(argsJson)
         "memory_write", "save_memory" -> executeMemoryWriteTool(argsJson)

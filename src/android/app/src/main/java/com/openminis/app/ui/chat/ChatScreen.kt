@@ -3194,6 +3194,7 @@ fun ChatScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = { ToolApprovalBar() },
     ) { padding ->
         // [T-android-scroll-fab-content-inset] The chat pane's own width, used
         // below to inset the scroll buttons to the capped content column.

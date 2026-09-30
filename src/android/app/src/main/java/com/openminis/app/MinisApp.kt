@@ -374,6 +374,22 @@ class MinisApp : Application(), ImageLoaderFactory {
         // `LoggingManager.startIfEnabled()` (called from MinisApp.swift:143).
         AppLogger.init(this)
 
+        // [T-generation-run] 启动扫描：上一次进程死亡时半途而废的生成轮次
+        // 标记为 ABANDONED 并留日志，让"崩溃时在跑哪条回复"可追溯。
+        runCatching {
+            com.openminis.app.agent.GenerationRunStore.abandoned().forEach { run ->
+                com.openminis.app.agent.GenerationRunStore.markAbandoned(run.runId)
+                Log.w(
+                    "MinisApp",
+                    "[GenerationRun] abandoned run recovered: session=${run.sessionId} " +
+                        "model=${run.modelId} anchor=${run.turnAnchor} startedAtMs=${run.startedAtMs}",
+                )
+            }
+        }
+        // [T-tool-approval] 恢复 shell 审批门开关状态。
+        com.openminis.app.tools.ToolApprovalGate.enabled =
+            getSharedPreferences("tool_approval", MODE_PRIVATE).getBoolean("enabled", false)
+
         // Bug 2 (MIUI silent kill) diagnostic: write a launch-cycle beacon
         // so a subsequent launch can observe whether the previous run
         // exited cleanly (onTerminate hit) or was force-killed by LMK /
