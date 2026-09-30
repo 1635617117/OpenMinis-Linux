@@ -1,126 +1,111 @@
 package com.openminis.app.ui.chat
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatHistoryWindowTest {
+    private fun user(sort: Int) = ChatHistoryWindow.SortAnchor(sort, isUser = true)
+    private fun other(sort: Int) = ChatHistoryWindow.SortAnchor(sort, isUser = false)
+
     @Test
-    fun `reveals loaded prefix before fetching database`() {
-        val plan = ChatHistoryWindow.planOlderLoad(
-            loadedVisible = 400,
-            visibleCap = 200,
-            loadedOffset = 4_162,
-            step = 100,
+    fun olderPageStopsOnTheNthUserAndKeepsTheTurn() {
+        val anchors = listOf(
+            other(90),
+            other(80),
+            user(70),
+            other(60),
+            user(50),
+            other(40),
+            user(30),
         )
-        assertEquals(300, plan.nextVisibleCap)
-        assertNull(plan.fetchOffset)
-        assertEquals(0, plan.fetchCount)
+        val probe = ChatHistoryWindow.absorbOlder(anchors, turnCount = 2)
+        assertEquals(50, probe.startSortOrder)
+        assertEquals(2, probe.usersIncluded)
+        assertFalse(probe.needsMore)
     }
 
     @Test
-    fun `fetches persisted prefix after loaded window is visible`() {
-        val plan = ChatHistoryWindow.planOlderLoad(
-            loadedVisible = 400,
-            visibleCap = 400,
-            loadedOffset = 4_162,
-            step = 100,
+    fun olderPageAsksForMoreWhenTheProbeEndsMidTurn() {
+        val probe = ChatHistoryWindow.absorbOlder(listOf(other(12), other(11)), turnCount = 5)
+        assertEquals(11, probe.startSortOrder)
+        assertEquals(0, probe.usersIncluded)
+        assertTrue(probe.needsMore)
+    }
+
+    @Test
+    fun newerPageDoesNotStartTheNextTurn() {
+        val anchors = listOf(
+            user(10),
+            other(11),
+            other(12),
+            user(13),
+            other(14),
         )
-        assertEquals(500, plan.nextVisibleCap)
-        assertEquals(4_062, plan.fetchOffset)
-        assertEquals(100, plan.fetchCount)
+        val probe = ChatHistoryWindow.absorbNewer(anchors, turnCount = 1)
+        assertEquals(12, probe.endSortOrder)
+        assertEquals(1, probe.usersIncluded)
+        assertFalse(probe.needsMore)
     }
 
     @Test
-    fun `first partial page grows cap by exact row count`() {
-        val plan = ChatHistoryWindow.planOlderLoad(
-            loadedVisible = 400,
-            visibleCap = 400,
-            loadedOffset = 62,
-            step = 100,
-        )
-        assertEquals(462, plan.nextVisibleCap)
-        assertEquals(0, plan.fetchOffset)
-        assertEquals(62, plan.fetchCount)
+    fun newerPageKeepsReadingRepliesAfterTheUserMessage() {
+        val probe = ChatHistoryWindow.absorbNewer(listOf(user(10)), turnCount = 1)
+        assertEquals(10, probe.endSortOrder)
+        assertTrue(probe.needsMore)
     }
 
     @Test
-    fun `repeated older pages never exceed fixed capacity`() {
-        var start = 4_162
-        var count = 400
-        repeat(50) {
-            val move = ChatHistoryWindow.moveOlder(
-                loadedStart = start,
-                loadedCount = count,
-                fetchStart = (start - 100).coerceAtLeast(0),
-                fetchCount = minOf(100, start),
-                capacity = 400,
-            )
-            start = move.retainedStart
-            count = move.retainedCount
-            assert(count <= 400)
-        }
-        assertEquals(0, start)
-        assertEquals(400, count)
+    fun prependCompensationDoesNotMoveTheVisibleIndex() {
+        assertEquals(4, ChatHistoryWindow.compensatedLazyIndex(4, insertedBeforeAnchor = 0))
     }
 
     @Test
-    fun `short list that already shows both edges does not walk the database`() {
-        val action = ChatHistoryWindow.historyEdgeAction(
+    fun appendCompensationShiftsByTheInsertedPrefix() {
+        assertEquals(7, ChatHistoryWindow.compensatedLazyIndex(4, insertedBeforeAnchor = 3))
+    }
+
+    @Test
+    fun shortListThatShowsBothEdgesDoesNotAutoPage() {
+        val request = ChatHistoryWindow.historyEdgeAction(
+            hasOlder = true,
+            hasNewer = true,
             olderSentinelVisible = true,
             newerSentinelVisible = true,
             newestEdgeVisible = true,
             oldestEdgeVisible = true,
-            hasOlder = true,
-            hasNewer = true,
         )
-        assertEquals(false, action.loadOlder)
-        assertEquals(false, action.loadNewer)
+        assertFalse(request.loadOlder)
+        assertFalse(request.loadNewer)
     }
 
     @Test
-    fun `reaching only the older edge pages toward older rows`() {
-        val action = ChatHistoryWindow.historyEdgeAction(
+    fun onlyTheOlderEdgePagesOlder() {
+        val request = ChatHistoryWindow.historyEdgeAction(
+            hasOlder = true,
+            hasNewer = false,
             olderSentinelVisible = true,
             newerSentinelVisible = false,
             newestEdgeVisible = false,
             oldestEdgeVisible = true,
-            hasOlder = true,
-            hasNewer = true,
         )
-        assertEquals(true, action.loadOlder)
-        assertEquals(false, action.loadNewer)
+        assertTrue(request.loadOlder)
+        assertFalse(request.loadNewer)
     }
 
     @Test
-    fun `reaching only the newer edge pages toward newer rows`() {
-        val action = ChatHistoryWindow.historyEdgeAction(
-            olderSentinelVisible = false,
-            newerSentinelVisible = true,
-            newestEdgeVisible = true,
-            oldestEdgeVisible = false,
-            hasOlder = true,
-            hasNewer = true,
+    fun lazyIndexKeepsTheSameRowWhenOlderItemsArePrepended() {
+        val before = ChatHistoryWindow.lazyIndexOfOldestFirstKey(
+            oldestFirstCount = 6,
+            keyIndexInOldestFirst = 4,
+            itemsBeforeMessages = 1,
         )
-        assertEquals(false, action.loadOlder)
-        assertEquals(true, action.loadNewer)
-    }
-
-    @Test
-    fun `reverse layout index keeps the anchored row`() {
-        assertEquals(5, ChatHistoryWindow.lazyIndexOfOldestFirstKey(10, 6, 2))
-    }
-
-    @Test
-    fun `appending at the tail evicts the oldest loaded rows`() {
-        val move = ChatHistoryWindow.appendTail(
-            totalBefore = 4_562,
-            loadedStart = 4_162,
-            loadedCount = 400,
-            appended = 3,
-            capacity = 400,
+        val after = ChatHistoryWindow.lazyIndexOfOldestFirstKey(
+            oldestFirstCount = 9,
+            keyIndexInOldestFirst = 7,
+            itemsBeforeMessages = 1,
         )
-        assertEquals(4_165, move.retainedStart)
-        assertEquals(400, move.retainedCount)
+        assertEquals(before, after)
     }
 }

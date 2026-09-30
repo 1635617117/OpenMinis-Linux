@@ -791,10 +791,11 @@ class ChatViewModel(
     // is fine on its own, but the streaming pipeline (combine + sample) and
     // the FlatChat flattening both walk the full list every tick.
     //
-    // Strategy: `_messages` is one contiguous loaded window, at most
-    // [MAX_LOADED_MESSAGE_WINDOW] rows. `uiMessages` shows that window in
-    // full. Scrolling to either labeled edge pages the database; the page
-    // slide drops the far end so the whole session is never reconstructed.
+    // Strategy: `_messages` is one contiguous loaded slice. Cold open reads
+    // the newest tail, not the whole session. Scrolling to an edge prepends
+    // or appends the next turn-aligned page and does not drop the other
+    // side. The database remains the full transcript. The model window is
+    // a separate, digested slice.
     //
     // Reset on session load (different sessionId) is wired in loadSession.
 
@@ -807,6 +808,11 @@ class ChatViewModel(
     internal var loadedMessageTotal = 0
     internal var unrepresentedLoadedRows = 0
     internal var loadingOlderMessages = false
+    /** Stable page cursor. Not an offset, not created_at. */
+    internal var loadedOldestSortOrder: Int? = null
+    internal var loadedNewestSortOrder: Int? = null
+    internal val llmDigestLines = ArrayDeque<HistoryDigest.Line>()
+    internal var llmDigestOmitted = 0
 
     /**
      * Index (in DB order from the session start) of the first row that
@@ -825,9 +831,9 @@ class ChatViewModel(
     val visibleMessageCap: StateFlow<Int> = _visibleMessageCap.asStateFlow()
 
     /**
-     * The contiguous loaded window. A second `takeLast` used to hide the middle
-     * of that window while both ends still looked present. Memory stays bounded
-     * by [MAX_LOADED_MESSAGE_WINDOW] and by paging, not by deleting rows here.
+     * The contiguous loaded slice. Cold open is a tail; paging extends it
+     * without a second cut. A takeLast here used to hide the middle while
+     * both ends still looked present.
      */
     val uiMessages: StateFlow<List<ChatMessage>> =
         _messages.map { raw ->
@@ -853,14 +859,56 @@ class ChatViewModel(
     val hasOlderMessages: StateFlow<Boolean> = _hasOlderMessages.asStateFlow()
     private val _hasNewerMessages = MutableStateFlow(false)
     val hasNewerMessages: StateFlow<Boolean> = _hasNewerMessages.asStateFlow()
+    internal val _isLoadingHistory = MutableStateFlow(false)
+    val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory.asStateFlow()
 
     internal fun loadedPersistedRowCount(messages: List<ChatMessage> = _messages.value): Int =
         messages.sumOf { it.sourceDbIds.size } + unrepresentedLoadedRows
 
     internal fun refreshHasOlderMessages() {
-        val loadedRows = loadedPersistedRowCount()
+        val oldest = loadedOldestSortOrder
+        val newest = loadedNewestSortOrder
+        if (oldest == null || newest == null) {
+            _hasOlderMessages.value = false
+            _hasNewerMessages.value = false
+            return
+        }
         _hasOlderMessages.value = loadedMessageOffset > 0
-        _hasNewerMessages.value = loadedMessageOffset + loadedRows < loadedMessageTotal
+        _hasNewerMessages.value = loadedMessageOffset + loadedPersistedRowCount() < loadedMessageTotal
+    }
+
+    internal suspend fun refreshHistoryEdges() {
+        val oldest = loadedOldestSortOrder
+        val newest = loadedNewestSortOrder
+        if (oldest == null || newest == null) {
+            loadedMessageOffset = 0
+            _hasOlderMessages.value = false
+            _hasNewerMessages.value = false
+            return
+        }
+        val before = chatRepository.dao.countMessagesBeforeSort(sessionId, oldest)
+        val after = chatRepository.dao.countMessagesAfterSort(sessionId, newest)
+        loadedMessageOffset = before
+        loadedMessageTotal = before + loadedPersistedRowCount() + after
+        _hasOlderMessages.value = before > 0
+        _hasNewerMessages.value = after > 0
+    }
+
+    internal fun rememberDigestLines(lines: List<HistoryDigest.Line>) {
+        if (lines.isEmpty()) return
+        llmDigestLines.addAll(lines)
+        val retained = HistoryDigest.retainNewest(llmDigestLines)
+        llmDigestOmitted += (llmDigestLines.size - retained.size).coerceAtLeast(0)
+        llmDigestLines.clear()
+        llmDigestLines.addAll(retained)
+    }
+
+    internal fun noteLoadedSortBounds(rows: List<MessageEntity>) {
+        if (rows.isEmpty()) return
+        val oldest = rows.minOf { it.sortOrder }
+        val newest = rows.maxOf { it.sortOrder }
+        loadedOldestSortOrder = minOf(loadedOldestSortOrder ?: oldest, oldest)
+        loadedNewestSortOrder = maxOf(loadedNewestSortOrder ?: newest, newest)
     }
 
     internal fun notePersistedUiRow(uiMessageId: String?, dbMessageId: String) {
@@ -876,119 +924,90 @@ class ChatViewModel(
         } else {
             unrepresentedLoadedRows++
         }
-        loadedMessageTotal++
-        refreshHasOlderMessages()
+        viewModelScope.launch {
+            val sort = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                chatRepository.dao.sortOrderOf(dbMessageId)
+            }
+            if (sort != null && (loadedNewestSortOrder == null || sort > loadedNewestSortOrder!!)) {
+                loadedNewestSortOrder = sort
+            }
+            refreshHistoryEdges()
+        }
     }
 
     /**
-     * Reveal one bounded window above the current UI tail. Already-loaded rows
-     * are exposed first; only after that in-memory prefix is exhausted do we
-     * query another database page. A fetched page also grows the visible cap,
-     * otherwise prepending it would leave the same tail on screen and make
-     * persisted history look permanently missing.
+     * Prepend one turn-aligned page. The newer side stays on screen.
+     * A live turn sits on that edge, so a database fetch waits until it ends.
      */
     fun loadOlderMessages() {
-        if (loadingOlderMessages) return
-
-        val loadedVisible = _messages.value.count { !it.isInternalBridge }
-        val plan = ChatHistoryWindow.planOlderLoad(
-            loadedVisible = loadedVisible,
-            visibleCap = _visibleMessageCap.value,
-            loadedOffset = loadedMessageOffset,
-            step = VISIBLE_MESSAGE_CAP_STEP,
-        )
-        val newOffset = plan.fetchOffset
-        if (newOffset == null) {
-            _visibleMessageCap.value = plan.nextVisibleCap
-            refreshHasOlderMessages()
-            return
-        }
-        // Fetching a page slides the window and drops the newest loaded rows.
-        // A live turn lives on that edge, so wait until it finishes.
-        if (_isStreaming.value) return
-
+        if (loadingOlderMessages || _isStreaming.value) return
+        val before = loadedOldestSortOrder ?: return
         loadingOlderMessages = true
+        _isLoadingHistory.value = true
         viewModelScope.launch {
             try {
-                val page = withContext(Dispatchers.IO) {
-                    chatRepository.loadMessagesBefore(
-                        sessionId = sessionId,
-                        endExclusive = loadedMessageOffset,
-                        limit = loadedMessageOffset - newOffset,
-                        totalMessages = loadedMessageTotal,
+                val start = withContext(Dispatchers.IO) {
+                    olderTurnStart(before, ChatHistoryWindow.TURN_PAGE_SIZE)
+                }
+                if (start == null || start >= before) {
+                    refreshHistoryEdges()
+                    return@launch
+                }
+                val rows = withContext(Dispatchers.IO) {
+                    chatRepository.hydrateDisplayRows(
+                        loadSortRange(SortRange(start, before)),
                     )
                 }
-                if (page.messages.isNotEmpty()) {
-                    val older = withContext(Dispatchers.IO) {
-                        chatRepository.hydrateDisplayRows(page.messages).toChatMessages()
+                if (rows.isNotEmpty()) {
+                    val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                    val older = rows.toChatMessages().filter { message ->
+                        message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
                     }
-                    val combined = older + _messages.value
-                    // Keep the old side around the viewport. The omitted newer
-                    // side remains reachable through the pinned newer control.
-                    val retained = combined.take(MAX_LOADED_MESSAGE_WINDOW)
-                    _messages.value = retained
-                    loadedMessageOffset = page.firstMessageOffset
-                    loadedMessageTotal = page.totalMessages
-                    _visibleMessageCap.value = minOf(
-                        plan.nextVisibleCap,
-                        retained.count { !it.isInternalBridge },
-                    )
+                    _messages.value = older + _messages.value
+                    noteLoadedSortBounds(rows)
+                    _visibleMessageCap.value = _messages.value.count { !it.isInternalBridge }
                 }
-                refreshHasOlderMessages()
+                refreshHistoryEdges()
             } finally {
                 loadingOlderMessages = false
+                _isLoadingHistory.value = false
             }
         }
     }
 
-    /** Move the bounded message window toward newer persisted rows. */
+    /** Append one turn-aligned page. The older side stays on screen. */
     fun loadNewerMessages() {
         if (loadingOlderMessages || _isStreaming.value) return
+        val after = loadedNewestSortOrder ?: return
         loadingOlderMessages = true
+        _isLoadingHistory.value = true
         viewModelScope.launch {
             try {
-                val loadedRows = loadedPersistedRowCount()
-                val start = loadedMessageOffset + loadedRows
-                val total = withContext(Dispatchers.IO) {
-                    chatRepository.dao.messageCountForSession(sessionId)
+                val end = withContext(Dispatchers.IO) {
+                    newerTurnEnd(after, ChatHistoryWindow.TURN_PAGE_SIZE)
                 }
-                loadedMessageTotal = total
-                if (start >= total) {
-                    refreshHasOlderMessages()
+                if (end == null || end <= after) {
+                    refreshHistoryEdges()
                     return@launch
                 }
-                val page = withContext(Dispatchers.IO) {
-                    chatRepository.loadMessagesAfter(
-                        sessionId = sessionId,
-                        startInclusive = start,
-                        limit = VISIBLE_MESSAGE_CAP_STEP,
-                        totalMessages = total,
+                val rows = withContext(Dispatchers.IO) {
+                    chatRepository.hydrateDisplayRows(
+                        loadSortRange(SortRange(after + 1, end + 1)),
                     )
                 }
-                if (page.messages.isNotEmpty()) {
-                    val knownDbIds = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
-                    val newer = withContext(Dispatchers.IO) {
-                        chatRepository.hydrateDisplayRows(page.messages).toChatMessages()
+                if (rows.isNotEmpty()) {
+                    val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                    val newer = rows.toChatMessages().filter { message ->
+                        message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
                     }
-                        .filter { message ->
-                            message.sourceDbIds.isEmpty() || message.sourceDbIds.none(knownDbIds::contains)
-                        }
-                    val combined = _messages.value + newer
-                    val dropCount = (combined.size - MAX_LOADED_MESSAGE_WINDOW).coerceAtLeast(0)
-                    val droppedRows = combined.take(dropCount).sumOf { it.sourceDbIds.size }
-                    val retained = combined.takeLast(MAX_LOADED_MESSAGE_WINDOW)
-                    _messages.value = retained
-                    loadedMessageOffset += droppedRows
-                    loadedMessageTotal = page.totalMessages
-                    val retainedVisible = retained.count { !it.isInternalBridge }
-                    _visibleMessageCap.value = minOf(
-                        retainedVisible,
-                        _visibleMessageCap.value + newer.count { !it.isInternalBridge },
-                    )
+                    _messages.value = _messages.value + newer
+                    noteLoadedSortBounds(rows)
+                    _visibleMessageCap.value = _messages.value.count { !it.isInternalBridge }
                 }
-                refreshHasOlderMessages()
+                refreshHistoryEdges()
             } finally {
                 loadingOlderMessages = false
+                _isLoadingHistory.value = false
             }
         }
     }
@@ -2862,11 +2881,18 @@ class ChatViewModel(
      */
     internal fun effectiveAgentHistory(): List<LLMMessage> {
         val repaired = dropOrphanedToolParts(effectiveAgentHistoryUncounted())
-        return if (personaHistorySteering) {
+        val steered = if (personaHistorySteering) {
             com.openminis.app.agent.PersonaPromptLogic.applyHistorySteering(repaired)
         } else {
             repaired
         }
+        // Rows trimmed out of the model window stay as a clipped excerpt.
+        // A compact summary, when present, still replaces the older prefix;
+        // this digest covers what this process actually dropped.
+        return HistoryDigest.inject(
+            steered,
+            HistoryDigest.render(llmDigestLines, llmDigestOmitted),
+        )
     }
 
 
@@ -5335,15 +5361,21 @@ class ChatViewModel(
     }
 
     internal fun trimAgentHistory() {
+        val dropped = ArrayList<LLMMessage>()
         val byCount = ResidentWindow.countCut(agentHistory, MAX_AGENT_HISTORY_MESSAGES)
         if (byCount > 0) {
+            dropped.addAll(agentHistory.subList(0, byCount))
             agentHistory.subList(0, byCount).clear()
             llmHistoryStartOffset += byCount
         }
         val byBytes = ResidentWindow.byteCut(agentHistory)
         if (byBytes > 0) {
+            dropped.addAll(agentHistory.subList(0, byBytes))
             agentHistory.subList(0, byBytes).clear()
             llmHistoryStartOffset += byBytes
+        }
+        if (dropped.isNotEmpty()) {
+            rememberDigestLines(dropped.map { HistoryDigest.fromMessage(it) })
         }
     }
 
@@ -5399,18 +5431,12 @@ class ChatViewModel(
     }
 
 
-    internal fun trimLoadedWindow(messages: List<ChatMessage>): List<ChatMessage> {
-        if (messages.size <= MAX_LOADED_MESSAGE_WINDOW) return messages
-        val droppedCount = messages.size - MAX_LOADED_MESSAGE_WINDOW
-        // Only persisted rows advance the database offset. System info bubbles
-        // are UI-only, so counting them would skip real rows on the next page.
-        val droppedRows = messages.take(droppedCount).sumOf { it.sourceDbIds.size }
-        // Removing the oldest loaded rows advances the database start offset.
-        // Subtracting here re-fetches duplicates and can make the older window
-        // drift away from the rows actually present in `_messages`.
-        loadedMessageOffset += droppedRows
-        return messages.takeLast(MAX_LOADED_MESSAGE_WINDOW)
-    }
+    /**
+     * Appended rows stay. Dropping the older side here recreated the missing
+     * middle: the next page would start after a hole the user never asked to
+     * close. Model context is trimmed by [trimAgentHistory], not this list.
+     */
+    internal fun trimLoadedWindow(messages: List<ChatMessage>): List<ChatMessage> = messages
 
     private data class ToolResultData(val output: String, val success: Boolean)
 

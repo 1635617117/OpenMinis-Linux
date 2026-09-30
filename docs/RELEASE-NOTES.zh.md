@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.15-linux
+
+- versionCode **215**
+- 向上翻不再丢掉较新一侧，向下翻也不再丢掉较早一侧。翻页按用户轮次对齐，游标是 sort_order。边缘有加载中提示。滑到一半时补上被切断的那一轮。模型窗口外的原文不再静默丢掉，而是收成摘录再送进上下文。数据库仍是 19。
+
+---
+
 # OpenMinis-Linux 2.0.14-linux
 
 - versionCode **214**

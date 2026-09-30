@@ -1,119 +1,141 @@
 package com.openminis.app.ui.chat
 
-internal data class OlderWindowPlan(
-    val nextVisibleCap: Int,
-    val fetchOffset: Int? = null,
-    val fetchCount: Int = 0,
-)
-
-internal data class HistoryEdgeAction(
-    val loadOlder: Boolean,
-    val loadNewer: Boolean,
-)
-
 /**
- * Fixed-capacity movement of a database window.
+ * Display-window paging. The database stays the full transcript.
  *
- * [retained] is the subset that remains in memory after the requested page is
- * merged with the currently loaded rows. Its size never exceeds [capacity], so
- * repeatedly loading older history cannot reconstruct the whole session.
+ * A page is a contiguous slice of complete user turns. Loading older prepends
+ * that slice and keeps the newer side. Loading newer appends and keeps the
+ * older side. Nothing in this type drops a side to stay under a capacity:
+ * that kick is what made the middle of a long chat unreachable.
+ *
+ * The cursor is [SortAnchor.sortOrder], not an offset and not created_at.
+ * Offsets move when a row is inserted or deleted. created_at moves when a
+ * row is replaced.
  */
-internal data class BoundedWindowMove(
-    val retainedStart: Int,
-    val retainedCount: Int,
-)
-
-/** Pure planning logic for the bounded UI/database window. */
 internal object ChatHistoryWindow {
-    fun planOlderLoad(
-        loadedVisible: Int,
-        visibleCap: Int,
-        loadedOffset: Int,
-        step: Int,
-    ): OlderWindowPlan {
-        require(loadedVisible >= 0 && visibleCap >= 0 && loadedOffset >= 0 && step > 0)
-        if (loadedVisible > visibleCap) {
-            return OlderWindowPlan(nextVisibleCap = (visibleCap + step).coerceAtMost(loadedVisible))
+    const val TURN_PAGE_SIZE = 5
+    private const val ANCHOR_PROBE = 200
+
+    data class SortAnchor(val sortOrder: Int, val isUser: Boolean)
+
+    /**
+     * How far one newest-first probe moves the older cursor.
+     *
+     * [startSortOrder] is the oldest anchor that belongs in this page.
+     * [needsMore] is true only when the probe ran out before [turnCount]
+     * user turns and the caller still has older rows to inspect. The caller
+     * must not stop mid-turn: if the oldest included row is not a user
+     * message, it keeps probing until a user message or the session start.
+     */
+    data class OlderProbe(
+        val startSortOrder: Int?,
+        val usersIncluded: Int,
+        val needsMore: Boolean,
+    )
+
+    data class NewerProbe(
+        val endSortOrder: Int?,
+        val usersIncluded: Int,
+        val needsMore: Boolean,
+    )
+
+    fun absorbOlder(
+        anchorsNewestFirst: List<SortAnchor>,
+        turnCount: Int,
+        usersAlready: Int = 0,
+    ): OlderProbe {
+        if (turnCount <= 0) return OlderProbe(null, usersAlready, false)
+        var users = usersAlready
+        var start: Int? = null
+        for (anchor in anchorsNewestFirst) {
+            start = anchor.sortOrder
+            if (anchor.isUser) {
+                users++
+                if (users >= turnCount) {
+                    return OlderProbe(start, users, needsMore = false)
+                }
+            }
         }
-        if (loadedOffset == 0) return OlderWindowPlan(nextVisibleCap = visibleCap)
-        val newOffset = (loadedOffset - step).coerceAtLeast(0)
-        return OlderWindowPlan(
-            nextVisibleCap = visibleCap + (loadedOffset - newOffset),
-            fetchOffset = newOffset,
-            fetchCount = loadedOffset - newOffset,
+        val exhausted = anchorsNewestFirst.isEmpty()
+        return OlderProbe(
+            startSortOrder = start,
+            usersIncluded = users,
+            needsMore = !exhausted && users < turnCount,
         )
     }
 
     /**
-     * Auto-page only after the reader has left the opposite edge. A short list
-     * that already shows both edges must not walk the database by itself.
+     * Oldest-first anchors newer than the loaded cursor.
+     * Stops before the user message that would start turn [turnCount] + 1,
+     * so a question is not split from the replies already included.
+     * If the probe ends on a user message, [needsMore] stays true: that
+     * turn's replies may still be ahead.
      */
+    fun absorbNewer(
+        anchorsOldestFirst: List<SortAnchor>,
+        turnCount: Int,
+        usersAlready: Int = 0,
+    ): NewerProbe {
+        if (turnCount <= 0) return NewerProbe(null, usersAlready, false)
+        var users = usersAlready
+        var end: Int? = null
+        for (anchor in anchorsOldestFirst) {
+            if (anchor.isUser && users >= turnCount) {
+                return NewerProbe(end, users, needsMore = false)
+            }
+            end = anchor.sortOrder
+            if (anchor.isUser) users++
+        }
+        return NewerProbe(
+            endSortOrder = end,
+            usersIncluded = users,
+            // True when this probe did not end on a user-turn boundary.
+            // The caller continues only if the probe was also full; a short
+            // probe means the session end, not a split turn.
+            needsMore = anchorsOldestFirst.isNotEmpty(),
+        )
+    }
+
     fun historyEdgeAction(
+        hasOlder: Boolean,
+        hasNewer: Boolean,
         olderSentinelVisible: Boolean,
         newerSentinelVisible: Boolean,
         newestEdgeVisible: Boolean,
         oldestEdgeVisible: Boolean,
-        hasOlder: Boolean,
-        hasNewer: Boolean,
-    ): HistoryEdgeAction {
+    ): HistoryPageRequest {
         val spansBothEdges = newestEdgeVisible && oldestEdgeVisible
-        return HistoryEdgeAction(
+        return HistoryPageRequest(
             loadOlder = hasOlder && olderSentinelVisible && !spansBothEdges,
             loadNewer = hasNewer && newerSentinelVisible && !spansBothEdges,
         )
     }
 
-    /** Index in a reverseLayout list whose message items are newest-first. */
+    /**
+     * reverseLayout paints index 0 at the visual bottom. [flatItems] is
+     * oldest-first, then reversed into the list. Prepending older rows adds
+     * items after the visible ones, so their lazy indices do not move.
+     * Appending newer rows inserts items before them and must be compensated
+     * by [insertedBeforeAnchor].
+     */
+    fun compensatedLazyIndex(previousLazyIndex: Int, insertedBeforeAnchor: Int): Int {
+        if (previousLazyIndex < 0) return previousLazyIndex
+        return previousLazyIndex + insertedBeforeAnchor.coerceAtLeast(0)
+    }
+
     fun lazyIndexOfOldestFirstKey(
         oldestFirstCount: Int,
         keyIndexInOldestFirst: Int,
         itemsBeforeMessages: Int,
     ): Int {
-        require(oldestFirstCount > 0)
-        require(keyIndexInOldestFirst in 0 until oldestFirstCount)
-        require(itemsBeforeMessages >= 0)
+        if (oldestFirstCount <= 0 || keyIndexInOldestFirst !in 0 until oldestFirstCount) return -1
         return itemsBeforeMessages + (oldestFirstCount - 1 - keyIndexInOldestFirst)
     }
 
-    /**
-     * Move a loaded range toward older rows while retaining at most [capacity]
-     * rows. The newest rows beyond that capacity are intentionally evicted.
-     */
-    fun moveOlder(
-        loadedStart: Int,
-        loadedCount: Int,
-        fetchStart: Int,
-        fetchCount: Int,
-        capacity: Int,
-    ): BoundedWindowMove {
-        require(loadedStart >= 0 && loadedCount >= 0 && fetchStart >= 0 && fetchCount >= 0 && capacity > 0)
-        val combinedStart = minOf(loadedStart, fetchStart)
-        val combinedEnd = maxOf(loadedStart + loadedCount, fetchStart + fetchCount)
-        val combinedCount = (combinedEnd - combinedStart).coerceAtLeast(0)
-        val retainedCount = minOf(capacity, combinedCount)
-        return BoundedWindowMove(combinedStart, retainedCount)
-    }
-
-    /**
-     * Append newly persisted rows to the tail. Once the fixed window is full,
-     * the oldest loaded rows leave memory; the database remains the source of
-     * truth and can be paged back in.
-     */
-    fun appendTail(
-        totalBefore: Int,
-        loadedStart: Int,
-        loadedCount: Int,
-        appended: Int,
-        capacity: Int,
-    ): BoundedWindowMove {
-        require(totalBefore >= 0 && loadedStart >= 0 && loadedCount >= 0 && appended >= 0 && capacity > 0)
-        val totalAfter = totalBefore + appended
-        val oldEnd = loadedStart + loadedCount
-        val contiguous = oldEnd == totalBefore
-        val newEnd = if (contiguous) totalAfter else oldEnd
-        val newStart = if (contiguous) loadedStart else loadedStart
-        val retainedCount = minOf(capacity, (newEnd - newStart).coerceAtLeast(0))
-        val retainedStart = (newEnd - retainedCount).coerceAtLeast(newStart)
-        return BoundedWindowMove(retainedStart, retainedCount)
-    }
+    fun probeLimit(): Int = ANCHOR_PROBE
 }
+
+internal data class HistoryPageRequest(
+    val loadOlder: Boolean,
+    val loadNewer: Boolean,
+)

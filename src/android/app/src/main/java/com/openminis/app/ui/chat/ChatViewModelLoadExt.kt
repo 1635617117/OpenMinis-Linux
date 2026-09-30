@@ -145,6 +145,7 @@ internal fun ChatViewModel.loadSession() {
             val llmHistory: List<LLMMessage>,
             val totalMessages: Int,
             val firstMessageOffset: Int,
+            val llmOldestSortOrder: Int?,
             val loadMs: Long,
             val transformMs: Long,
         )
@@ -153,7 +154,12 @@ internal fun ChatViewModel.loadSession() {
             val tIoBeforeLoad = System.currentTimeMillis()
             val tail = chatRepository.loadSessionTail(sessionId)
             val totalMessages = tail.totalMessages
-            val rows = chatRepository.hydrateDisplayRows(tail.messages)
+            var dbRows = tail.messages
+            if (dbRows.isNotEmpty() && dbRows.first().role != "user" && tail.firstMessageOffset > 0) {
+                val prefix = loadSplitTurnPrefix(dbRows.first().sortOrder)
+                if (prefix.isNotEmpty()) dbRows = prefix + dbRows
+            }
+            val rows = chatRepository.hydrateDisplayRows(dbRows)
             val firstMessageOffset = tail.firstMessageOffset
             val tIoAfterLoad = System.currentTimeMillis()
             com.openminis.app.diagnostics.PerfLongCtx.step(
@@ -189,6 +195,7 @@ internal fun ChatViewModel.loadSession() {
             } else {
                 rows
             }
+            val llmOldestSortOrder = windowRows.firstOrNull()?.sortOrder
             val llm = ArrayList<LLMMessage>(windowRows.size)
             var totalPartsChars = 0L
             for (entity in windowRows) {
@@ -206,6 +213,7 @@ internal fun ChatViewModel.loadSession() {
                 llmHistory = llm,
                 totalMessages = totalMessages,
                 firstMessageOffset = firstMessageOffset,
+                llmOldestSortOrder = llmOldestSortOrder,
                 loadMs = tIoAfterLoad - tIoBeforeLoad,
                 transformMs = tIoAfterTransform - tIoAfterLoad,
             )
@@ -215,15 +223,20 @@ internal fun ChatViewModel.loadSession() {
         loadedMessageTotal = loaded.totalMessages
         loadedMessageOffset = loaded.firstMessageOffset
         unrepresentedLoadedRows = 0
+        loadedOldestSortOrder = null
+        loadedNewestSortOrder = null
+        llmDigestLines.clear()
+        llmDigestOmitted = 0
+        noteLoadedSortBounds(messages)
         // [T-android-coldopen-window-parse] agentHistory covers only the
         // newest INITIAL_VISIBLE_MESSAGE_CAP DB rows; the skipped prefix
         // of the tail (if any) is parsed lazily by loadOlderMessages.
         // Counted in DB rows, not UI messages — toChatMessages merges
         // tool-result rows, so the UI list is shorter than the tail.
         val windowedRows = minOf(messages.size, ChatViewModel.INITIAL_VISIBLE_MESSAGE_CAP)
-        llmHistoryStartOffset = loaded.firstMessageOffset + (messages.size - windowedRows)
-        refreshHasOlderMessages()
+        llmHistoryStartOffset = (loaded.totalMessages - windowedRows).coerceAtLeast(0)
         loadingOlderMessages = false
+        _isLoadingHistory.value = false
         val tHangDiagAfterLoad = tHangDiagBeforeLoad + loaded.loadMs
         val tHangDiagAfterTransform = tHangDiagAfterLoad + loaded.transformMs
         println(
@@ -325,6 +338,23 @@ internal fun ChatViewModel.loadSession() {
             .getOrNull()
         _compactSummary.value = marker?.summary
         _cachedLatestMarker = marker
+        if (marker == null) {
+            val oldest = loaded.llmOldestSortOrder
+            if (oldest != null) {
+                val prefix = withContext(Dispatchers.IO) { collectDigestLines(oldest) }
+                val notExcerpted = withContext(Dispatchers.IO) {
+                    chatRepository.dao.countMessagesBeforeSort(sessionId, oldest) - prefix.size
+                }.coerceAtLeast(0)
+                if (prefix.isNotEmpty() || notExcerpted > 0) {
+                    val trimmed = llmDigestLines.toList()
+                    val omitted = llmDigestOmitted
+                    llmDigestLines.clear()
+                    llmDigestOmitted = 0
+                    rememberDigestLines(prefix + trimmed)
+                    llmDigestOmitted += omitted + notExcerpted
+                }
+            }
+        }
 
         com.openminis.app.diagnostics.PerfLongCtx.step(
             sessionId,
@@ -334,7 +364,7 @@ internal fun ChatViewModel.loadSession() {
         // The painted list is the loaded window. A smaller cap used to hide
         // the middle of that window and make it look deleted. Paging, not a
         // second cut, is what bounds memory.
-        _visibleMessageCap.value = ChatViewModel.MAX_LOADED_MESSAGE_WINDOW
+        _visibleMessageCap.value = ordered.count { !it.isInternalBridge }.coerceAtLeast(1)
         _messages.value = if (marker == null) {
             ordered
         } else {
@@ -349,7 +379,7 @@ internal fun ChatViewModel.loadSession() {
             }
             applyCompactMarkerGraying(ordered, marker, loaded.messages, historyDbIds)
         }
-        refreshHasOlderMessages()
+        refreshHistoryEdges()
 
         // Cold-start interrupt detection: an agent loop that was killed by
         // the OS (or app force-quit) leaves agentHistory in one of four

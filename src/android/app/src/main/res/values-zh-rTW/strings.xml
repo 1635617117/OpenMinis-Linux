@@ -1779,6 +1779,8 @@
     <string name="debug_trigger_crash_menu">觸發閃退 (Debug)</string>
     <string name="chat_load_older_messages">↑ 較早的對話仍在本機</string>
     <string name="chat_load_newer_messages">↓ 較新的對話仍在本機</string>
+    <string name="chat_loading_older_messages">正在載入較早的對話…</string>
+    <string name="chat_loading_newer_messages">正在載入較新的對話…</string>
     <string name="error_empty_response_generic">模型回傳了空回應。請重試或切換模型。</string>
     <string name="error_empty_response_context_large">模型回傳了空回應。對話上下文可能過大 —— 請嘗試壓縮上下文或開啟新工作階段。</string>
     <string name="error_empty_response_after_tool">在工具結果之後，即使經過提醒，模型仍未回傳任何回應。它可能已過載 —— 請重試或切換模型。</string>

@@ -103,6 +103,31 @@ class ChatRepository(
         fromNewest = true,
     )
 
+    /**
+     * Contiguous rows in a sort_order range. The cursor is the stable sequence,
+     * not an offset. Chunked so one huge turn does not open a single cursor
+     * over the whole range. Does not skip a row that does not fit a budget:
+     * the caller publishes whatever this returns and continues from its edge.
+     */
+    suspend fun loadMessagesInSortRange(
+        sessionId: String,
+        startInclusive: Int,
+        endExclusive: Int,
+    ): List<com.openminis.app.data.db.MessageEntity> {
+        if (startInclusive >= endExclusive) return emptyList()
+        val rows = ArrayList<com.openminis.app.data.db.MessageEntity>()
+        var cursor = startInclusive
+        while (cursor < endExclusive) {
+            val page = dao.loadMessagesFromSortOrder(sessionId, cursor, endExclusive, limit = 50)
+            if (page.isEmpty()) break
+            rows.addAll(page)
+            val next = page.last().sortOrder + 1
+            if (next <= cursor) break
+            cursor = next
+        }
+        return rows
+    }
+
     suspend fun loadMessagesAfter(
         sessionId: String,
         startInclusive: Int,

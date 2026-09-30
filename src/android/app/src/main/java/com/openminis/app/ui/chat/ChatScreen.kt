@@ -517,6 +517,7 @@ fun ChatScreen(
     val messages by viewModel.uiMessages.collectAsState()
     val hasOlderMessages by viewModel.hasOlderMessages.collectAsState()
     val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
+    val isLoadingHistory by viewModel.isLoadingHistory.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
@@ -3753,7 +3754,6 @@ fun ChatScreen(
                     val previous = historyKeys
                     historyKeys = keys
                     if (!userScrolledAway || previous.isEmpty() || previous == keys) return@LaunchedEffect
-                    if (listState.isScrollInProgress) return@LaunchedEffect
                     val oldestIndex = historyAnchorOldest.value?.let(keys::indexOf) ?: -1
                     val newestIndex = historyAnchorNewest.value?.let(keys::indexOf) ?: -1
                     val flatIndex = when {
@@ -4091,7 +4091,10 @@ fun ChatScreen(
                     if (hasNewerMessages) {
                         item(key = "__load_newer__", contentType = "history_edge") {
                             HistoryPageEdge(
-                                text = stringResource(R.string.chat_load_newer_messages),
+                                text = stringResource(
+                                    if (isLoadingHistory) R.string.chat_loading_newer_messages
+                                    else R.string.chat_load_newer_messages,
+                                ),
                                 onClick = { viewModel.loadNewerMessages() },
                             )
                         }
@@ -4523,7 +4526,10 @@ fun ChatScreen(
                     if (hasOlderMessages) {
                         item(key = "__load_older__", contentType = "history_edge") {
                             HistoryPageEdge(
-                                text = stringResource(R.string.chat_load_older_messages),
+                                text = stringResource(
+                                    if (isLoadingHistory) R.string.chat_loading_older_messages
+                                    else R.string.chat_load_older_messages,
+                                ),
                                 onClick = { viewModel.loadOlderMessages() },
                             )
                         }

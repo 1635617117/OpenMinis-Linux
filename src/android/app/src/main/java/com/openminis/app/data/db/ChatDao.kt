@@ -75,6 +75,17 @@ data class MessageAnchorRow(
     @ColumnInfo(name = "head_text") val headText: String?,
 )
 
+data class MessageSortAnchor(
+    @ColumnInfo(name = "sort_order") val sortOrder: Int,
+    val role: String,
+)
+
+data class MessagePreviewRow(
+    val role: String,
+    val preview: String?,
+    @ColumnInfo(name = "sort_order") val sortOrder: Int,
+)
+
 data class MessageUsageRow(
     val id: String,
     val role: String,
@@ -240,6 +251,68 @@ interface ChatDao {
     /** One cell, for display hydration only. List loads must keep using [SAFE_MESSAGE_FROM]. */
     @Query("SELECT parts_json FROM messages WHERE id = :id")
     suspend fun loadRawPartsJson(id: String): String?
+
+    @Query("SELECT sort_order FROM messages WHERE id = :id")
+    suspend fun sortOrderOf(id: String): Int?
+
+    @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId AND sort_order < :sortOrder")
+    suspend fun countMessagesBeforeSort(sessionId: String, sortOrder: Int): Int
+
+    @Query("SELECT COUNT(*) FROM messages WHERE session_id = :sessionId AND sort_order > :sortOrder")
+    suspend fun countMessagesAfterSort(sessionId: String, sortOrder: Int): Int
+
+    /** Role + sort_order only. Used to align a page to a user turn without reading bodies. */
+    @Query("""
+        SELECT sort_order, role FROM messages
+        WHERE session_id = :sessionId AND sort_order < :beforeSortOrder
+        ORDER BY sort_order DESC, created_at DESC
+        LIMIT :limit
+    """)
+    suspend fun loadOlderSortAnchors(
+        sessionId: String,
+        beforeSortOrder: Int,
+        limit: Int,
+    ): List<MessageSortAnchor>
+
+    @Query("""
+        SELECT sort_order, role FROM messages
+        WHERE session_id = :sessionId AND sort_order > :afterSortOrder
+        ORDER BY sort_order ASC, created_at ASC
+        LIMIT :limit
+    """)
+    suspend fun loadNewerSortAnchors(
+        sessionId: String,
+        afterSortOrder: Int,
+        limit: Int,
+    ): List<MessageSortAnchor>
+
+    @Query("""
+        $SAFE_MESSAGE_FROM
+        WHERE session_id = :sessionId
+          AND sort_order >= :startInclusive
+          AND sort_order < :endExclusive
+        ORDER BY sort_order ASC, created_at ASC
+        LIMIT :limit
+    """)
+    suspend fun loadMessagesFromSortOrder(
+        sessionId: String,
+        startInclusive: Int,
+        endExclusive: Int,
+        limit: Int,
+    ): List<MessageEntity>
+
+    /** Preview text only. Digest construction must not select parts_json. */
+    @Query("""
+        SELECT role, preview, sort_order FROM messages
+        WHERE session_id = :sessionId AND sort_order < :beforeSortOrder
+        ORDER BY sort_order DESC, created_at DESC
+        LIMIT :limit
+    """)
+    suspend fun loadPreviewPageBefore(
+        sessionId: String,
+        beforeSortOrder: Int,
+        limit: Int,
+    ): List<MessagePreviewRow>
 
     @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order DESC LIMIT 1")
     suspend fun lastMessage(sessionId: String): MessageEntity?
