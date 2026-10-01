@@ -795,6 +795,9 @@ class ChatViewModel(
     internal var loadedMessageTotal = 0
     internal var unrepresentedLoadedRows = 0
     internal var loadingOlderMessages = false
+    /** [T-tail-attach-lock] Separate from loadingOlderMessages — tail attach must
+     * not block the "load older" pill button. */
+    private var attachingTail = false
     private var tailAttachJob: kotlinx.coroutines.Job? = null
     private var tailAttachQueued = false
     /** Stable page cursor. Not an offset, not created_at. */
@@ -971,7 +974,6 @@ class ChatViewModel(
             } finally {
                 loadingOlderMessages = false
                 _isLoadingHistory.value = false
-                if (tailAttachQueued) ensureSessionTailLoaded()
             }
         }
     }
@@ -983,13 +985,13 @@ class ChatViewModel(
      */
     fun ensureSessionTailLoaded() {
         if (sessionId.isEmpty()) return
-        if (_isStreaming.value || loadingOlderMessages || tailAttachJob?.isActive == true) {
+        if (_isStreaming.value || attachingTail || tailAttachJob?.isActive == true) {
             tailAttachQueued = true
             return
         }
         tailAttachQueued = false
         tailAttachJob = viewModelScope.launch {
-            loadingOlderMessages = true
+            attachingTail = true
             _isLoadingHistory.value = true
             try {
                 var idlePasses = 0
@@ -1004,7 +1006,7 @@ class ChatViewModel(
                 }
             } finally {
                 val restart = tailAttachQueued && !_isStreaming.value
-                loadingOlderMessages = false
+                attachingTail = false
                 _isLoadingHistory.value = false
                 tailAttachJob = null
                 tailAttachQueued = false
