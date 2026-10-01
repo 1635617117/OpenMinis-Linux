@@ -133,26 +133,14 @@ internal fun ChatViewModel.sendMessage(
     AppLogger.info(ChatViewModel.TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
     _isStreaming.value = true
 
-    // [T-android-instant-thinking] 长消息发送后"模型没反应"的根因之一：
-    // 占位气泡要等 DB 写入、system prompt 构建、并发槽获取全部完成后才在
-    // runAgentLoop 里出现，中间有数百毫秒到数秒的空白。这里在同步段立即
-    // 插入占位气泡，"正在思考"秒出。runAgentLoop 通过 overrideAssistantId
-    // 复用该气泡，不产生第二条。
-    // 群聊/视频路径不走 runAgentLoop（各自建自己的气泡），跳过预建避免残留。
-    val instantAssistantId = "assistant_${System.currentTimeMillis()}"
-    val skipInstantByPath =
-        (groupChatEnabled.value && !internalGoalRun) || provider.model.isPureVideoGenerator
-    if (!skipInstantByPath) {
-        _messages.value = trimLoadedWindow(_messages.value + ChatMessage(
-            id = instantAssistantId, role = "assistant",
-            content = "", isStreaming = true, isAwaitingModelResponse = true,
-            thinkingLevel = _thinkingLevel.value,
-        ))
-    }
-    fun discardInstantPlaceholder() {
-        _messages.value = _messages.value.filterNot { it.id == instantAssistantId }
-        _isStreaming.value = false
-    }
+    // [T-android-instant-thinking] REMOVED: the placeholder inserted here
+    // was meant to give instant "thinking" feedback before DB writes complete,
+    // but it broke live streaming rendering — buildFlatChatItems frozen/live
+    // split + reverseLayout keying prevented the streaming-side-channel delta
+    // from applying to the pre-inserted placeholder bubble. Regression tracked
+    // to 89896de (introduced) + 7c89d38 (order fix exposed it). Reverted to
+    // runAgentLoop's own message creation (overrideAssistantId=null below).
+    // The scroll-retention benefit of 89896de was in ChatScreen and is kept.
 
     // [T-android-thinking-indicator-linger] Invariant sweep: a fresh send
     // only reaches here when no turn is streaming (the _isStreaming guard
@@ -224,15 +212,7 @@ internal fun ChatViewModel.sendMessage(
                 attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
                 sourceDbIds = listOf(persistedUser.id),
             )
-            // [T-instant-thinking-reorder] 同步段先插了 assistant 占位
-            // 气泡（instantAssistantId），异步段要插入 user 消息时必须往
-            // 占位前面插 —— 否则用户消息会排在 AI 回复下面，顺序反了。
-            val curBefore = _messages.value
-            val placeholderIdx = curBefore.indexOfLast { it.id == instantAssistantId }
-            _messages.value = trimLoadedWindow(
-                if (placeholderIdx >= 0) curBefore.take(placeholderIdx) + userMsg + curBefore.drop(placeholderIdx)
-                else curBefore + userMsg
-            )
+            _messages.value = trimLoadedWindow(_messages.value + userMsg)
             notePersistedUiRow(persistedUser.id, persistedUser.id)
         }
         val imageParts = prepared.imageParts
@@ -372,7 +352,7 @@ internal fun ChatViewModel.sendMessage(
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
                             goalExecutionRun = internalGoalRun,
-                            overrideAssistantId = instantAssistantId,
+
                         )
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.
@@ -427,9 +407,6 @@ internal fun ChatViewModel.sendMessage(
             if (!streamLaunched) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send _isStreaming=false (setup aborted)")
                 _isStreaming.value = false
-                // [T-android-instant-thinking] 设置阶段失败时移除占位气泡，
-                // 否则留下一个永不填充的"正在思考"空行。
-                discardInstantPlaceholder()
             }
         }
     }
