@@ -1,38 +1,106 @@
 package com.openminis.app.data.model
 
+/**
+ * [T-llm-error-classification] Unified 11-kind error taxonomy modelled after
+ * shiyi-agent's `llm_client.dart` error classification. Every variant carries
+ * an [actionableHint] that tells the user (or the agent on retry) what concrete
+ * next step restores progress — instead of dumping a raw status code.
+ */
 sealed class LLMError(message: String, cause: Throwable? = null) : Exception(message, cause) {
-    class InvalidApiKey(val detail: String = "") : LLMError(if (detail.isBlank()) "Invalid API key" else "Invalid API key: $detail")
+    /** API key is missing, revoked, or expired. */
+    class InvalidApiKey(val detail: String = "") : LLMError(
+        if (detail.isBlank()) "Invalid API key" else "Invalid API key: $detail",
+    )
+
+    /** TCP/DNS layer failed before the HTTP request was sent. */
     class NetworkError(cause: Throwable) : LLMError("Network error: ${cause.message}", cause)
+
+    /**
+     * The request was sent but the server didn't respond within the deadline.
+     * Distinct from [NetworkError] (which never left the client) and
+     * [TransientError] (which is a server-returned 5xx / connection drop).
+     * [phase] distinguishes connect vs read vs ttfb so the retry strategy can
+     * decide whether same-provider retry is worthwhile.
+     */
+    class Timeout(
+        val detail: String,
+        val phase: TimeoutPhase = TimeoutPhase.READ,
+    ) : LLMError("Request timed out: $detail") {
+        enum class TimeoutPhase { CONNECT, READ, TTFB }
+    }
+
+    /**
+     * The provider returned a 4xx / 5xx that doesn't match a more specific
+     * category. Prefer [RateLimited], [ContextLengthExceeded],
+     * [ContentFiltered], or [InvalidApiKey] when the server gives enough signal.
+     */
     class ProviderError(val detail: String) : LLMError("Provider error: $detail")
+
+    /** JSON parsing / SSE framing / schema mismatch on the response body. */
     class DecodingError(cause: Throwable) : LLMError("Decoding error: ${cause.message}", cause)
+
     class RateLimited(
         val retryAfterSeconds: Int? = null,
         val detail: String = "",
     ) : LLMError(rateLimitedMessage(retryAfterSeconds, detail))
+
+    /**
+     * The prompt (or current conversation) exceeds the model's context window.
+     * Actionable: the agent or user can compact, offload, or truncate.
+     */
+    class ContextLengthExceeded(
+        val detail: String,
+        val requestedTokens: Int? = null,
+        val maxTokens: Int? = null,
+    ) : LLMError(contextLengthMessage(detail, requestedTokens, maxTokens))
+
+    /**
+     * The server rejected the request because of a content policy violation.
+     * Not retryable on the same model — rephrase or switch providers.
+     */
+    class ContentFiltered(val detail: String) : LLMError(
+        "Content filtered: $detail",
+    )
+
+    /** Server-side hiccup (5xx, connection dropped mid-stream, empty response). */
     class TransientError(val detail: String) : LLMError("Transient error: $detail")
+
+    /** Coroutine-level cancellation (user stopped, timeout, etc.). */
     class Cancelled : LLMError("Request was cancelled")
+
+    /** Catch-all for unrecognised failures. */
     class Unknown(cause: Throwable?) : LLMError("Unknown error: ${cause?.message}", cause)
 
+    // ── classification helpers ──────────────────────────────────────────
+
     /** Pure connectivity failure — the request didn't land at all. */
-    val isNetworkError: Boolean get() = this is NetworkError
+    val isNetworkError: Boolean get() = this is NetworkError || this is Timeout
 
-    /** Worth retrying on the same provider (bounded backoff). */
-    val isRetryable: Boolean get() = this is NetworkError || this is TransientError || this is RateLimited
+    /** Worth retrying on the same provider (bounded exponential backoff). */
+    val isRetryable: Boolean
+        get() = this is NetworkError || this is Timeout ||
+            this is TransientError || this is RateLimited
 
-    /** Should immediately fall back to the next model in the group — same model won't help. */
-    val isFallbackable: Boolean get() = when (this) {
-        is RateLimited, is InvalidApiKey -> true
-        is ProviderError ->
-            detail.contains("[429]") ||
-                Regex("""\[5\d{2}\]""").containsMatchIn(detail)
-        else -> false
-    }
+    /** Should immediately fall back to the next model in the group. */
+    val isFallbackable: Boolean
+        get() = when (this) {
+            is RateLimited, is InvalidApiKey, is ContextLengthExceeded,
+            is ContentFiltered -> true
+            is Timeout -> true
+            is ProviderError ->
+                detail.contains("[429]") ||
+                    Regex("""\[5\d{2}\]""").containsMatchIn(detail)
+            else -> false
+        }
 
     /** Short user-facing reason shown when a fallback engages. */
     val fallbackReason: String
         get() = when (this) {
             is RateLimited -> "Rate limited"
             is InvalidApiKey -> "Invalid API key"
+            is Timeout -> "Timed out"
+            is ContextLengthExceeded -> "Context window exceeded"
+            is ContentFiltered -> "Content filtered"
             is ProviderError -> "Provider error"
             is TransientError -> "Transient error"
             is NetworkError -> "Network error"
@@ -40,6 +108,45 @@ sealed class LLMError(message: String, cause: Throwable? = null) : Exception(mes
             is Cancelled -> "Cancelled"
             is Unknown -> "Unknown error"
         }
+
+    /**
+     * One-sentence next step the user (or a self-correcting agent) can take.
+     * Mirrors shiyi-agent's per-error guidance so the chat UI shows concrete
+     * advice instead of a bare HTTP code.
+     */
+    val actionableHint: String
+        get() = when (this) {
+            is InvalidApiKey -> "Check your API key in Settings → Providers, or regenerate it at your provider's dashboard."
+            is NetworkError -> "Check your internet connection and try again."
+            is Timeout -> when (phase) {
+                Timeout.TimeoutPhase.CONNECT -> "The server didn't respond — check your network or try a different provider."
+                Timeout.TimeoutPhase.READ -> "The model is taking too long to finish — try a faster model or shorten your message."
+                Timeout.TimeoutPhase.TTFB -> "The model hasn't started responding — the provider may be overloaded. Try again in a moment."
+            }
+            is RateLimited -> if (retryAfterSeconds != null) "Rate limited — retry after ${retryAfterSeconds}s." else "Rate limited — wait a moment and try again."
+            is ContextLengthExceeded -> buildString {
+                append("Your conversation is too long for this model")
+                if (maxTokens != null) append(" ($maxTokens token limit)")
+                append(". Use /compact to summarise older messages, or start a new chat.")
+            }
+            is ContentFiltered -> "The model's content policy blocked this request. Try rephrasing your message."
+            is ProviderError -> "The provider returned an error. Tap to see details, or try again later."
+            is TransientError -> "A temporary server error occurred. Retrying…"
+            is DecodingError -> "The model's response couldn't be parsed. Retrying…"
+            is Cancelled -> "The request was stopped."
+            is Unknown -> "An unexpected error occurred. Tap for details."
+        }
+}
+
+private fun contextLengthMessage(detail: String, requested: Int?, max: Int?): String {
+    val sb = StringBuilder("Context length exceeded")
+    if (requested != null) sb.append(" — requested $requested tokens")
+    if (max != null) sb.append(" of $max max")
+    val snip = detail.trim().replace('\n', ' ').replace(Regex("\\s+"), " ").take(160)
+    if (snip.isNotBlank() && !snip.equals("context length exceeded", ignoreCase = true)) {
+        sb.append(" — $snip")
+    }
+    return sb.toString()
 }
 
 private fun rateLimitedMessage(retryAfterSeconds: Int?, detail: String): String {

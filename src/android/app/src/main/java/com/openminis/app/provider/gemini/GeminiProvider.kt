@@ -515,6 +515,16 @@ class GeminiProvider(
         if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
         if (statusCode == 429) return HttpRetryAfter.map429(body, retryAfterHeader)
         val message = "Gemini API error $statusCode: ${body.take(200)}"
+        // [T-llm-error-classification] 细分 Gemini 400 类错误。
+        val lower = message.lowercase()
+        when {
+            !lower.contains("max_tokens too large") && (
+                lower.contains("token limit") || lower.contains("token count") && lower.contains("exceed") ||
+                lower.contains("context length") || lower.contains("input is too long")
+            ) -> return LLMError.ContextLengthExceeded(message)
+            lower.contains("safety") || lower.contains("recitation") || lower.contains("blocked") ->
+                return LLMError.ContentFiltered(message)
+        }
         val transientCodes = setOf(500, 502, 503, 504, 529)
         if (statusCode in transientCodes) return LLMError.TransientError(message)
         return LLMError.ProviderError(message)
