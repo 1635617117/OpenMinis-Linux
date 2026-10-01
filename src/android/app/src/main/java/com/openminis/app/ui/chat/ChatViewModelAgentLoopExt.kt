@@ -44,6 +44,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
     fallbackProviders: List<ChatViewModel.FallbackCandidate> = emptyList(),
     fallbackStrategy: com.openminis.app.data.model.FallbackStrategy = com.openminis.app.data.model.FallbackStrategy.default,
     goalExecutionRun: Boolean = false,
+    /** [T-android-instant-thinking] send 路径已预插占位气泡，复用其 id。 */
+    overrideAssistantId: String? = null,
 ) {
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
@@ -110,7 +112,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // starts empty and `buildTurnParts(allToolBlocks, turnStartBlockIndex,
     // toolInputMap)` continues to slice only the current turn's blocks
     // (turnStartBlockIndex is captured at iteration start to 0 after reset).
-    var assistantId = "assistant_${System.currentTimeMillis()}"
+    var assistantId = overrideAssistantId ?: "assistant_${System.currentTimeMillis()}"
     val allToolBlocks = mutableListOf<AssistantBlock>()
     // Per-tool ring of the most recent `accumulated` JSON snapshots emitted
     // by `LLMStreamChunk.ToolInputDelta`. Capped at TOOL_INPUT_CHUNK_RING_MAX
@@ -189,13 +191,19 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // creation so the renderer can hide Deep Thinking blocks for
     // turns the user explicitly asked not to surface, even when a
     // forced-reasoning model still streams reasoning_content.
+    // turnThinkingLevel 保留在块外：in-loop compact 的 freshAssistantId
+    // 分支同样引用它。
     val turnThinkingLevel = _thinkingLevel.value
-    withContext(Dispatchers.Main) {
-        _messages.value = trimLoadedWindow(_messages.value + ChatMessage(
-            id = assistantId, role = "assistant", content = "", isStreaming = true,
-            isAwaitingModelResponse = true,
-            thinkingLevel = turnThinkingLevel,
-        ))
+    // [T-android-instant-thinking] send 路径已把占位气泡插入 _messages，
+    // 此处跳过，避免同一回复出现两条气泡。
+    if (overrideAssistantId == null) {
+        withContext(Dispatchers.Main) {
+            _messages.value = trimLoadedWindow(_messages.value + ChatMessage(
+                id = assistantId, role = "assistant", content = "", isStreaming = true,
+                isAwaitingModelResponse = true,
+                thinkingLevel = turnThinkingLevel,
+            ))
+        }
     }
 
     // Tracks whether the loop was exited via a `break` (any reason — no

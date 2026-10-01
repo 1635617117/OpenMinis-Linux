@@ -133,6 +133,27 @@ internal fun ChatViewModel.sendMessage(
     AppLogger.info(ChatViewModel.TAG_STREAM, "send _isStreaming=true (sync, sid=$activeSessionId)")
     _isStreaming.value = true
 
+    // [T-android-instant-thinking] 长消息发送后"模型没反应"的根因之一：
+    // 占位气泡要等 DB 写入、system prompt 构建、并发槽获取全部完成后才在
+    // runAgentLoop 里出现，中间有数百毫秒到数秒的空白。这里在同步段立即
+    // 插入占位气泡，"正在思考"秒出。runAgentLoop 通过 overrideAssistantId
+    // 复用该气泡，不产生第二条。
+    // 群聊/视频路径不走 runAgentLoop（各自建自己的气泡），跳过预建避免残留。
+    val instantAssistantId = "assistant_${System.currentTimeMillis()}"
+    val skipInstantByPath =
+        (groupChatEnabled.value && !internalGoalRun) || provider.model.isPureVideoGenerator
+    if (!skipInstantByPath) {
+        _messages.value = trimLoadedWindow(_messages.value + ChatMessage(
+            id = instantAssistantId, role = "assistant",
+            content = "", isStreaming = true, isAwaitingModelResponse = true,
+            thinkingLevel = _thinkingLevel.value,
+        ))
+    }
+    fun discardInstantPlaceholder() {
+        _messages.value = _messages.value.filterNot { it.id == instantAssistantId }
+        _isStreaming.value = false
+    }
+
     // [T-android-thinking-indicator-linger] Invariant sweep: a fresh send
     // only reaches here when no turn is streaming (the _isStreaming guard
     // at the top routes mid-stream sends to enqueuePrompt). So any residual
@@ -343,6 +364,7 @@ internal fun ChatViewModel.sendMessage(
                             fallbackProviders = fallbackProviders,
                             fallbackStrategy = activeFallbackStrategy,
                             goalExecutionRun = internalGoalRun,
+                            overrideAssistantId = instantAssistantId,
                         )
                         AppLogger.info(ChatViewModel.TAG_STREAM, "send runAgentLoop RETURN normal")
                         // Drain any prompts the user queued while this loop was running.
@@ -397,6 +419,9 @@ internal fun ChatViewModel.sendMessage(
             if (!streamLaunched) {
                 AppLogger.info(ChatViewModel.TAG_STREAM, "send _isStreaming=false (setup aborted)")
                 _isStreaming.value = false
+                // [T-android-instant-thinking] 设置阶段失败时移除占位气泡，
+                // 否则留下一个永不填充的"正在思考"空行。
+                discardInstantPlaceholder()
             }
         }
     }

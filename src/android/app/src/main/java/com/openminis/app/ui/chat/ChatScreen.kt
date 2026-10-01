@@ -1797,13 +1797,15 @@ fun ChatScreen(
     LaunchedEffect(messages.size) {
         val lastMsg = messages.lastOrNull() ?: return@LaunchedEffect
         if (lastMsg.role != "user") return@LaunchedEffect
-        // T255: catch-all reset so any user-message append path
-        // (send button / Enter / enqueue-while-streaming / future
-        // entry points) restores auto-follow even if a call-site reset
-        // was missed.
+        // [T-android-scroll-away-retain] 发送按钮回调已在同步段清除
+        // userScrolledAway；此 LE 是兜底路径（enqueue-while-streaming 等），
+        // 只更新 lastUserAppendMs 供 sendGrace 窗口使用，不再无条件清
+        // userScrolledAway —— 用户正在向上翻看历史时，排队消息/新内容到达
+        // 不应把视口弹回底部。
         lastUserAppendMs = System.currentTimeMillis()
-        userScrolledAway = false
-        tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
+        if (!userScrolledAway) {
+            tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
+        }
     }
     // T128: streaming auto-follow when the user is at the bottom.
     //
