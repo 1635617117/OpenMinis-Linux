@@ -273,16 +273,21 @@ fun ProviderDetailScreen(
                                     Spacer(modifier = Modifier.width(8.dp))
                                     MinisSmallButton(
                                         onClick = {
-                                            providerRepository.saveKeyPool(instanceId, editKeyPoolValue)
-                                            storedKeyPool = editKeyPoolValue
-                                            AppLogger.info(TAG, "Saved key pool for ${instance.id}")
+                                            if (editKeyPoolValue.isBlank()) {
+                                                providerRepository.deleteKeyPool(instanceId)
+                                                storedKeyPool = ""
+                                                AppLogger.info(TAG, "Cleared key pool for ${instance.id}")
+                                            } else {
+                                                providerRepository.saveKeyPool(instanceId, editKeyPoolValue)
+                                                storedKeyPool = editKeyPoolValue
+                                                AppLogger.info(TAG, "Saved key pool for ${instance.id}")
+                                            }
                                             isEditingKeyPool = false
                                             editKeyPoolValue = ""
                                             keyPoolVisible = false
                                         },
-                                        enabled = editKeyPoolValue.isNotBlank(),
                                     ) {
-                                        Text("保存池")
+                                        Text(if (editKeyPoolValue.isBlank()) "清空" else "保存池")
                                     }
                                 }
                             } else {
@@ -314,6 +319,25 @@ fun ProviderDetailScreen(
                                         },
                                     ) {
                                         Text(stringResource(R.string.common_edit))
+                                    }
+                                    // [T-key-pool-clear] 删除入口：之前只有“编辑”，
+                                    // 池一旦设置就没有任何 UI 途径清空，只能靠
+                                    // 编辑态保存空值——而保存按钮又被 isNotBlank()
+                                    // 禁用，等于死路。这里加显式“清空”按钮，直接
+                                    // 调 deleteKeyPool 回到单 Key 模式。
+                                    MinisSmallOutlinedButton(
+                                        onClick = {
+                                            providerRepository.deleteKeyPool(instanceId)
+                                            storedKeyPool = ""
+                                            keyPoolVisible = false
+                                            AppLogger.info(TAG, "Cleared key pool for ${instance.id}")
+                                        },
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.error,
+                                        ),
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                                    ) {
+                                        Text("清空")
                                     }
                                 }
                             }
