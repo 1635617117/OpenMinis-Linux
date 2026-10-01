@@ -46,8 +46,8 @@ object ShellTimeoutPolicy {
     const val BATCH_WALL_MS = 1_200_000L
     const val SERVICE_WALL_MS = LONG_RUNNING_TIMEOUT_MS
     const val SETUP_WALL_MS = LONG_RUNNING_TIMEOUT_MS
-    const val SERVICE_RATE_BPS = 64L * 1024L
-    const val SETUP_RATE_BPS = 64L * 1024L
+    const val SERVICE_RATE_BPS = 512L * 1024L
+    const val SETUP_RATE_BPS = 512L * 1024L
     const val SETUP_FSIZE_BYTES = 8L * 1024L * 1024L * 1024L
 
     /**

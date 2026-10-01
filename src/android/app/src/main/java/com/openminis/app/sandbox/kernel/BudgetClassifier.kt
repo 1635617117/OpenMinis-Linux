@@ -113,7 +113,7 @@ object BudgetClassifier {
         wallMs = ShellTimeoutPolicy.BATCH_WALL_MS,
         cpuSeconds = 600,
         fileSizeBytes = 4L * GIB,
-        nproc = 256,
+        nproc = 4096,
         outputCapBytes = 64L * MIB,
         outputRateBytesPerSec = 8L * MIB,
     )
@@ -128,7 +128,7 @@ object BudgetClassifier {
         wallMs = ShellTimeoutPolicy.SERVICE_WALL_MS,
         cpuSeconds = 0,
         fileSizeBytes = 4L * GIB,
-        nproc = 256,
+        nproc = 4096,
         outputCapBytes = 16L * MIB,
         outputRateBytesPerSec = ShellTimeoutPolicy.SERVICE_RATE_BPS,
     )
@@ -144,7 +144,7 @@ object BudgetClassifier {
         wallMs = ShellTimeoutPolicy.SETUP_WALL_MS,
         cpuSeconds = 0,
         fileSizeBytes = ShellTimeoutPolicy.SETUP_FSIZE_BYTES,
-        nproc = 256,
+        nproc = 4096,
         outputCapBytes = 16L * MIB,
         outputRateBytesPerSec = ShellTimeoutPolicy.SETUP_RATE_BPS,
     )
