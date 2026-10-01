@@ -21,7 +21,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.AutoAwesome
-import androidx.compose.material.icons.outlined.GppGood
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.BarChart
 import androidx.compose.material.icons.outlined.BatteryFull
@@ -267,25 +266,7 @@ fun SettingsScreen(
                     subtitle = stringResource(R.string.settings_section_tools),
                     onClick = onTerminalClick,
                 )
-                // [T-tool-approval] shell/su 类工具调用前人工批准开关。
-                var toolApprovalEnabled by remember {
-                    androidx.compose.runtime.mutableStateOf(
-                        com.openminis.app.tools.ToolApprovalGate.enabled,
-                    )
-                }
-                val approvalPrefs = androidx.compose.ui.platform.LocalContext.current
-                    .getSharedPreferences("tool_approval", android.content.Context.MODE_PRIVATE)
-                SettingsSwitchRow(
-                    title = "Shell 工具人工审批",
-                    subtitle = "模型调 shell/su 前挂起等待你批准或拒绝（防止误执行高危命令）",
-                    icon = Icons.Outlined.GppGood,
-                    checked = toolApprovalEnabled,
-                    onCheckedChange = { value ->
-                        toolApprovalEnabled = value
-                        com.openminis.app.tools.ToolApprovalGate.enabled = value
-                        approvalPrefs.edit().putBoolean("enabled", value).apply()
-                    },
-                )
+                // [T-tool-approval-removed] 审批门按 LO 裁决移除。
                 SettingsItem(
                     icon = Icons.Outlined.Language,
                     iconColor = Color(0xFF34C759),

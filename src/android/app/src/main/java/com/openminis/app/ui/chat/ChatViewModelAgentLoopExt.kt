@@ -564,6 +564,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     tools = agentTools,
                     thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
                 ).firstEventWatchdog(firstEventTimeoutMs).collect { chunk ->
+            // [T-stream-trace-live] 运行时轨迹录制（日志页开关控制，默认关）。
+            com.openminis.app.provider.StreamTraceRecorder.record(chunk)
             when (chunk) {
                 is LLMStreamChunk.ThinkingDelta -> {
                     turnThinking.append(chunk.text)

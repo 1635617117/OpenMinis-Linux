@@ -216,6 +216,11 @@ private fun LogsBody(
     var showContextSnapshot by remember { mutableStateOf(false) }
     var showAnswerVersions by remember { mutableStateOf(false) }
     var selectedVersionFile by remember { mutableStateOf<java.io.File?>(null) }
+    var showStreamTraces by remember { mutableStateOf(false) }
+    var selectedTraceFile by remember { mutableStateOf<java.io.File?>(null) }
+    var streamTraceEnabled by remember {
+        mutableStateOf(com.openminis.app.provider.StreamTraceRecorder.enabled)
+    }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -231,6 +236,109 @@ private fun LogsBody(
                 checked = loggingEnabled,
                 onCheckedChange = onToggleLogging,
                 showDivider = false,
+            )
+        }
+
+        // [T-stream-trace-live] 轨迹录制开关与回放入口。
+        SettingsSection(
+            header = "流式轨迹（回放与排障）",
+            footer = "录制后可在下方浏览每次会话的 chunk 帧序列，对照改流解析器前后的差异。",
+        ) {
+            SettingsSwitchRow(
+                title = "录制流式轨迹",
+                checked = streamTraceEnabled,
+                onCheckedChange = { value ->
+                    streamTraceEnabled = value
+                    com.openminis.app.provider.StreamTraceRecorder.setEnabled(value, context)
+                    if (value) com.openminis.app.provider.StreamTraceRecorder.newSession()
+                },
+                showDivider = true,
+            )
+            SettingsRow(
+                title = "浏览轨迹回放",
+                subtitle = "offloads/stream-traces/ 下的录制文件（每行一个 chunk）",
+                onClick = { showStreamTraces = true },
+                showDivider = false,
+            )
+        }
+
+        if (showStreamTraces) {
+            val tracesDir = java.io.File(com.openminis.app.provider.StreamTraceRecorder.DIR)
+            val traceFiles = remember(showStreamTraces) {
+                tracesDir.listFiles()?.sortedByDescending { it.lastModified() }?.take(30) ?: emptyList()
+            }
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { showStreamTraces = false },
+                title = { Text("轨迹回放（最近 30 条）") },
+                text = {
+                    if (traceFiles.isEmpty()) {
+                        Text("暂无轨迹。打开「录制流式轨迹」后发一次消息即开始录制。")
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 420.dp)
+                                .verticalScroll(rememberScrollState()),
+                        ) {
+                            traceFiles.forEach { f ->
+                                TextButton(onClick = { selectedTraceFile = f }) {
+                                    Text(
+                                        f.name,
+                                        style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showStreamTraces = false }) { Text("关闭") }
+                },
+            )
+        }
+
+        selectedTraceFile?.let { f ->
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { selectedTraceFile = null },
+                title = { Text(f.name) },
+                text = {
+                    val body = remember(f) {
+                        runCatching {
+                            f.readLines()
+                                .takeLast(400)
+                                .joinToString("\n") { line ->
+                                    runCatching {
+                                        val obj = org.json.JSONObject(line)
+                                        when (obj.optString("kind")) {
+                                            "text" -> "text: ${obj.optString("text").take(120)}"
+                                            "thinking" -> "thinking: ${obj.optString("text").take(120)}"
+                                            "reasoning" -> "reasoning: ${obj.optString("content").take(120)}"
+                                            "tool_use_start" -> "tool_use_start: ${obj.optString("name")}"
+                                            "tool_call_complete" -> "tool_call_complete: ${obj.optString("name")}"
+                                            "finished" -> "finished: ${obj.optString("stopReason")}"
+                                            else -> obj.optString("kind")
+                                        }
+                                    }.getOrDefault(line.take(120))
+                                }
+                        }.getOrDefault("读取失败")
+                    }
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 420.dp)
+                            .verticalScroll(rememberScrollState()),
+                    ) {
+                        Text(
+                            body,
+                            style = androidx.compose.material3.MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                            ),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedTraceFile = null }) { Text("关闭") }
+                },
             )
         }
 

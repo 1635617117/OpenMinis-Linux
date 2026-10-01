@@ -16,14 +16,16 @@ import java.util.concurrent.atomic.AtomicInteger
 object ProviderKeyRotation {
     private val cursors = java.util.concurrent.ConcurrentHashMap<String, AtomicInteger>()
 
-    fun pool(instanceId: String): List<String> {
-        val raw = System.getenv("OPENMINIS_KEYS_$instanceId") ?: return emptyList()
+    fun pool(instanceId: String, prefsPool: String? = null): List<String> {
+        val raw = prefsPool?.takeIf { it.isNotBlank() }
+            ?: System.getenv("OPENMINIS_KEYS_$instanceId")
+            ?: return emptyList()
         return raw.split(',').map { it.trim() }.filter { it.isNotBlank() }
     }
 
     /** Returns the next key from the pool, or null when no pool exists. */
-    fun next(instanceId: String): String? {
-        val pool = pool(instanceId)
+    fun next(instanceId: String, prefsPool: String? = null): String? {
+        val pool = pool(instanceId, prefsPool)
         if (pool.isEmpty()) return null
         val cursor = cursors.getOrPut(instanceId) { AtomicInteger(0) }
         val index = Math.floorMod(cursor.getAndIncrement(), pool.size)

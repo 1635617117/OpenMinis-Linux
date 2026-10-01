@@ -386,9 +386,9 @@ class MinisApp : Application(), ImageLoaderFactory {
                 )
             }
         }
-        // [T-tool-approval] 恢复 shell 审批门开关状态。
-        com.openminis.app.tools.ToolApprovalGate.enabled =
-            getSharedPreferences("tool_approval", MODE_PRIVATE).getBoolean("enabled", false)
+        // [T-tool-approval-removed] 审批门按 LO 裁决移除。
+        // [T-stream-trace-live] 恢复轨迹录制开关状态。
+        com.openminis.app.provider.StreamTraceRecorder.restore(this)
 
         // Bug 2 (MIUI silent kill) diagnostic: write a launch-cycle beacon
         // so a subsequent launch can observe whether the previous run

@@ -2336,10 +2336,23 @@ class ProviderRepository(private val context: Context) {
      * instances without a token, which must stay unauthenticated).
      */
     fun usableApiKey(instance: ProviderInstance): String? =
-        // [T-key-rotation] 环境变量 OPENMINIS_KEYS_<id> 提供逗号分隔密钥池时轮换取用。
-        com.openminis.app.provider.ProviderKeyRotation.next(instance.id)
+        // [T-key-rotation] 供应商页配置的备用 Key 池（逗号分隔）优先轮换，
+        // 其次环境变量 OPENMINIS_KEYS_<id>，最后单 key。
+        com.openminis.app.provider.ProviderKeyRotation.next(instance.id, loadKeyPool(instance.id))
             ?: loadApiKey(instance.id)
             ?: if (instance.allowsEmptyAPIKey) "" else null
+
+    /** [T-key-rotation] 备用 Key 池（逗号分隔），与主 key 同库加密存储。 */
+    fun loadKeyPool(instanceId: String): String =
+        encryptedPrefs.getString("keypool_$instanceId", null).orEmpty()
+
+    fun saveKeyPool(instanceId: String, pool: String) {
+        encryptedPrefs.edit().putString("keypool_$instanceId", pool).apply()
+    }
+
+    fun deleteKeyPool(instanceId: String) {
+        encryptedPrefs.edit().remove("keypool_$instanceId").apply()
+    }
 
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()

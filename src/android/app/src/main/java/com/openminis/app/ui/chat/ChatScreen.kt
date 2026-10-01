@@ -3207,7 +3207,7 @@ fun ChatScreen(
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        bottomBar = { ToolApprovalBar() },
+        // [T-tool-approval-removed] 审批门按 LO 裁决移除（智能体直接执行，不设人工门槛）。
     ) { padding ->
         // [T-android-scroll-fab-content-inset] The chat pane's own width, used
         // below to inset the scroll buttons to the capped content column.
