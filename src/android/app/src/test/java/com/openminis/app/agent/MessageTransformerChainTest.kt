@@ -20,6 +20,59 @@ class MessageTransformerChainTest {
         assertTrue(out.contains("answer") && out.contains("tail") && out.contains("end"))
     }
 
+    // ── [T-universal-think-tag-history] Unterminated reasoning tail ──
+
+    @Test
+    fun stripsUnterminatedThinkingTail() {
+        // The screenshot failure: <thinking> opened, never closed, all the
+        // trailing reasoning rendered in the bubble.
+        val text = "开头可见内容\n<thinking>Inspecting exact current blocks before patching\nAdding state for entry pin"
+        val out = MessageTransformerChain.apply(text)
+        assertTrue("visible head must survive", out.contains("开头可见内容"))
+        assertTrue("raw tag must be gone", !out.contains("<thinking>"))
+        assertTrue("reasoning must be gone", !out.contains("Inspecting exact current blocks"))
+        assertTrue("tail reasoning must be gone", !out.contains("Adding state"))
+    }
+
+    @Test
+    fun stripsUnterminatedSpecialTokenTail() {
+        val text = "visible\n<|thinking|>reasoning with no close"
+        val out = MessageTransformerChain.apply(text)
+        assertTrue(out.contains("visible"))
+        assertTrue(!out.contains("reasoning with no close"))
+    }
+
+    @Test
+    fun keepsOrdinaryAngleBracketText() {
+        // A '<' that is NOT a reasoning tag must never be eaten — code
+        // snippets, comparisons, HTML examples all stay verbatim.
+        val text = "Use a < b for comparison. And <div>HTML</div> stays."
+        assertEquals(text, MessageTransformerChain.apply(text))
+    }
+
+    @Test
+    fun stripsUnterminatedTagAnywhereInText() {
+        // An unclosed reasoning tag ANYWHERE in the text is a provider leak,
+        // not prose. The visible prefix before the tag survives; everything
+        // from the tag onward goes to thinking. A model merely EXPLAINING the
+        // tag will close it or use code formatting — an unclosed raw tag is
+        // never intentional.
+        val text = "Use the <think> tag to mark reasoning."
+        val out = MessageTransformerChain.apply(text)
+        assertTrue(out.startsWith("Use the "))
+        assertTrue(!out.contains("<think>"))
+        assertTrue(!out.contains("tag to mark reasoning."))
+    }
+
+    @Test
+    fun stripsClosedAndUnterminatedMixed() {
+        val text = "A<thinking>x</thinking>B\n<thinking>unclosed tail"
+        val out = MessageTransformerChain.apply(text)
+        assertTrue(out.contains("A"))
+        assertTrue(out.contains("B"))
+        assertTrue(!out.contains("unclosed tail"))
+    }
+
     // ── TimeReminder ──
 
     @Test

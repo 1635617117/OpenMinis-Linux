@@ -79,8 +79,29 @@ object MessageTransformerChain {
             RegexOption.IGNORE_CASE,
         )
 
-        override fun transform(text: String): String =
-            specialTokenBlocks.replace(namedBlocks.replace(text, ""), "")
+        // [T-universal-think-tag-history] Unterminated blocks: a reasoning tag
+        // opened but never closed (provider cut off mid-turn, tool-loop splice,
+        // or a model that simply never emits the close). Strip from the LAST
+        // unclosed opener to end-of-text so the tail reasoning never renders in
+        // the bubble. This mirrors the stream parser's "unterminated = thinking"
+        // rule, applied to persisted/replayed text the parser can't reach.
+        private val unterminatedOpen = Regex(
+            """(?s)<\s*(thinking|think|reasoning|analysis|antThinking|inner_thought|scratchpad|分析|思考)\s*>(?!.*?</\s*\1\s*>)[^<]*$""",
+            RegexOption.IGNORE_CASE,
+        )
+        private val unterminatedSpecial = Regex(
+            """(?s)<\|(thinking|think|reasoning)\|>(?!.*<\|/\1\|>)[^<]*$""",
+            RegexOption.IGNORE_CASE,
+        )
+
+        override fun transform(text: String): String {
+            var out = specialTokenBlocks.replace(namedBlocks.replace(text, ""), "")
+            // Second pass only needed when a lone opener survived — cheap check.
+            if (out.contains('<')) {
+                out = unterminatedSpecial.replace(unterminatedOpen.replace(out, ""), "")
+            }
+            return out
+        }
     }
 
     /**

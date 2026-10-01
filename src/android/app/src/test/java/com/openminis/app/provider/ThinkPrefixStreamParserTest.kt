@@ -184,4 +184,95 @@ class ThinkPrefixStreamParserTest {
         val o2 = p.feed("nk>abc</think>\n\nbody")
         assertEquals("abc", o2.thinking)
     }
+
+    // ── [T-universal-think-tag] Vendor spelling variants ─────────────────────
+
+    @Test
+    fun `kimi thinking tag prefix is split into the thinking bubble`() {
+        val (vis, think) = run("<thinking>plan the edit</thinking>\n\nDone.")
+        assertEquals("Done.", vis)
+        assertEquals("plan the edit", think)
+    }
+
+    @Test
+    fun `kimi thinking tag split across chunks still works`() {
+        val (vis, think) = run("<think", "ing>step one</think", "ing>\n\nbody")
+        assertEquals("body", vis)
+        assertEquals("step one", think)
+    }
+
+    @Test
+    fun `claude antThinking bridge variant is split`() {
+        val (vis, think) = run("<antThinking>careful reasoning</antThinking>\n\nanswer")
+        assertEquals("answer", vis)
+        assertEquals("careful reasoning", think)
+    }
+
+    @Test
+    fun `glm special token thinking variant is split`() {
+        val (vis, think) = run("<|thinking|>reasoning<|/thinking|>\n\nbody")
+        assertEquals("body", vis)
+        assertEquals("reasoning", think)
+    }
+
+    @Test
+    fun `reasoning analysis and scratchpad variants are split`() {
+        val cases = listOf(
+            "reasoning" to "answer A",
+            "analysis" to "answer B",
+            "scratchpad" to "answer C",
+        )
+        for ((tag, body) in cases) {
+            val (vis, think) = run("<$tag>inside $tag</$tag>\n\n$body")
+            assertEquals("$tag: body must survive", body, vis)
+            assertEquals("$tag: thinking must be captured", "inside $tag", think)
+        }
+    }
+
+    @Test
+    fun `chinese 思考 variant is split`() {
+        val (vis, think) = run("<思考>想一下</思考>\n\n正文")
+        assertEquals("正文", vis)
+        assertEquals("想一下", think)
+    }
+
+    @Test
+    fun `unterminated kimi thinking block is thinking not body`() {
+        // The exact screenshot failure: provider never closed <thinking>, so the
+        // raw tag + reasoning rendered in the bubble. Must go to thinking.
+        val (vis, think) = run("<thinking>reasoning tail never closed")
+        assertEquals("", vis)
+        assertEquals("reasoning tail never closed", think)
+    }
+
+    @Test
+    fun `mid-stream think block stays verbatim in the body`() {
+        // Design: only the turn-INITIAL think tag enters THINKING. Once the
+        // state machine is in BODY, later tags are passed through verbatim —
+        // this is the deliberate "mid-text tags stay" rule from the iOS port.
+        // The screenshot leak is an UNTERMINATED tag at turn START, which is
+        // covered by the unterminated tests above.
+        val input = "body one\n\n<think>second</think>\n\nbody two"
+        val (vis, think) = run(input)
+        assertEquals(input, vis)
+        assertEquals("", think)
+    }
+
+    @Test
+    fun `second turn starts a fresh parser and splits again`() {
+        // The agent loop creates one parser per turn (provider instantiates a
+        // new ThinkPrefixStreamParser per request), so each turn's initial
+        // think tag independently routes to the thinking bubble.
+        val p1 = ThinkPrefixStreamParser()
+        val o1 = p1.feed("<thinking>first</thinking>\n\nbody one")
+        p1.finishTurn()
+        assertEquals("body one", o1.visible)
+        assertEquals("first", o1.thinking)
+
+        val p2 = ThinkPrefixStreamParser()
+        val o2 = p2.feed("<think>second</think>\n\nbody two")
+        p2.finishTurn()
+        assertEquals("body two", o2.visible)
+        assertEquals("second", o2.thinking)
+    }
 }

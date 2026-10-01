@@ -5298,6 +5298,16 @@ class ChatViewModel(
                             // from mediaRef parts). The DB row + agentHistory
                             // keep the raw XML so the model still sees paths.
                             val t = stripAttachedFilesXml(stripSystemReminders(raw)).let {
+                                // [T-universal-think-tag-history] Last-resort UI
+                                // strip: a reasoning tag that leaked into the DB
+                                // (unterminated provider stream, tool-loop splice,
+                                // vendor spelling the stream parser pre-dated) must
+                                // never render in the bubble. DB + agentHistory keep
+                                // the raw text; this only cleans the painted copy.
+                                if (entity.role == "assistant") {
+                                    com.openminis.app.agent.MessageTransformerChain.apply(it)
+                                } else it
+                            }.let {
                                 if (it != raw) it.trim() else it
                             }
                             if (t.isEmpty()) continue

@@ -55,9 +55,52 @@ internal class ThinkPrefixStreamParser {
     private val heldWhitespace = StringBuilder()
 
     private companion object {
-        const val OPEN = "<think>"
-        const val CLOSE = "</think>"
+        // [T-universal-think-tag] Universal reasoning-tag prefix set. Different
+        // providers spell the reasoning wrapper differently; every one of these
+        // has been observed in a production stream leaking into `content`:
+        //   <think>            MiniMax M3, Qwen-QwQ, DeepSeek-R1 distills
+        //   <thinking>         Kimi K2/K3/K4 (Moonshot)
+        //   <reasoning>        some OpenRouter/OpenAI-compatible routers
+        //   <analysis>         Gemini / Ollama variant deployments
+        //   <antThinking>      Claude→OpenAI bridge deployments
+        //   <inner_thought>    GLM-5 family preview builds
+        //   <scratchpad>       older self-hosted CoT wrappers
+        //   <|thinking|>       GLM/ChatGLM special-token form
+        //   <思考>             Chinese-localized wrappers
+        // Longest-first so e.g. "<thinking>" wins over "<think>" when both could
+        // prefix-match the same incoming bytes ("<thinkin…").
+        val OPEN_VARIANTS = listOf(
+            "<inner_thought>",
+            "<scratchpad>",
+            "<antThinking>",
+            "<reasoning>",
+            "<thinking>",
+            "<analysis>",
+            "<|thinking|>",
+            "<think>",
+            "<思考>",
+        )
+        val CLOSE_VARIANTS = listOf(
+            "</inner_thought>",
+            "</scratchpad>",
+            "</antThinking>",
+            "</reasoning>",
+            "</thinking>",
+            "</analysis>",
+            "<|/thinking|>",
+            "</think>",
+            "</思考>",
+        )
+        init {
+            require(OPEN_VARIANTS.size == CLOSE_VARIANTS.size) { "tag variant table must stay aligned" }
+        }
+        // Precomputed for the partial-tag matcher below.
+        val MAX_OPEN_LEN = OPEN_VARIANTS.maxOf { it.length }
     }
+
+    /** Which variant was matched at turn start (null = not yet decided). */
+    private var activeOpen: String? = null
+    private var activeClose: String? = null
 
     /** Feed one streamed `content` delta. */
     fun feed(text: String): Output {
@@ -69,43 +112,42 @@ internal class ThinkPrefixStreamParser {
         loop@ while (pending.isNotEmpty()) {
             when (state) {
                 State.UNDECIDED -> {
-                    // Tolerate (and drop) leading whitespace before a <think>.
+                    // Tolerate (and drop) leading whitespace before a think tag.
                     val firstNonSpace = pending.indexOfFirst { !it.isWhitespace() }
-                    if (firstNonSpace < 0) {
-                        // All whitespace so far — can't decide yet. Keep it: if a
-                        // <think> follows we drop it, otherwise it belongs to the body.
-                        break@loop
-                    }
+                    if (firstNonSpace < 0) break@loop
                     val rest = pending.substring(firstNonSpace)
-                    if (OPEN.startsWith(rest.take(OPEN.length))) {
-                        // Could still become "<think>" once more bytes arrive.
-                        if (rest.length < OPEN.length) break@loop
-                    }
-                    if (rest.startsWith(OPEN)) {
-                        state = State.THINKING
-                        // Drop the tolerated leading whitespace AND the tag.
-                        pending.delete(0, firstNonSpace + OPEN.length)
-                    } else {
-                        // No think prefix — the whole turn is body, tags and all.
-                        state = State.BODY
-                        // Leading whitespace here is genuine body content.
+                    val matched = matchOpenVariant(rest)
+                    when {
+                        // Full match → enter THINKING with that variant's close tag.
+                        matched > 0 -> {
+                            val idx = OPEN_VARIANTS.indexOfFirst { it.length == matched && rest.startsWith(it) }
+                            check(idx >= 0) { "matchOpenVariant returned length of unknown variant" }
+                            state = State.THINKING
+                            activeOpen = OPEN_VARIANTS[idx]
+                            activeClose = CLOSE_VARIANTS[idx]
+                            pending.delete(0, firstNonSpace + matched)
+                        }
+                        // Partial match (tag split across chunks) → keep buffering.
+                        matched == -1 -> break@loop
+                        // No think prefix at all → the whole turn is body.
+                        else -> state = State.BODY
                     }
                 }
 
                 State.THINKING -> {
-                    val closeIdx = pending.indexOf(CLOSE)
+                    val close = activeClose
+                        ?: error("THINKING without an active variant — impossible via matchOpenVariant")
+                    val closeIdx = pending.indexOf(close)
                     if (closeIdx < 0) {
-                        // Emit everything except a possible partial closing tag.
-                        val safe = safeEmitLength(pending, CLOSE)
+                        val safe = safeEmitLength(pending, close)
                         if (safe <= 0) break@loop
                         thinking.append(pending, 0, safe)
                         pending.delete(0, safe)
                         break@loop
                     }
                     thinking.append(pending, 0, closeIdx)
-                    pending.delete(0, closeIdx + CLOSE.length)
+                    pending.delete(0, closeIdx + close.length)
                     state = State.BODY
-                    // Drop the whitespace M3 emits right after </think>.
                     while (pending.isNotEmpty() && pending[0].isWhitespace()) pending.deleteCharAt(0)
                 }
 
@@ -161,15 +203,36 @@ internal class ThinkPrefixStreamParser {
      */
     fun resolveAtToolBoundary(): Output {
         if (state != State.UNDECIDED || pending.isEmpty()) return Output("", "")
-        // If the buffer could still grow into "<think>", leave it alone.
-        val rest = pending.trimStart()
-        if (rest.isNotEmpty() && OPEN.startsWith(rest.take(OPEN.length)) && rest.length < OPEN.length) {
-            return Output("", "")
-        }
+        // Pure whitespace is NOT a partial tag — flush it so the pre-tool
+        // snapshot isn't missing it. Only hold back actual tag prefixes.
+        val trimmed = pending.trimStart().toString()
+        if (trimmed.isNotEmpty() && matchOpenVariant(trimmed) == -1) return Output("", "")
         state = State.BODY
         val out = pending.toString()
         pending.setLength(0)
         return Output(out, "")
+    }
+
+    /**
+     * Match [rest] (leading-whitespace-trimmed) against the open-variant table.
+     * Returns:
+     *   >0  — length of a FULL open-tag match (caller consumes that many chars)
+     *   -1  — rest is a proper PREFIX of at least one variant (keep buffering)
+     *    0  — no variant can ever match (commit to body)
+     */
+    private fun matchOpenVariant(rest: String): Int {
+        if (rest.isEmpty()) return -1  // nothing yet — could still become a tag
+        // Longest full match first (table is already longest-first).
+        for (variant in OPEN_VARIANTS) {
+            if (rest.startsWith(variant)) return variant.length
+        }
+        // Partial: rest shorter than a variant and equal to its head.
+        if (rest.length < MAX_OPEN_LEN) {
+            for (variant in OPEN_VARIANTS) {
+                if (rest.length < variant.length && variant.startsWith(rest)) return -1
+            }
+        }
+        return 0
     }
 
     /**
