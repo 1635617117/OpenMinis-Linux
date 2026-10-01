@@ -953,13 +953,57 @@ class ChatViewModel(
                 val start = withContext(Dispatchers.IO) {
                     olderTurnStart(before, ChatHistoryWindow.TURN_PAGE_SIZE)
                 }
-                if (start == null || start >= before) {
+                // [T-load-older-fallback] Turn-aligned paging targets whole
+                // user turns. When the remaining history before the window has
+                // fewer than TURN_PAGE_SIZE user turns (or none at all),
+                // olderTurnStart returns null even though countMessagesBeforeSort
+                // still reports rows — mostly assistant-only trailing messages.
+                // Without a fallback, the pill stays lit but every click just
+                // calls refreshHistoryEdges and returns: visible button, zero
+                // effect. Fall back to a non-turn-aligned load of all remaining
+                // rows instead of freezing at the boundary.
+                val loadStart = if (start != null && start < before) {
+                    start
+                } else {
+                    // Turn alignment failed. Load everything from session start
+                    // to the current window boundary.
+                    val remaining = withContext(Dispatchers.IO) {
+                        chatRepository.dao.countMessagesBeforeSort(sessionId, before)
+                    }
+                    if (remaining <= 0) {
+                        refreshHistoryEdges()
+                        return@launch
+                    }
+                    // Walk back to the very first message that still exists.
+                    // Using sort_order 0 isn't safe after compact, so probe.
+                    var fallback: Int? = null
+                    var probeCursor = before
+                    while (true) {
+                        val anchors = withContext(Dispatchers.IO) {
+                            chatRepository.dao.loadOlderSortAnchors(sessionId, probeCursor, 200)
+                        }
+                        if (anchors.isEmpty()) break
+                        fallback = anchors.last().sortOrder
+                        if (anchors.size < 200) break
+                        if (anchors.last().sortOrder >= probeCursor) break
+                        probeCursor = anchors.last().sortOrder
+                    }
+                    fallback
+                }
+                if (loadStart == null || loadStart >= before) {
+                    // Fallback exhausted every probe but countMessagesBeforeSort
+                    // still saw rows — this is a data-path contradiction that
+                    // would keep the pill lit and every subsequent click a no-op.
+                    // Force the pill off so the user is not stuck in a dead loop.
+                    if (loadStart == null) {
+                        _hasOlderMessages.value = false
+                    }
                     refreshHistoryEdges()
                     return@launch
                 }
                 val rows = withContext(Dispatchers.IO) {
                     chatRepository.hydrateDisplayRows(
-                        loadSortRange(SortRange(start, before)),
+                        loadSortRange(SortRange(loadStart, before)),
                     )
                 }
                 if (rows.isNotEmpty()) {
