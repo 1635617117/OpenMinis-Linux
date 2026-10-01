@@ -2336,7 +2336,8 @@ class ProviderRepository(private val context: Context) {
      * instances without a token, which must stay unauthenticated).
      */
     fun usableApiKey(instance: ProviderInstance, modelId: String = ""): String? =
-        // [T-key-rotation] 粘性轮换：池里按模型钉住当前 key，坏 key 熔断才轮换。
+        // [T-key-rotation] 粘性轮换：池里按实例钉住当前 key，坏 key 熔断才轮换。
+        // modelId 参数保留兼容但不再用于游标维度；游标按 instanceId 统一分维。
         com.openminis.app.provider.ProviderKeyRotation.current(instance.id, loadKeyPool(instance.id), modelId)
             ?: loadApiKey(instance.id)
             ?: if (instance.allowsEmptyAPIKey) "" else null

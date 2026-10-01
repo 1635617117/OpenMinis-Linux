@@ -993,10 +993,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // 直接交给 fallback 成员，别用 1/2/4/8/16s 退避反复锤一把死 key。
                 val breakerTripped = com.openminis.app.provider.ProviderKeyGate.isTripped(breakerBucket)
                 if (isTransient) {
-                    // [T-key-rotation] 熔断刚跳闸 → 同模型粘性轮换推进到下一个备用 key。
+                    // [T-key-rotation] 熔断刚跳闸 → 同实例粘性轮换推进到下一个备用 key。
                     val justTripped = com.openminis.app.provider.ProviderKeyGate.recordFailure(breakerBucket)
                     if (justTripped) {
-                        com.openminis.app.provider.ProviderKeyRotation.advance(currentProvider.model.displayName)
+                        val instanceId = com.openminis.app.provider.SamplingIdentity.of(currentProvider)
+                        if (instanceId.isNotBlank()) {
+                            com.openminis.app.provider.ProviderKeyRotation.advance(instanceId)
+                        }
                     }
                 }
                 val maxRetries = effectiveMaxRetries()
