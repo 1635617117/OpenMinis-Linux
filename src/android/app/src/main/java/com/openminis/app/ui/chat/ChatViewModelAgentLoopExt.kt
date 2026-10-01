@@ -30,6 +30,14 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import org.json.JSONObject
 
+/**
+ * [T-truncated-tool-call-reject] finish_reason=length / max_tokens 意味着
+ * 输出预算耗尽，流尾的工具调用参数极可能被截断成半截 JSON。这类调用必须
+ * 拒执行并回写结构化错误，而不是拿半截参数去写文件/跑 shell。
+ * 镜像 Eta AGENT_RUNTIME.md 的截断即拒执行。
+ */
+private val TRUNCATED_FINISH_REASONS = setOf("length", "max_tokens")
+
 internal suspend fun ChatViewModel.runAgentLoop(
     provider: LLMProvider,
     systemPrompt: String?,
@@ -881,6 +889,23 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     }
                     if (lastContextTokens > 0) {
                         _lastTurnContextTokens.value = lastContextTokens
+                        // [T-token-usage-calibration] 用真实 usage 校准估算器。
+                        val modelKey = currentModel?.id ?: ""
+                        if (modelKey.isNotEmpty()) {
+                            com.openminis.app.data.TokenUsageCalibration.observe(
+                                modelKey,
+                                estimated = estimateAgentHistoryTokens(),
+                                actual = lastContextTokens,
+                            )
+                        }
+                        // [T-cache-hit-rate] Per-turn cache hit rate for TokenUsageSheet.
+                        val inputTotal = chunk.usage.inputTokens + (chunk.usage.cacheReadInputTokens ?: 0) + 
+                            (chunk.usage.cacheCreationInputTokens ?: 0)
+                        if (inputTotal > 0) {
+                            _lastCacheHitRate.value = 
+                                ((chunk.usage.cacheReadInputTokens ?: 0).toDouble() / inputTotal)
+                                    .coerceIn(0.0, 1.0)
+                        }
                     }
                 }
                 is LLMStreamChunk.ReasoningContent -> {
@@ -1429,6 +1454,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
             }
         }
 
+        // [T-truncated-tool-call-reject] finish_reason=length/max_tokens 且
+        // 带工具调用 → 参数极可能被截断。不执行半截参数（写文件是半截内容、
+        // shell 是半个命令），改写成结构化失败结果让模型下一轮自愈。
+        // 镜像 Eta AGENT_RUNTIME.md 的截断即拒执行。
+        val truncatedToolTurn = toolCalls.isNotEmpty() &&
+            turnFinishReason != null && turnFinishReason in TRUNCATED_FINISH_REASONS
+
         // Execute all tool calls
         val resultParts = mutableListOf<AgentContentPart>()
         val parallelSubResults = mutableMapOf<String, ToolExecutionResult>()
@@ -1613,6 +1645,34 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 withContext(Dispatchers.Main) {
                     updateAssistantMessage(assistantId, accumulatedText, true, allToolBlocks)
                 }
+                continue
+            }
+
+            currentCoroutineContext().ensureActive()
+            // [T-truncated-tool-call-reject] 流因长度限制被切断（finish_reason=
+            // length/max_tokens），此工具调用的参数极可能是半截 JSON。拒执行，
+            // 让模型看到失败结果后下一轮重新完整调用。镜像 Eta AGENT_RUNTIME.md。
+            if (truncatedToolTurn) {
+                val truncatedMsg = "Error: This tool call was rejected because the " +
+                    "model output was truncated (finish_reason=$turnFinishReason). " +
+                    "The arguments are likely incomplete. Re-read any relevant " +
+                    "context and re-issue the call with complete arguments."
+                val blockIdxTr = allToolBlocks.indexOfFirst { it.id == id }
+                if (blockIdxTr >= 0) {
+                    val elapsedTr = System.currentTimeMillis() - allToolBlocks[blockIdxTr].startTimeMs
+                    allToolBlocks[blockIdxTr] = allToolBlocks[blockIdxTr].copy(
+                        toolStatus = ToolBlockStatus.FAILED,
+                        content = truncatedMsg,
+                        durationMs = elapsedTr,
+                    )
+                }
+                toolLoopDetector.record(name, paramsMap,
+                    result = null, errorMessage = truncatedMsg, toolCallId = id)
+                resultParts.add(AgentContentPart.ToolResult(
+                    id = id, name = name,
+                    content = truncatedMsg,
+                    isError = true,
+                ))
                 continue
             }
 

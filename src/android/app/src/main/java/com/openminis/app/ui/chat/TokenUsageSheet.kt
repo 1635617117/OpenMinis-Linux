@@ -56,6 +56,8 @@ fun TokenUsageSheet(
     val contextWindow = viewModel.currentModelContextWindow
     val maxOutput = viewModel.currentModelMaxOutputTokens
     val thinking = remember { viewModel.thinkingInfo() }
+    // [T-cache-hit-rate] 最近一轮的缓存命中率（0..1，无真实 usage 时为 null）。
+    val lastCacheHitRate by viewModel.lastCacheHitRate.collectAsState()
 
     LaunchedEffect(Unit) {
         stats = viewModel.loadSessionTokenStats()
@@ -117,6 +119,17 @@ fun TokenUsageSheet(
             StatSection(title = stringResource(R.string.token_usage_section_cache)) {
                 StatRow(stringResource(R.string.token_usage_cache_read), formatTokens(s?.cacheRead ?: 0L))
                 StatRow(stringResource(R.string.token_usage_cache_write), formatTokens(s?.cacheWrite ?: 0L))
+                // [T-cache-hit-rate] 最近一轮缓存命中率（session 总数外的实时维度）。
+                if (s != null && (s.cacheRead > 0 || s.input > 0)) {
+                    StatRow(
+                        stringResource(R.string.token_usage_cache_hit_rate),
+                        if (lastCacheHitRate > 0.0) {
+                            "${(lastCacheHitRate * 100).toInt()}%"
+                        } else {
+                            "—"
+                        },
+                    )
+                }
             }
 
             StatSection(title = stringResource(R.string.token_usage_section_agent_loop)) {

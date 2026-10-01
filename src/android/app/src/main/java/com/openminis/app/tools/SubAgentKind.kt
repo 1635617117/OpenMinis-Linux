@@ -521,17 +521,31 @@ object SubAgentKind {
         return false
     }
 
+    /**
+     * Stable de-duplication by tool name, keeping the first definition seen.
+     * A provider may hand us duplicate rows (same name, different schema) and
+     * passing them twice breaks downstream tool binding, so collapse them here.
+     */
+    fun dedupeByName(tools: List<AgentToolDefinition>): List<AgentToolDefinition> {
+        val seen = LinkedHashSet<String>(tools.size)
+        val out = ArrayList<AgentToolDefinition>(tools.size)
+        for (t in tools) {
+            if (seen.add(t.name)) out.add(t)
+        }
+        return out
+    }
+
     fun filterTools(
         kind: String,
         tools: List<AgentToolDefinition>,
         role: String? = null,
         roleContext: android.content.Context? = null,
     ): List<AgentToolDefinition> {
-        val base = tools.filter { !blocks(kind, it.name) }
+        val base = dedupeByName(tools.filter { !blocks(kind, it.name) })
         val allowed = roleContext?.let { CollabRoles.toolsFor(it, role) }
             ?: CollabRoles.toolsFor(role)
             ?: return base
-        return base.filter { it.name in allowed }
+        return dedupeByName(base.filter { it.name in allowed })
     }
 
     /**

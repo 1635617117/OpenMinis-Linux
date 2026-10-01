@@ -21,6 +21,27 @@ object ToolOutputPolicy {
     const val TOOL_OUTPUTS_DIR = "tool_outputs"
     private const val REDACTED = "[REDACTED]"
     private const val PREVIEW_CHARS = 2_000
+    internal const val OMISSION_MARKER = "========== [以下内容被省略] =========="
+
+    /**
+     * substring() 会在 UTF-16 码元边界切割，正好落在代理对中间就会产生
+     * 半个 emoji（孤立的高低代理符）。这里把边界回退到码点边界，
+     * 保证 head/tail 预览不会切碎任何非 BMP 字符。
+     */
+    private fun safeSubstring(s: String, start: Int, endExclusive: Int): String {
+        val startIdx = start.coerceIn(0, s.length)
+        val endIdx = endExclusive.coerceIn(startIdx, s.length)
+        if (startIdx == endIdx) return ""
+        // 起点落在低代理符上 → 上一个码元是它的高代理，回退一格。
+        val safeStart = if (startIdx > 0 && startIdx < s.length &&
+            Character.isLowSurrogate(s[startIdx]) && Character.isHighSurrogate(s[startIdx - 1])
+        ) startIdx - 1 else startIdx
+        // 终点切在高代理符上 → 它的低代理被甩在区间外，收回一格。
+        val safeEnd = if (endIdx > safeStart && endIdx < s.length &&
+            Character.isHighSurrogate(s[endIdx - 1]) && Character.isLowSurrogate(s[endIdx])
+        ) endIdx - 1 else endIdx
+        return s.substring(safeStart, safeEnd)
+    }
 
     /** Sandbox workspace root as seen by shell_execute. */
     var workspaceRoot: String = "/var/minis/workspace"
@@ -93,14 +114,25 @@ object ToolOutputPolicy {
             true
         }.getOrDefault(false)
         if (!written) return text
-        val head = text.take(PREVIEW_CHARS)
+        val head = safeSubstring(text, 0, PREVIEW_CHARS)
+        val tailStart = (text.length - PREVIEW_CHARS).coerceAtLeast(PREVIEW_CHARS)
+        val tail = safeSubstring(text, tailStart, text.length)
+        val omitted = tailStart - PREVIEW_CHARS
         return buildString {
             append(head)
-            append("\n\n[工具输出过长：全文 ")
+            append("\n\n[工具输出过长：已省略中间 ")
+            append(omitted)
+            append(" 字符，仅保留首尾各 ")
+            append(PREVIEW_CHARS)
+            append(" 字符预览。全文 ")
             append(text.length)
             append(" 字符已写入沙箱 ")
             append("$TOOL_OUTPUTS_DIR/${file.name}")
             append("，可用 shell_execute 的 cat/grep 分页检索，不用一次性读完]")
+            append("\n\n")
+            append(OMISSION_MARKER)
+            append("\n\n")
+            append(tail)
         }
     }
 }

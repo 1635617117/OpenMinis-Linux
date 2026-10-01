@@ -131,4 +131,24 @@ class SubAgentKindTest {
         assertTrue(SubAgentKind.readOnlyShellDenial("perl -pi -e 's/a/b/' file") != null)
         assertTrue(SubAgentKind.readOnlyShellDenial("echo hi > out") != null)
     }
+
+    @Test
+    fun dedupeByNameKeepsFirstAndOrder() {
+        val t = AgentToolDefinition("file_read", "r", mapOf("x" to AgentToolParam("string", "x")), listOf("x"))
+        val t2 = AgentToolDefinition("file_read", "r2", mapOf("y" to AgentToolParam("string", "y")), listOf("y"))
+        val w = AgentToolDefinition("file_write", "w", mapOf("x" to AgentToolParam("string", "x")), listOf("x"))
+        val deduped = SubAgentKind.dedupeByName(listOf(t, t2, w, t2))
+        assertEquals(listOf("file_read", "file_write"), deduped.map { it.name })
+        assertTrue(deduped[0] === t) // first definition wins
+    }
+
+    @Test
+    fun filterToolsDedupesEarlyReturnPath() {
+        // worker 无 allow-list 走 base 早退路径，去重必须覆盖这条路径。
+        val t = AgentToolDefinition("grep", "g", mapOf("x" to AgentToolParam("string", "x")), listOf("x"))
+        val t2 = AgentToolDefinition("grep", "g2", mapOf("y" to AgentToolParam("string", "y")), listOf("y"))
+        val f = AgentToolDefinition("file_read", "r", mapOf("x" to AgentToolParam("string", "x")), listOf("x"))
+        val names = SubAgentKind.filterTools(SubAgentKind.WORKER, listOf(t, f, t2)).map { it.name }
+        assertEquals(listOf("grep", "file_read"), names)
+    }
 }

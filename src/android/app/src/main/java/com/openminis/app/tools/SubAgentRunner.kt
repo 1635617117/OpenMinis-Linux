@@ -69,6 +69,9 @@ object SubAgentRunner {
         thinkingLevel: ThinkingLevel = ThinkingLevel.ULTRA,
     ): ToolExecutionResult {
         val briefed = SubAgentBrief.wrap(userPrompt, kind = kind, role = role, writePaths = writePaths)
+        // Defensive: duplicate tool names reach providers as duplicate schemas
+        // and some of them reject the payload outright. Keep first-seen order.
+        val dedupedTools = SubAgentKind.dedupeByName(tools)
         val history = mutableListOf(
             LLMMessage(role = LLMMessage.Role.USER, content = briefed),
         )
@@ -114,7 +117,7 @@ object SubAgentRunner {
                     // blanket cap that clipped long reports on capable models.
                     maxTokens = maxTokens.coerceAtLeast(256),
                     temperature = temperature,
-                    tools = tools,
+                    tools = dedupedTools,
                     thinkingLevel = thinkingLevel,
                 ).collect { chunk ->
                     when (chunk) {

@@ -1462,6 +1462,10 @@ class ChatViewModel(
     internal val _lastTurnContextTokens = MutableStateFlow(0)
     val lastTurnContextTokens: StateFlow<Int> = _lastTurnContextTokens.asStateFlow()
 
+    /** [T-cache-hit-rate] Per-turn cache hit rate from the most recent API call (0..1). */
+    internal val _lastCacheHitRate = MutableStateFlow(0.0)
+    val lastCacheHitRate: StateFlow<Double> = _lastCacheHitRate.asStateFlow()
+
     /**
      * [T-compact-estimate-fallback] Cheap token estimate of the in-memory
      * agent history, used ONLY as a lower-bound floor when the last usage
@@ -1472,7 +1476,7 @@ class ChatViewModel(
      * the classic len/4 estimator is ~4x off for CJK and would let long
      * Chinese sessions sail past the threshold.
      */
-    private fun estimateAgentHistoryTokens(): Int {
+    internal fun estimateAgentHistoryTokens(): Int {
         var total = 0L
         for (msg in agentHistory) {
             total += estimateMixedTokens(msg.content)
@@ -1485,7 +1489,13 @@ class ChatViewModel(
                 }
             }
         }
-        return total.toInt()
+        // [T-token-usage-calibration] 按模型维度用真实 usage 校准原始估算。
+        val modelKey = currentModel?.id ?: ""
+        return if (modelKey.isNotEmpty()) {
+            com.openminis.app.data.TokenUsageCalibration.estimate(modelKey, total.toInt())
+        } else {
+            total.toInt()
+        }
     }
 
     private fun estimateMixedTokens(text: String): Long {

@@ -23,6 +23,12 @@ object FileEditTool {
         propertyOrdering = listOf("tool_title", "path", "old_string", "new_string", "replace_all"),
     )
 
+    /**
+     * [T-text-replacers] Three-level degradation ladder (Exact → line-trimmed
+     * → block-anchor). Failures no longer fall through to a generic "not found"
+     * — ambiguity tells the model to add context or use replace_all; not-found
+     * tells it to file_read the current content.
+     */
     fun execute(argsJson: String, sessionId: String, context: Context): ToolExecutionResult {
         return try {
             val args = JSONObject(argsJson)
@@ -60,79 +66,43 @@ object FileEditTool {
             }
 
             // T-tool-write-race: read, compute AND write under ONE lock.
-            //
-            // The old code read the file, computed the replacement, then called
-            // writeText — all without holding anything. Two concurrent edits
-            // each read v1 and each wrote back their own view of it, so the
-            // first edit was silently discarded and BOTH calls returned
-            // success, because writeText never throws. That is the reported
-            // "reported success but nothing landed".
-            //
             // readModifyWrite takes the read inside the lock, so the compute
             // always sees the bytes this write will replace.
+            //
+            // [T-text-replacers] 三级降级阶梯（Exact → line-trimmed →
+            // block-anchor）。替换失败不再落到笼统的 not-found：ambiguity
+            // 提示加上下文或 replace_all，not-found 提示重新 file_read。
             val outcome = AtomicFileWrite.readModifyWrite(file) { current ->
-                var count = 0
-                var searchFrom = 0
-                while (true) {
-                    val idx = current.indexOf(oldString, searchFrom)
-                    if (idx < 0) break
-                    count++
-                    searchFrom = idx + oldString.length
+                when (val r = TextReplacers.replace(current, oldString, newString, replaceAll)) {
+                    is TextReplacers.Result.Success ->
+                        ReplaceOutcome(r.newContent, r.count)
+                    is TextReplacers.Result.Failure ->
+                        r.message
                 }
-
-                if (count == 0) {
-                    return@readModifyWrite null
-                }
-                if (count > 1 && !replaceAll) return@readModifyWrite null
-
-                val newContent = if (replaceAll) {
-                    current.replace(oldString, newString)
-                } else {
-                    current.replaceFirst(oldString, newString)
-                }
-                newContent to (if (replaceAll) count else 1)
             }
 
             when (outcome) {
-                null -> return ToolExecutionResult(
-                    if (replaceAll) {
-                        "Error: old_string not found in $path"
-                    } else {
-                        // Ambiguous and not-found both landed here; the count was
-                        // already reported distinctly by the old inline check, so
-                        // re-derive it for the message without writing anything.
-                        val found = AtomicFileWrite.read(file)?.let { cur ->
-                            var c = 0; var from = 0
-                            while (true) {
-                                val i = cur.indexOf(oldString, from)
-                                if (i < 0) break
-                                c++; from = i + oldString.length
-                            }
-                            c
-                        } ?: 0
-                        if (found > 1) {
-                            "Error: old_string found $found times in $path. " +
-                                "Use replace_all=true to replace all occurrences, " +
-                                "or provide a more specific old_string that matches exactly once."
-                        } else {
-                            "Error: old_string not found in $path"
-                        }
-                    },
+                null -> ToolExecutionResult(
+                    "Error: failed to write $path (atomic write did not verify on disk)",
                     false, toolTitle = toolTitle,
                 )
-                else -> {
-                    @Suppress("UNCHECKED_CAST")
-                    val pair = outcome as Pair<String, Int>
-                    val newContent = pair.first
-                    val replacements = pair.second
-                    ToolExecutionResult(
-                        "Edited $path ($replacements replacement(s), ${newContent.length} bytes)",
-                        true, toolTitle = toolTitle,
-                    )
-                }
+                is String -> ToolExecutionResult(
+                    "Error: $outcome",
+                    false, toolTitle = toolTitle,
+                )
+                is ReplaceOutcome -> ToolExecutionResult(
+                    "Edited $path (${outcome.replacements} replacement(s), ${outcome.newContent.length} bytes)",
+                    true, toolTitle = toolTitle,
+                )
+                else -> ToolExecutionResult("Error: unexpected outcome", false, toolTitle = toolTitle)
             }
         } catch (e: Exception) {
             ToolExecutionResult("Error editing file: ${e.message}", false)
         }
     }
+
+    internal class ReplaceOutcome(
+        val newContent: String,
+        val replacements: Int,
+    )
 }

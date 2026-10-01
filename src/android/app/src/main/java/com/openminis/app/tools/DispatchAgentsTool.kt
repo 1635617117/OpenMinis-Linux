@@ -50,6 +50,9 @@ object DispatchAgentsTool {
             val a = assignments.optJSONObject(i) ?: continue
             val agentName = a.optString("agent").ifBlank { a.optString("name") }
             val task = a.optString("task").ifBlank { a.optString("prompt") }
+            // A lane with no brief burns a full sub-agent turn budget and then
+            // reports nothing. Drop it instead of spawning an empty agent.
+            if (task.isBlank()) continue
             val type = SubAgentTypeStore.find(context, agentName)
             val kind = type?.kind ?: SubAgentKind.WORKER
             val prompt = buildString {
@@ -75,8 +78,8 @@ object DispatchAgentsTool {
     }
 
     fun filterToolsForType(type: SubAgentType?, tools: List<AgentToolDefinition>): List<AgentToolDefinition> {
-        if (type == null || type.toolNames.isEmpty()) return tools
+        if (type == null || type.toolNames.isEmpty()) return SubAgentKind.dedupeByName(tools)
         val allow = type.toolNames.toSet()
-        return tools.filter { it.name in allow }
+        return SubAgentKind.dedupeByName(tools.filter { it.name in allow })
     }
 }

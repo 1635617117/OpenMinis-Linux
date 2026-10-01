@@ -537,6 +537,7 @@
     <string name="token_usage_section_cache">Cache (Session Total)</string>
     <string name="token_usage_cache_read">Cache Read</string>
     <string name="token_usage_cache_write">Cache Write</string>
+    <string name="token_usage_cache_hit_rate">Per-Turn Hit Rate</string>
     <string name="token_usage_section_agent_loop">Agent Loop</string>
     <string name="token_usage_total_loops">Total Loops</string>
     <string name="common_on">On</string>
