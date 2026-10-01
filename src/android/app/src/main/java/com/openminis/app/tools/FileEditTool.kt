@@ -72,12 +72,21 @@ object FileEditTool {
             // [T-text-replacers] 三级降级阶梯（Exact → line-trimmed →
             // block-anchor）。替换失败不再落到笼统的 not-found：ambiguity
             // 提示加上下文或 replace_all，not-found 提示重新 file_read。
+            // [T-file-edit-silent-drop] 两个暗坑的修复：
+            //  1. Success 返回的 ReplaceOutcome 之前落到 readModifyWrite 的
+            //     else 分支——原样返回、不落盘，工具却报 "Edited N
+            //     replacements" 成功。现在 ReplaceOutcome 实现
+            //     HasPersistableText，readModifyWrite 会真正写入。
+            //  2. Failure 返回的 String 错误消息之前会被 readModifyWrite
+            //     当成"新文件内容"写进磁盘——一次失败的替换会摧毁整个文件。
+            //     现在 Failure 用 EditFailure 标记（persistableText=null），
+            //     只报错、不动文件。
             val outcome = AtomicFileWrite.readModifyWrite(file) { current ->
                 when (val r = TextReplacers.replace(current, oldString, newString, replaceAll)) {
                     is TextReplacers.Result.Success ->
                         ReplaceOutcome(r.newContent, r.count)
                     is TextReplacers.Result.Failure ->
-                        r.message
+                        EditFailure(r.message)
                 }
             }
 
@@ -86,8 +95,8 @@ object FileEditTool {
                     "Error: failed to write $path (atomic write did not verify on disk)",
                     false, toolTitle = toolTitle,
                 )
-                is String -> ToolExecutionResult(
-                    "Error: $outcome",
+                is EditFailure -> ToolExecutionResult(
+                    "Error: ${outcome.message}",
                     false, toolTitle = toolTitle,
                 )
                 is ReplaceOutcome -> ToolExecutionResult(
@@ -101,8 +110,28 @@ object FileEditTool {
         }
     }
 
+    /**
+     * Successful replacement payload. Implements [HasPersistableText]
+     * so readModifyWrite actually writes [newContent] to disk — previously this
+     * fell through to the no-write branch and file_edit reported success
+     * without changing the file.
+     */
     internal class ReplaceOutcome(
         val newContent: String,
         val replacements: Int,
-    )
+    ) : HasPersistableText {
+        override fun persistableText(): String? = newContent
+    }
+
+    /**
+     * Failure marker — carries only an error message. [HasPersistableText]
+     * returns null so readModifyWrite does NOT touch the file. Previously the
+     * failure path returned a bare String which readModifyWrite interpreted as
+     * new content and wrote over the user's file.
+     */
+    internal class EditFailure(
+        val message: String,
+    ) : HasPersistableText {
+        override fun persistableText(): String? = null
+    }
 }

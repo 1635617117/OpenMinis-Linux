@@ -48,6 +48,25 @@ import java.util.concurrent.locks.ReentrantLock
  * is verified but not made atomic — that is a property of append, not an
  * omission.
  */
+/**
+ * [T-file-edit-silent-drop] Result payloads that carry the text to persist.
+ *
+ * `readModifyWrite` historically understood only two shapes — a plain
+ * String (full new content) and a Pair (String first + metadata second).
+ * `FileEditTool`'s transform returned a `ReplaceOutcome` (a data class
+ * wrapping `newContent`), which matched NEITHER branch, fell into the
+ * `else` arm, and was returned verbatim WITHOUT any write. FileEditTool
+ * then saw a non-null outcome and reported success — "Edited N
+ * replacements" — while the file on disk never changed. That is the
+ * exact reported failure: tools claim success, nothing landed.
+ *
+ * Any transform payload that wants to persist implements this interface.
+ */
+interface HasPersistableText {
+    /** The exact text to write to the file, or null for "nothing to persist". */
+    fun persistableText(): String?
+}
+
 object AtomicFileWrite {
 
     private const val TAG = "AtomicFileWrite"
@@ -214,6 +233,15 @@ object AtomicFileWrite {
                     if (text == null) {
                         AppLogger.error(TAG, "readModifyWrite: pair without a String payload")
                         null
+                    } else {
+                        writeLocked(file, text, append = false)?.let { result }
+                    }
+                }
+                is HasPersistableText -> {
+                    val text = result.persistableText()
+                    if (text == null) {
+                        AppLogger.info(TAG, "readModifyWrite: payload declined persist, nothing written")
+                        result
                     } else {
                         writeLocked(file, text, append = false)?.let { result }
                     }

@@ -129,6 +129,38 @@ class AtomicFileWriteTest {
     }
 
     @Test
+    fun readModifyWritePersistsPayloadImplementingHasPersistableText() {
+        // The reported bug: FileEditTool's ReplaceOutcome fell through the
+        // no-write branch — readModifyWrite returned it verbatim, the tool
+        // reported "Edited N replacements", and the file never changed.
+        val f = File(tmp.root, "payload.txt")
+        AtomicFileWrite.write(f, "base")
+        val out = AtomicFileWrite.readModifyWrite(f) { cur ->
+            object : HasPersistableText {
+                override fun persistableText(): String? = cur + " edited"
+            }
+        }
+        assertNotNull(out)
+        assertEquals("base edited", f.readText())
+    }
+
+    @Test
+    fun readModifyWriteDoesNotTouchFileWhenPayloadDeclinesPersist() {
+        // A failure payload (persistableText = null) must NOT write anything —
+        // previously FileEditTool's failure path returned a bare String that
+        // readModifyWrite interpreted as new content and wrote over the file.
+        val f = File(tmp.root, "decline.txt")
+        AtomicFileWrite.write(f, "orig")
+        val out = AtomicFileWrite.readModifyWrite(f) { cur ->
+            object : HasPersistableText {
+                override fun persistableText(): String? = null
+            }
+        }
+        assertNotNull("declined payload still returns itself", out)
+        assertEquals("orig", f.readText())
+    }
+
+    @Test
     fun readReturnsCurrentBytesUnderLock() {
         val f = File(tmp.root, "r.txt")
         AtomicFileWrite.write(f, "v1")
