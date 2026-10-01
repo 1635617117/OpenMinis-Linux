@@ -161,6 +161,7 @@ class UpButtonTurnWalkTest {
         viewport: IntRange,
         targetKey: String,
         strideFromHighestOnly: Boolean,
+        maxProbes: Int = Int.MAX_VALUE,
     ): Int? {
         rows.indexOf(targetKey).let { if (it in viewport) return it }
         if (strideFromHighestOnly) {
@@ -169,7 +170,7 @@ class UpButtonTurnWalkTest {
             var hi = viewport.last
             val stride = viewport.count().coerceAtLeast(1)
             var guard = 0
-            while (guard++ < 60) {
+            while (guard++ < maxProbes) {
                 val next = (hi + stride).coerceAtMost(rows.lastIndex)
                 if (next <= hi) return null
                 // After scrolling to `next`, roughly that row and the following
@@ -181,8 +182,19 @@ class UpButtonTurnWalkTest {
             }
             return null
         }
-        // The NEW algorithm: sweep from row 0 forward.
-        return rows.indexOf(targetKey).takeIf { it >= 0 }
+        // The NEW algorithm: sweep from row 0 forward. Model one layout-sized
+        // window per probe so the fixed 200-probe regression is meaningful.
+        val target = rows.indexOf(targetKey)
+        if (target < 0) return null
+        val stride = viewport.count().coerceAtLeast(1)
+        var probe = 0
+        var guard = 0
+        while (probe <= rows.lastIndex && guard++ < maxProbes) {
+            val windowEnd = (probe + stride - 1).coerceAtMost(rows.lastIndex)
+            if (target in probe..windowEnd) return target
+            probe = windowEnd + 1
+        }
+        return null
     }
 
     @Test
@@ -211,6 +223,19 @@ class UpButtonTurnWalkTest {
         val rows = List(47) { "row$it" }.toMutableList().also { it[46] = "user:u1" }
         assertEquals(
             46,
+            seekRowIndex(rows, 0..8, "user:u1", strideFromHighestOnly = false),
+        )
+    }
+
+    @Test
+    fun `the exhaustive seek does not stop at the old 200 probe boundary`() {
+        val rows = List(2001) { "row$it" }.toMutableList().also { it[2000] = "user:u1" }
+        assertNull(
+            "the old fixed 200-probe guard would miss this target",
+            seekRowIndex(rows, 0..8, "user:u1", strideFromHighestOnly = false, maxProbes = 200),
+        )
+        assertEquals(
+            2000,
             seekRowIndex(rows, 0..8, "user:u1", strideFromHighestOnly = false),
         )
     }

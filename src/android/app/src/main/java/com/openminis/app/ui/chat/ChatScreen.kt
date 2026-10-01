@@ -520,6 +520,7 @@ fun ChatScreen(
     val hasNewerMessages by viewModel.hasNewerMessages.collectAsState()
     val isLoadingHistory by viewModel.isLoadingHistory.collectAsState()
     val isStreaming by viewModel.isStreaming.collectAsState()
+    val sessionLoaded by viewModel.sessionLoaded.collectAsState()
     val canResume by viewModel.canResume.collectAsState()
     // [T-android-compact-progress] null when no compaction is running.
     val compactProgress by viewModel.compactProgress.collectAsState()
@@ -1330,6 +1331,29 @@ fun ChatScreen(
     // `userScrolledAway` which only toggles on real user drags.
     var userScrolledAway by remember { mutableStateOf(false) }
     var pinRealLatest by remember(sessionId) { mutableStateOf(false) }
+    var entryPinRequested by remember(sessionId) { mutableStateOf(false) }
+
+    // A session-scoped ViewModel can keep streaming while its screen is
+    // disposed. On re-entry the retained LazyListState may point into history;
+    // the normal stream follower intentionally respects that browsing state.
+    // A running session is different: opening it is an explicit request to
+    // follow the live output. Wait for the initial DB tail, drain any committed
+    // tail rows, then pin after the flattened rows have been published.
+    LaunchedEffect(sessionId, sessionLoaded, isStreaming, hasNewerMessages) {
+        if (!sessionLoaded || !isStreaming || entryPinRequested) return@LaunchedEffect
+        entryPinRequested = true
+        userScrolledAway = false
+        viewModel.ensureSessionTailLoaded()
+        // The initial tail load and any queued tail attach are asynchronous.
+        // Waiting for the newest-edge flag here is what keeps long sessions
+        // from landing on a mid-history restored viewport before this pin.
+        viewModel.hasNewerMessages.first { !it }
+        withFrameNanos { }
+        tracedScrollToItem("SESSION-REENTRY/live-tail", 0, 0)
+        kotlinx.coroutines.delay(100)
+        tracedScrollToItem("SESSION-REENTRY/live-tail-settle", 0, 0)
+    }
+
     LaunchedEffect(hasNewerMessages, pinRealLatest) {
         if (!pinRealLatest || hasNewerMessages) return@LaunchedEffect
         pinRealLatest = false
@@ -1346,7 +1370,6 @@ fun ChatScreen(
     // change, or session switch — so the next tap re-anchors to whatever the
     // user is currently looking at rather than continuing a stale sequence.
     var lastJumpedUserId by remember(sessionId) { mutableStateOf<String?>(null) }
-
     // [T-android-scrollbtn-turn-walk] Content changed (new/removed messages) —
     // the turn-walk anchor may no longer line up, so restart it on the next tap.
     // iOS does this in its snapshot-apply path; on Android the equivalent
@@ -1526,7 +1549,6 @@ fun ChatScreen(
         val restoreIndex = listState.firstVisibleItemIndex
         val restoreOffset = listState.firstVisibleItemScrollOffset
         var targetIndex = indexOfTargetKey()
-        var guard = 0
         // Scan every row until the target's key shows up.
         //
         // The previous seek walked only toward HIGHER indices in viewport-sized
@@ -1547,13 +1569,23 @@ fun ChatScreen(
         if (targetIndex == null) {
             val maxIdx = (info.totalItemsCount - 1).coerceAtLeast(0)
             var probe = 0
-            while (targetIndex == null && probe <= maxIdx && guard++ < 200) {
+            var previousProbe = -1
+            // Do not cap this at a fixed number of probes. A long assistant
+            // turn can flatten into hundreds or thousands of LazyColumn rows;
+            // the old `guard++ < 200` made the button fail at a repeatable
+            // distance, then FAB-UP/restore sent the viewport back to the
+            // apparent failure point even though manual dragging still worked.
+            // Bound the walk by the actual list size and require progress so a
+            // broken layout cannot spin forever.
+            while (targetIndex == null && probe <= maxIdx && probe > previousProbe) {
+                previousProbe = probe
                 tracedScrollToItem("FAB-UP/seek", probe, 0)
                 targetIndex = indexOfTargetKey()
                 // Advance past whatever is now on screen rather than one row at
                 // a time, but never skip ahead of the rows we have inspected.
                 val hi = listState.layoutInfo.visibleItemsInfo.maxByOrNull { it.index }?.index
-                probe = (hi ?: probe) + 1
+                val nextProbe = (hi ?: probe) + 1
+                probe = if (nextProbe > probe) nextProbe else probe + 1
             }
         }
         if (targetIndex == null) {
@@ -2201,52 +2233,45 @@ fun ChatScreen(
             }
     }
 
-    // Auto-focus input on new sessions so keyboard pops up immediately.
-    //
-    // T176: theme switch (Activity recreate) re-enters this LE before the
-    // composer's `Modifier.focusRequester(inputFocusRequester)` has been
-    // attached for the new composition. requestFocus() then throws
-    // `FocusRequester is not initialized` and the process crashes. Guard
-    // with try/catch — we lose nothing if the focus call is a no-op on
-    // the recreated activity (the user wasn't typing anyway), and the
-    // common new-session path still works because the 300 ms delay lets
-    // the Modifier attach.
-    // [T-android-draft-placeholder-row] Keyed on sessionId, not Unit. In the
-    // two-pane layout the detail pane is NOT recreated when the user starts
-    // another new chat — only the pane's content key changes — so a
-    // `LaunchedEffect(Unit)` would fire for the first draft of the screen's
-    // life and never again, leaving every subsequent New Chat unfocused.
+    // Reply-end focus preference must be declared before the streaming→idle
+    // effect reads it. Kept near the focus effects rather than the bulk
+    // appearance block below, otherwise Kotlin resolves the later local too
+    // late for this effect.
+    val appearancePrefsForFocus = remember { com.openminis.app.ui.settings.getAppearancePrefs(context) }
+    var autoFocusAfterReply by remember {
+        mutableStateOf(
+            appearancePrefsForFocus.getBoolean(
+                com.openminis.app.ui.settings.KEY_AUTO_FOCUS_AFTER_REPLY,
+                true,
+            ),
+        )
+    }
+
+    // Entering or switching a conversation is navigation, not an input action.
+    // Do not request composer focus here: doing so opens the IME on every new
+    // draft/session visit. The user explicitly focuses the composer when ready.
     LaunchedEffect(sessionId) {
-        if (sessionId.startsWith("__new__")) {
-            // Small delay to let the layout settle before requesting focus
-            kotlinx.coroutines.delay(300)
-            try {
-                inputFocusRequester.requestFocus()
-            } catch (e: IllegalStateException) {
-                AppLogger.debug(
-                    tagScroll,
-                    "auto-focus skipped: FocusRequester not attached (likely activity recreate / theme switch): ${e.message}",
-                )
-            }
-        } else {
-            focusManager.clearFocus(force = true)
-            keyboardController?.hide()
-        }
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
     }
     var sawStreamingThisVisit by remember(sessionId) { mutableStateOf(false) }
-    // [T-android-post-reply-no-autofocus] REVERTED auto-refocus: popping the
-    // keyboard back up after every reply annoyed users ("流结束后键盘自弹")
-    // and, worse, mid-stream the composer's focus was being yanked around
-    // while the user was typing the next message ("input text 进不了输入
-    // 框"). The composer stays enabled and focusable throughout streaming —
-    // the user focuses it when they want to type; we never steal or force
-    // focus on the streaming→idle edge.
+    // Reply-end focus is opt-in (Appearance → Auto-Focus After Reply). The
+    // setting must be real: when enabled, refocus only on a streaming→idle
+    // edge observed by this screen; entering an already-running session never
+    // opens the IME by itself.
     LaunchedEffect(isStreaming, sessionId) {
         if (isStreaming) {
             sawStreamingThisVisit = true
+            return@LaunchedEffect
         }
-        // No refocus on stream end: the keyboard stays wherever the user
-        // left it. sawStreamingThisVisit is kept for any future consumer.
+        if (!sawStreamingThisVisit) return@LaunchedEffect
+        sawStreamingThisVisit = false
+        if (!autoFocusAfterReply) return@LaunchedEffect
+        // Let the final markdown reflow settle before taking focus so the IME
+        // doesn't fight the stream-end layout pass.
+        kotlinx.coroutines.delay(250)
+        runCatching { inputFocusRequester.requestFocus() }
+        keyboardController?.show()
     }
 
     // Show top-level error in snackbar (only for errors without an assistant message)
@@ -2320,6 +2345,7 @@ fun ChatScreen(
             showCompletedToolCards = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)
             foldAiProcess = sp.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)
             showSubAgentBar = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)
+            autoFocusAfterReply = sp.getBoolean(com.openminis.app.ui.settings.KEY_AUTO_FOCUS_AFTER_REPLY, true)
             showChatTitlePill = sp.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)
         }
         fun onMain(block: () -> Unit) {
@@ -2336,6 +2362,7 @@ fun ChatScreen(
                     com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS -> showCompletedToolCards = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS -> foldAiProcess = sp.getBoolean(key, false)
                     com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR -> showSubAgentBar = sp.getBoolean(key, true)
+                    com.openminis.app.ui.settings.KEY_AUTO_FOCUS_AFTER_REPLY -> autoFocusAfterReply = sp.getBoolean(key, true)
                     com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE -> showChatTitlePill = sp.getBoolean(key, true)
                     null -> applyAppearancePrefs(sp)
                 }

@@ -89,10 +89,8 @@ const val KEY_TOOL_PREVIEW = "tool_preview"        // Boolean, default true
 const val KEY_SHOW_FLOATING_TOOL_BAR = "chat.showFloatingToolBar"  // Boolean, default true
 const val KEY_SHOW_COMPLETED_TOOL_CARDS = "chat.showCompletedToolCards"  // Boolean, default false
 const val KEY_SHOW_SUBAGENT_BAR = "chat.showSubAgentBar"  // Boolean, default true
-// [T-keyboard-auto-pop default flip] Default ON — most users want the
-// composer ready for a follow-up immediately after the model finishes.
-// Key name mirrors iOS `@AppStorage("chat.autoFocusAfterReply")` so a
-// future cross-platform sync reads the same pref.
+// Whether the composer should request focus when a reply finishes. Default
+// ON (iOS parity); entering or switching sessions never requests focus.
 const val KEY_AUTO_FOCUS_AFTER_REPLY = "chat.autoFocusAfterReply"  // Boolean, default true
 // T-chat-title-pill: shows a sticky session-title pill above the chat list
 // while the user scrolls back through history. Cross-platform key name
@@ -530,9 +528,9 @@ fun AppearanceScreen(
             )
         }
 
-        // [T-keyboard-auto-pop default flip] -- Auto-Focus After Reply --
-        // Default ON — most users want the composer ready for a follow-up
-        // immediately after the model finishes.
+        // -- Auto-Focus After Reply --
+        // Applies only on the streaming→idle edge inside the chat; session
+        // entry itself always leaves the keyboard hidden.
         SettingsSection(
             header = stringResource(R.string.appearance_section_auto_focus_after_reply),
             footer = stringResource(R.string.appearance_auto_focus_after_reply_footer),

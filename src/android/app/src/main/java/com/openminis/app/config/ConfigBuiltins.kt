@@ -402,18 +402,14 @@ internal object ConfigBuiltins {
                 defaultValue = false,
             )
         )
-        // [T-keyboard-auto-pop default flip] On by default — iOS gates
-        // the existing post-stream auto-focus behind this. Android
-        // currently does not auto-focus on stream end (it only
-        // auto-focuses on brand-new sessions starting with "__new__"),
-        // so on this platform the setting is registered for parity.
-        // When a future Android change adds stream-end auto-focus, it
-        // should read this same pref key.
+        // Reply-end focus is opt-in: the chat screen honors this on the
+        // streaming→idle edge only. Session entry itself always hides the
+        // IME, so opening a conversation never pops the keyboard.
         r.register(
             PrefsBoolField(
                 path = "chat.autoFocusAfterReply",
                 displayName = "Auto-focus input after reply",
-                description = "When ON, the keyboard pops up automatically after the model finishes a reply so the input is ready for a follow-up. Turn OFF if you prefer to read the response without an unexpected keyboard.",
+                description = "When ON, the keyboard pops up after the model finishes replying so the input is ready for a follow-up. Entering a conversation never pops the keyboard.",
                 prefs = appearancePrefs,
                 key = com.openminis.app.ui.settings.KEY_AUTO_FOCUS_AFTER_REPLY,
                 defaultValue = true,
