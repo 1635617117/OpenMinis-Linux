@@ -3555,7 +3555,7 @@ class ChatViewModel(
         val entry = providerRepository.config.value.modelEntries.find { it.id == entryId } ?: return false
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return false
         if (!providerRepository.hasAnyCredential(instance)) return false
-        val apiKey = providerRepository.usableApiKey(instance) ?: ""
+        val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
         currentModel = entry.model
         _modelName.value = entry.model.displayName
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
@@ -3691,7 +3691,7 @@ class ChatViewModel(
         // an OAuth instance too — otherwise this tier set the model name in the
         // UI but left currentProvider null, and the first send failed.
         if (providerRepository.hasAnyCredential(instance)) {
-            val apiKey = providerRepository.usableApiKey(instance) ?: ""
+            val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
             currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
         }
         return true
@@ -3706,7 +3706,7 @@ class ChatViewModel(
         // tapped this model; refusing it because the API-key slot is empty
         // made OAuth models unselectable from the picker.
         if (!providerRepository.hasAnyCredential(instance)) return
-        val apiKey = providerRepository.usableApiKey(instance) ?: ""
+        val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
 
         currentModel = entry.model
         _modelName.value = entry.model.displayName

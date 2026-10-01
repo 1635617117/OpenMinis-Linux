@@ -93,12 +93,15 @@ object ProviderKeyGate {
 
     private val breakers = ConcurrentHashMap<String, BreakerState>()
 
-    fun recordFailure(bucketKey: String) {
-        if (bucketKey.isBlank()) return
+    /** Returns true exactly when this failure tripped the breaker (3rd strike). */
+    fun recordFailure(bucketKey: String): Boolean {
+        if (bucketKey.isBlank()) return false
         val st = breakers.getOrPut(bucketKey) { BreakerState(java.util.concurrent.atomic.AtomicInteger(0), 0L) }
         if (st.failures.incrementAndGet() >= FAILURE_THRESHOLD) {
             st.openUntilMs = System.currentTimeMillis() + COOLDOWN_MS
+            return st.failures.get() == FAILURE_THRESHOLD
         }
+        return false
     }
 
     fun recordSuccess(bucketKey: String) {

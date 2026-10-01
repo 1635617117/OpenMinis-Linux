@@ -2335,10 +2335,9 @@ class ProviderRepository(private val context: Context) {
      * call sites keep their skip semantics for everything else (notably OAuth
      * instances without a token, which must stay unauthenticated).
      */
-    fun usableApiKey(instance: ProviderInstance): String? =
-        // [T-key-rotation] 供应商页配置的备用 Key 池（逗号分隔）优先轮换，
-        // 其次环境变量 OPENMINIS_KEYS_<id>，最后单 key。
-        com.openminis.app.provider.ProviderKeyRotation.next(instance.id, loadKeyPool(instance.id))
+    fun usableApiKey(instance: ProviderInstance, modelId: String = ""): String? =
+        // [T-key-rotation] 粘性轮换：池里按模型钉住当前 key，坏 key 熔断才轮换。
+        com.openminis.app.provider.ProviderKeyRotation.current(instance.id, loadKeyPool(instance.id), modelId)
             ?: loadApiKey(instance.id)
             ?: if (instance.allowsEmptyAPIKey) "" else null
 

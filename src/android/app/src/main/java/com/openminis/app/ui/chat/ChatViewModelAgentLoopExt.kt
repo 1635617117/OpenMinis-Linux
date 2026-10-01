@@ -960,7 +960,11 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // 直接交给 fallback 成员，别用 1/2/4/8/16s 退避反复锤一把死 key。
                 val breakerTripped = com.openminis.app.provider.ProviderKeyGate.isTripped(breakerBucket)
                 if (isTransient) {
-                    com.openminis.app.provider.ProviderKeyGate.recordFailure(breakerBucket)
+                    // [T-key-rotation] 熔断刚跳闸 → 同模型粘性轮换推进到下一个备用 key。
+                    val justTripped = com.openminis.app.provider.ProviderKeyGate.recordFailure(breakerBucket)
+                    if (justTripped) {
+                        com.openminis.app.provider.ProviderKeyRotation.advance(currentProvider.model.displayName)
+                    }
                 }
                 val maxRetries = effectiveMaxRetries()
                 // 429 with another group member: switch endpoints instead of
