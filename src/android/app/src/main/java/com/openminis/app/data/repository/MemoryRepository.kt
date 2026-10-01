@@ -113,6 +113,10 @@ class MemoryRepository(private val memoryDir: File) {
         // back into the next LLM call. Counted as UTF-8 bytes (matches
         // what the provider sees over the wire).
         private const val MAX_OUTPUT_BYTES = 30 * 1024  // 30 KB
+
+        // [T-memory-poison-guard] 写入侧毒窗断路器——单条记忆上限 + 当日写入条数上限
+        private const val MAX_ENTRY_CHARS = 8 * 1024       // 8 KB
+        private const val MAX_DAILY_ENTRIES = 30
     }
 
     init {
@@ -132,6 +136,12 @@ class MemoryRepository(private val memoryDir: File) {
     fun writeMemory(content: String, expectedRevision: String? = null): String {
         if (content.isBlank()) return "Error: Missing required 'content' parameter"
 
+        // [T-memory-poison-guard] 写入侧毒窗防护（镜像 Kelivo poison-window
+        // breaker 精神）：单条超限 + 单日条目超限。失控的 agent loop 反复写
+        // memory_write 时，坏窗口不允许永久毒化当日日志。
+        if (content.length > MAX_ENTRY_CHARS) {
+            return "Error: 记忆条目过长（${content.length} 字符，上限 $MAX_ENTRY_CHARS）。请精简为要点再写。"
+        }
         val fileName = "${IsoTime.formatLocalDate()}.md"
         val file = File(memoryDir, fileName)
 
@@ -144,6 +154,10 @@ class MemoryRepository(private val memoryDir: File) {
             if (!actual.startsWith(expectedRevision)) {
                 return "Error: MEMORY_CONFLICT — 日志文件已被并发更新（期望 revision $expectedRevision，实际 ${actual.take(16)}…）。请先 memory_get 重新读取后再写。"
             }
+        }
+        val entryCount = Regex("""<!-- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} -->""").findAll(existing).count()
+        if (entryCount >= MAX_DAILY_ENTRIES) {
+            return "Error: 今日记忆已达上限（$MAX_DAILY_ENTRIES 条）。旧的按日归档，明日自动开始新日志；请精简而不是继续追加。"
         }
         val newContent = entry + existing
 
