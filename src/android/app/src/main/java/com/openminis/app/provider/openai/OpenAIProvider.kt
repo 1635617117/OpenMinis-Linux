@@ -26,6 +26,8 @@ import com.openminis.app.provider.safeOptString
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.channels.awaitClose
@@ -1133,6 +1135,13 @@ class OpenAIProvider private constructor(
                 return LLMResponse("", "end_turn", null, listOf(videoAtt(bytes)))
             }
             val text = bytes.decodeToString()
+            if (text.isBlank()) {
+                // 空响应：socket 被 STALL 后取消时 read 会提前返回空 bytes。
+                // 协程已取消就按取消传播（CancellationException），别伪装成
+                // ProviderError —— 否则 cancelAndJoin 的调用方收到错误而非取消。
+                kotlin.coroutines.coroutineContext.ensureActive()
+                throw LLMError.ProviderError("Video create: empty response")
+            }
             val json = try {
                 org.json.JSONObject(text)
             } catch (_: Exception) {

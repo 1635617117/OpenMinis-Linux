@@ -26,16 +26,55 @@ object ToolOutputPolicy {
     var workspaceRoot: String = "/var/minis/workspace"
 
     fun redactEnvVars(text: String): String {
-        var out = text
         val env = runCatching { System.getenv() }.getOrDefault(emptyMap())
-        for (value in env.values) {
-            if (value.length < 6) continue
-            if (!value.any { it.isLetter() } || !value.any { it.isDigit() }) continue
-            if (out.contains(value)) {
-                out = out.replace(value, REDACTED)
+        val sensitive = env.values.filter { v ->
+            v.length >= 6 && v.any { it.isLetter() } && v.any { it.isDigit() }
+        }
+        return redactWith(text, sensitive)
+    }
+
+    /** Testable core: apply redaction against an explicit sensitive list. */
+    internal fun redactWith(text: String, sensitive: List<String>): String {
+        if (sensitive.isEmpty() || text.isBlank()) return text
+        // Kelivo 式结构化脱敏：JSON 里字符串值经转义后纯文本 replace 会漏
+        // （引号逃逸），先解析再递归替换每个字符串值，命中面完整得多。
+        runCatching {
+            val node = org.json.JSONTokener(text).nextValue()
+            if (node is org.json.JSONObject || node is org.json.JSONArray) {
+                return redactNode(node, sensitive).toString()
             }
         }
+        // 非 JSON 输出：退回纯文本替换。
+        var out = text
+        for (v in sensitive) {
+            if (out.contains(v)) out = out.replace(v, REDACTED)
+        }
         return out
+    }
+
+    private fun redactNode(node: Any?, sensitive: List<String>): Any? = when (node) {
+        is org.json.JSONObject -> {
+            val out = org.json.JSONObject()
+            node.keys().forEach { k ->
+                runCatching { out.put(k, redactNode(node.get(k), sensitive)) }
+            }
+            out
+        }
+        is org.json.JSONArray -> {
+            val out = org.json.JSONArray()
+            for (i in 0 until node.length()) {
+                runCatching { out.put(redactNode(node.get(i), sensitive)) }
+            }
+            out
+        }
+        is String -> {
+            var s: String = node
+            for (v in sensitive) {
+                if (s.contains(v)) s = s.replace(v, REDACTED)
+            }
+            s
+        }
+        else -> node
     }
 
     /**

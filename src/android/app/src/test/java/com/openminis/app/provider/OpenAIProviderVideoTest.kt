@@ -161,7 +161,9 @@ class OpenAIProviderVideoTest {
         server.dispatcher = object : Dispatcher() {
             override fun dispatch(request: RecordedRequest): MockResponse {
                 arrived.countDown()
-                return MockResponse().setSocketPolicy(SocketPolicy.STALL_SOCKET_AT_START)
+                // NO_RESPONSE 让客户端 read 永远挂起（STALL_SOCKET_AT_START
+                // 在高负载下可能提前 EOF 造成 flaky），cancel 必在读取完成前生效。
+                return MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
             }
         }
         val job = launch(Dispatchers.IO) { provider.generateVideo("slow clip") }

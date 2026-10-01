@@ -553,6 +553,19 @@ fun ChatScreen(
     val providerName by viewModel.providerName.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
 
+    // [T-generation-run] 崩溃恢复提示：上次进程死亡时本会话有中断的生成。
+    LaunchedEffect(sessionId) {
+        val broken = com.openminis.app.agent.GenerationRunStore.recentlyAbandonedFor(sessionId)
+        if (broken.isNotEmpty()) {
+            val r = broken.last()
+            val whenStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
+                .format(java.util.Date(r.startedAtMs))
+            snackbarHostState.showSnackbar(
+                "上次有中断的生成（模型 ${r.modelId}，开始于 $whenStr）——中断前的内容已保留在对话中",
+            )
+        }
+    }
+
     // [T-android-voice-panel] Shared 3-stage RECORD_AUDIO permission flow
     // (system dialog → post-DENY poll → in-app settings gate). Extracted from
     // the mic button's triggerVoiceInput so the inline voice panel can request

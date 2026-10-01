@@ -61,6 +61,21 @@ object GenerationRunStore {
         write(run.copy(status = Status.ABANDONED, finishedAtMs = System.currentTimeMillis()))
     }
 
+    /**
+     * Runs for one session that were marked abandoned by the most recent
+     * launch scan — i.e. the previous process died mid-generation on this
+     * session. The UI offers a recovery hint from this list.
+     */
+    fun recentlyAbandonedFor(sessionId: String, windowMs: Long = 10 * 60_000): List<Run> {
+        val dir = File(DIR)
+        if (!dir.exists()) return emptyList()
+        val cutoff = System.currentTimeMillis() - windowMs
+        return dir.listFiles()?.mapNotNull { read(it) }
+            ?.filter { it.sessionId == sessionId && it.status == Status.ABANDONED && (it.finishedAtMs ?: 0L) >= cutoff }
+            ?.sortedBy { it.startedAtMs }
+            ?: emptyList()
+    }
+
     private fun write(run: Run) {
         runCatching {
             val dir = File(DIR)
