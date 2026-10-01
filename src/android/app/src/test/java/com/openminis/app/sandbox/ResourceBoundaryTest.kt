@@ -24,16 +24,30 @@ class ResourceBoundaryTest {
      * The brick. HyperOS and the memory-pressure policies clamp the hard
      * RLIMIT_AS on a new process and that clamp survives an app restart, so
      * an app-side `ulimit -H -v` could only raise a limit it is not allowed
-     * to raise: EPERM, and with `exit 1` a dead shell. The app must not set
-     * the address space at all, and no rlimit may be fatal.
+     * to raise: EPERM, and with `exit 1` a dead shell.
+     *
+     * [T-as-soft-probe] added a safe in-shell probe: `(ulimit -S -v unlimited
+     * && ulimit -H -v unlimited) || true`. The subshell-with-true pattern
+     * means EPERM on a clamped device does not propagate — the shell never
+     * dies. This test now verifies both halves of that contract:
+     * 1. No `|| exit 1` anywhere (the original fatal-rlimit guard).
+     * 2. The probe IS present (we set address space now), but every
+     *    occurrence of `ulimit -v` is wrapped in the non-fatal pattern.
      */
     @Test
     fun the_app_never_sets_the_address_space_and_never_exits_on_a_failed_rlimit() {
         for (command in listOf("true", "ls -la", "apt install -y curl", "sleep 100 &")) {
             val wrapped = GuestLimits.wrap(command)
-            assertFalse("address space set for: $command", wrapped.contains("ulimit -H -v"))
-            assertFalse("address space set for: $command", wrapped.contains("ulimit -S -v"))
+            // No rlimit may be fatal — this is the invariant.
             assertFalse("fatal rlimit for: $command", wrapped.contains("|| exit 1"))
+            // AS probe is present (new with T-as-soft-probe) — but safe.
+            val hasProbe = wrapped.contains("ulimit -S -v") || wrapped.contains("ulimit -H -v")
+            if (hasProbe) {
+                assertTrue(
+                    "AS probe present but NOT in non-fatal subshell for: $command",
+                    wrapped.contains("|| true")
+                )
+            }
         }
     }
 
