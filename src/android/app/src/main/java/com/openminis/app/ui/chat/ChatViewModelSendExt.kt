@@ -224,7 +224,15 @@ internal fun ChatViewModel.sendMessage(
                 attachmentUris = prepared.nonImageUris + (pasted?.uiUris ?: emptyList()),
                 sourceDbIds = listOf(persistedUser.id),
             )
-            _messages.value = trimLoadedWindow(_messages.value + userMsg)
+            // [T-instant-thinking-reorder] 同步段先插了 assistant 占位
+            // 气泡（instantAssistantId），异步段要插入 user 消息时必须往
+            // 占位前面插 —— 否则用户消息会排在 AI 回复下面，顺序反了。
+            val curBefore = _messages.value
+            val placeholderIdx = curBefore.indexOfLast { it.id == instantAssistantId }
+            _messages.value = trimLoadedWindow(
+                if (placeholderIdx >= 0) curBefore.take(placeholderIdx) + userMsg + curBefore.drop(placeholderIdx)
+                else curBefore + userMsg
+            )
             notePersistedUiRow(persistedUser.id, persistedUser.id)
         }
         val imageParts = prepared.imageParts
