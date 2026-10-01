@@ -554,6 +554,12 @@ class ProviderRepository(private val context: Context) {
 
         saveConfig(config)
         deleteApiKey(instanceId)
+        // [T-key-pool-delete-on-remove] 主 key 被删后备用 key 池也必须
+        // 一起清掉。池按 instanceId 存储，编辑/重加供应商若复用同一 id，
+        // 旧池会继续存在并优先于新主 key 被使用 —— 表现为“删了供应商
+        // 重加还是 Invalid API key”。池的入口只有删除与显式清空两个，
+        // removeInstance 是删除的必经之路。
+        deleteKeyPool(instanceId)
         // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
         // rules from Room and the resolver cache (they can never fire again).
         runCatching {
