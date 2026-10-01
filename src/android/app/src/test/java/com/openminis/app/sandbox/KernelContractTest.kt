@@ -44,7 +44,7 @@ class KernelContractTest {
         val service = BudgetClassifier.classify("sleep 100 &")
         assertEquals(WorkClass.SERVICE, service.workClass)
         assertEquals(ShellTimeoutPolicy.SERVICE_RATE_BPS, service.outputRateBytesPerSec)
-        assertEquals(64L * 1024L, service.outputRateBytesPerSec)
+        assertEquals(512L * 1024L, service.outputRateBytesPerSec)
     }
 
     @Test
