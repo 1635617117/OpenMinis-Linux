@@ -1014,7 +1014,14 @@ class ChatViewModel(
                     _messages.value = older + _messages.value
                     noteLoadedSortBounds(rows)
                 }
-                refreshHistoryEdges()
+                // [T-load-older-no-tail-attach] 不在这里 scheduleTail：
+                // 用户刚点“加载更早”正在向上读历史，此时立刻触发
+                // ensureSessionTailLoaded 追加尾部 chunk 会连续两次突变
+                // _messages，LazyColumn 锚点被打掉 → 跳屏 + 一段记录
+                // 被悄悄加载。尾部 gap 由 isStreaming 翻转收集器与
+                // ensureSessionTailLoaded 的 queue 机制兜底，不需要
+                // 借翻历史的动作来抢跑。
+                refreshHistoryEdges(scheduleTail = false)
             } finally {
                 loadingOlderMessages = false
                 _isLoadingHistory.value = false
