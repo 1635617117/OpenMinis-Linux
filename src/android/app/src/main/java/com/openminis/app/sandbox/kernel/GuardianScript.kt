@@ -102,5 +102,9 @@ object GuardianScript {
         append("ulimit -H -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
         append("ulimit -S -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
         append("ulimit -H -c 0 2>/dev/null || true; ")
+        // [T-as-soft-probe] probe host AS soft-limit; HyperOS clamps hard limit,
+        // so (ulimit -S -v unlimited && ulimit -H -v unlimited) runs in a safe
+        // subshell that never kills the shell.
+        append("( ulimit -S -v unlimited 2>/dev/null && ulimit -H -v unlimited 2>/dev/null ) || true; ")
     }
 }
