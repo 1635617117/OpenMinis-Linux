@@ -88,15 +88,12 @@ internal fun mapThrowableToLLMError(error: Throwable): LLMError {
  * the request — and with them key-shaped material. Nothing in
  * [LLMError.message] should ever be able to carry a credential into the chat
  * UI (message is truncated to 160 chars for display, but truncation is not
- * redaction). Patterns cover the three shapes this app can realistically
- * reflect: OpenAI-style keys, Bearer headers, JWTs.
+ * redaction).
+ *
+ * [T-secret-mask-single-source] The patterns moved to
+ * [com.openminis.app.util.SecretMasking] so the context-assembly snapshot can
+ * use the same rule. This stays as the local name the call sites and
+ * LLMErrorClassificationTest already use.
  */
-private val SECRET_PATTERNS = listOf(
-    Regex("sk-[A-Za-z0-9_\\-]{8,}"),
-    Regex("Bearer\\s+[A-Za-z0-9._\\-]{8,}", RegexOption.IGNORE_CASE),
-    Regex("ghp_[A-Za-z0-9]{8,}"),
-    Regex("eyJ[A-Za-z0-9._\\-]{16,}"),
-)
-
 internal fun maskSecrets(text: String): String =
-    SECRET_PATTERNS.fold(text) { acc, r -> acc.replace(r, "[redacted]") }
+    com.openminis.app.util.SecretMasking.mask(text)

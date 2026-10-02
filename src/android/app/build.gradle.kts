@@ -22,6 +22,56 @@ val appCustomization = Properties().apply {
 fun customizationValue(key: String): String =
     (appCustomization.getProperty(key) ?: "").replace("\"", "\\\"")
 
+/**
+ * [T-build-provenance] Which commit an installed APK was built from.
+ *
+ * versionCode alone could not answer that: it sat at 220 across eleven commits,
+ * so "does the build on this phone already contain fix X?" was only guessable
+ * from the install timestamp — and guessing wrong means re-diagnosing a bug
+ * that is already fixed, or declaring a fix verified against a build that does
+ * not have it. Both happened while reviewing the 2026-10-02 batch.
+ *
+ * Injected into BuildConfig and logged by EnvironmentBanner at every launch, so
+ * a user's bug report and any logcat capture carry it.
+ *
+ * Both fall back safely for a source tarball or a CI checkout with no `.git`: a
+ * build must never fail because provenance is unavailable.
+ *
+ * Uses `providers.exec`, NOT a raw ProcessBuilder. An external process started
+ * straight from the build script is a configuration-cache problem — Gradle
+ * reports "external process started 'git rev-parse --short HEAD'" and stores
+ * the entry "with problems", which `configuration-cache.problems=warn` hides
+ * today but a future Gradle promotes to an error. A ValueSource-backed
+ * provider is tracked as a build input and re-queried per build, so the sha
+ * also cannot go stale across configuration-cache hits, which a ProcessBuilder
+ * result baked in at store time would.
+ *
+ * Declared as vals, not funs: a top-level `fun` in a .gradle.kts script has no
+ * implicit receiver, so it cannot see `providers`.
+ */
+val gitOutput: (List<String>) -> String = { args ->
+    runCatching {
+        providers.exec {
+            commandLine(listOf("git") + args)
+            isIgnoreExitValue = true
+        }.standardOutput.asText.get().trim()
+    }.getOrDefault("")
+}
+
+/** Short HEAD sha, or "unknown" when there is no `.git` to ask. */
+val gitSha: String =
+    gitOutput(listOf("rev-parse", "--short", "HEAD")).ifEmpty { "unknown" }
+
+/**
+ * True when the build came from an uncommitted working tree.
+ *
+ * `git status --porcelain` reports the whole work tree regardless of cwd, so
+ * running it from the app module still sees changes elsewhere in the repo.
+ * Empty output with a zero exit means CLEAN — which is why this tests the
+ * output, not the exit status.
+ */
+val gitDirty: Boolean = gitOutput(listOf("status", "--porcelain")).isNotEmpty()
+
 android {
     namespace = "com.openminis.app"
     // [T-android-dynamic-island] Bumped 35→36 so the Android 16 (Baklava)
@@ -41,8 +91,18 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 220
-        versionName = "2.0.20"
+        versionCode = 221
+        versionName = "2.0.21"
+
+        // [T-build-provenance] versionCode alone could not identify a build:
+        // it stayed 220 across 11 commits, so "which commit is this APK?" was
+        // only answerable from the install timestamp. Both fields degrade
+        // gracefully — a source tarball with no .git builds fine and reports
+        // "unknown", and the dirty flag distinguishes a rolling build made from
+        // a modified working tree (exactly the case that made the 2026-10-02
+        // runtime verification ambiguous).
+        buildConfigField("String", "GIT_SHA", "\"$gitSha\"")
+        buildConfigField("boolean", "GIT_DIRTY", "$gitDirty")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

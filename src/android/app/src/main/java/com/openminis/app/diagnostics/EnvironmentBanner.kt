@@ -3,6 +3,7 @@ package com.openminis.app.diagnostics
 import android.app.ActivityManager
 import android.content.Context
 import android.os.Build
+import com.openminis.app.BuildConfig
 import com.openminis.app.logging.AppLogger
 
 /**
@@ -44,6 +45,17 @@ object EnvironmentBanner {
             val memClass = am?.memoryClass ?: -1
             val largeMemClass = am?.largeMemoryClass ?: -1
 
+            // [T-build-provenance] Emitted FIRST: when a bug report arrives, the
+            // first question is always "which build?" and versionName cannot
+            // answer it (2.0.20/220 spanned eleven commits). GIT_SHA pins the
+            // commit; GIT_DIRTY says whether it came from a clean checkout or a
+            // modified working tree — the rolling-build case that made the
+            // 2026-10-02 runtime verification ambiguous.
+            AppLogger.info(
+                TAG,
+                "[Env] build=${BuildConfig.VERSION_NAME}(${BuildConfig.VERSION_CODE}) " +
+                    "git=${BuildConfig.GIT_SHA} dirty=${BuildConfig.GIT_DIRTY}",
+            )
             AppLogger.info(
                 TAG,
                 "[Env] device=${Build.MANUFACTURER}/${Build.BRAND}/${Build.MODEL} " +

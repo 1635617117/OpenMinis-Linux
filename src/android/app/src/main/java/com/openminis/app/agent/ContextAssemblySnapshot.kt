@@ -44,7 +44,21 @@ object ContextAssemblySnapshot {
         File(SessionWorkspace.hostDir(context.filesDir, sessionId, "offloads"), "context-assembly")
 
     @Synchronized
-    fun capture(fullText: String, sessionId: String, context: Context) {
+    fun capture(rawText: String, sessionId: String, context: Context) {
+        // [T-context-snapshot-redacted] Mask ONCE at the entry point so every
+        // downstream consumer — the section labels (first line of each `#`
+        // paragraph, so a credential in a heading would leak through the label
+        // too), the in-memory ring that LogManagementScreen renders, and the
+        // on-disk `latest.md` the agent itself can `cat` — sees the same
+        // redacted text. Masking only the disk copy would leave the UI and the
+        // ring as the two remaining copies of the raw prompt.
+        //
+        // Defence in depth, not the primary control: provider keys live in
+        // EncryptedPrefs and travel in request headers, so a normal prompt has
+        // nothing to mask. This catches a credential the user pasted into
+        // SOUL.md / GLOBAL.md / a memory entry, which then rides into every
+        // prompt. See SecretMasking for the pattern set.
+        val fullText = com.openminis.app.util.SecretMasking.mask(rawText)
         val sections = fullText
             .split(Regex("(?m)^#"))
             .mapNotNull { part ->
