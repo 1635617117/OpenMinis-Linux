@@ -744,11 +744,25 @@ class RootfsManager private constructor(private val context: Context) {
      */
     private fun installBundledAndroidSdkTools() {
         val marker = File(rootfsDir, "opt/android-sdk/.minis-sdk-tools")
-        if (marker.exists() && marker.readText().trim() == SDK_BUILD_TOOLS_REV) return
+        val errorMarker = File(rootfsDir, "opt/android-sdk/.minis-sdk-tools-error")
+        if (marker.exists() && marker.readText().trim() == SDK_BUILD_TOOLS_REV) {
+            errorMarker.delete()
+            return
+        }
         var last: Throwable? = null
         repeat(2) { attempt ->
+            // Files THIS attempt wrote, so a failure can be rolled back
+            // precisely. The previous code deleted `build-tools/<rev>` and
+            // `platform-tools` wholesale on failure, which also removed a
+            // working sdkmanager-installed platform-tools (adb, fastboot) and
+            // any aapt2 that had been put there by hand. A damaged bundled
+            // asset therefore left the device with *no* SDK tools at all — even
+            // when a working set existed before the attempt. Observed live on a
+            // device still running the corrupt asset: build-tools/35.0.2
+            // vanished and .minis-sdk-tools was never written.
+            var written: List<File> = emptyList()
             try {
-                extractSdkZip(SDK_TOOLS_ASSET) { name ->
+                written = extractSdkZip(SDK_TOOLS_ASSET) { name ->
                     when {
                         name.startsWith("build-tools/") ->
                             "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/" +
@@ -757,24 +771,78 @@ class RootfsManager private constructor(private val context: Context) {
                         else -> null
                     }
                 }
+                // [T-sdk-tools-verify-extraction] Extraction succeeding is not the
+                // same as the tools arriving. `ZipInputStream` is a streaming
+                // reader: a vendored archive with a damaged member throws only
+                // when that member is inflated, so everything before it lands and
+                // everything after it silently does not. The 35.0.2 upstream
+                // asset shipped exactly that way, and the only symptom was a
+                // missing aapt2 — which surfaced much later, inside a guest Gradle
+                // build, as "AAPT2 Daemon startup failed".
+                //
+                // So verify the members that the on-device build actually needs,
+                // and fail this attempt (rather than marking the install done) if
+                // any are absent.
+                val missing = SDK_TOOLS_REQUIRED.filter { rel ->
+                    val f = File(rootfsDir, "opt/android-sdk/$rel")
+                    !(f.isFile && f.length() > 0L)
+                }
+                if (missing.isNotEmpty()) {
+                    throw IllegalStateException(
+                        "bundled $SDK_TOOLS_ASSET extracted ${written.size} entries but is missing " +
+                            missing.joinToString(", ") + " — the vendored archive is damaged " +
+                            "or truncated; re-run scripts/prepare_android_sandbox.sh"
+                    )
+                }
                 File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV/source.properties")
                     .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
                 File(rootfsDir, "opt/android-sdk/platform-tools/source.properties")
                     .writeText("Pkg.UserSrc=false\nPkg.Revision=$SDK_BUILD_TOOLS_REV\n")
+                // Only point Gradle at aapt2 once we know the binary is there. An
+                // override aimed at a nonexistent path converts "no bundled tools"
+                // into an opaque AGP failure.
                 writeAaptOverride()
                 marker.parentFile?.mkdirs()
                 marker.writeText("$SDK_BUILD_TOOLS_REV\n")
-                Log.i(TAG, "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV")
+                errorMarker.delete()
+                Log.i(
+                    TAG,
+                    "Installed bundled aarch64 SDK tools $SDK_BUILD_TOOLS_REV (${written.size} entries)"
+                )
                 return
             } catch (t: Throwable) {
                 last = t
                 marker.delete()
-                File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV").deleteRecursively()
-                File(rootfsDir, "opt/android-sdk/platform-tools").deleteRecursively()
+                // Undo only this attempt's writes, newest first, then drop the
+                // two directories if — and only if — they ended up empty. A
+                // pre-existing platform-tools installed by sdkmanager survives.
+                written.asReversed().forEach { f -> runCatching { if (f.isFile) f.delete() } }
+                listOf(
+                    File(rootfsDir, "opt/android-sdk/build-tools/$SDK_BUILD_TOOLS_REV"),
+                    File(rootfsDir, "opt/android-sdk/platform-tools"),
+                ).forEach { dir ->
+                    runCatching {
+                        if (dir.isDirectory && dir.list()?.isEmpty() == true) dir.delete()
+                    }
+                }
                 Log.w(TAG, "SDK tools extract attempt ${attempt + 1} failed: ${t.message}")
             }
         }
         Log.e(TAG, "SDK tools extract failed after retry; not marking installed", last)
+        // Leave a breadcrumb the guest build can read. Without it the next
+        // failure happens in a completely different layer (Gradle/aapt2) with no
+        // pointer back to the real cause.
+        runCatching {
+            errorMarker.parentFile?.mkdirs()
+            errorMarker.writeText(
+                "Bundled aarch64 SDK tools failed to install.\n" +
+                    "asset: $SDK_TOOLS_ASSET\n" +
+                    "error: ${last?.message ?: last?.toString() ?: "unknown"}\n" +
+                    "Consequence: no aapt2/zipalign inside the guest, so on-device\n" +
+                    "APK builds will fail. Fix the vendored asset with\n" +
+                    "scripts/prepare_android_sandbox.sh (it validates and repairs).\n"
+            )
+        }
     }
 
     private fun writeAaptOverride() {
@@ -821,12 +889,19 @@ class RootfsManager private constructor(private val context: Context) {
         Log.e(TAG, "sdkmanager extract failed after retry; not marking installed", last)
     }
 
-    private fun extractSdkZip(asset: String, destRel: (String) -> String?) {
+    /**
+     * Stream a bundled SDK archive into the rootfs. Returns every file and
+     * directory actually written, in order, so callers can verify the archive
+     * arrived whole and roll back precisely on failure — a [ZipInputStream]
+     * stops at the first damaged member and everything after it is never seen.
+     */
+    private fun extractSdkZip(asset: String, destRel: (String) -> String?): List<File> {
         val input = try {
             context.assets.open(asset)
         } catch (t: Throwable) {
             throw IllegalStateException("bundled asset missing: $asset (${t.message})", t)
         }
+        val written = mutableListOf<File>()
         input.use { raw ->
             ZipInputStream(raw).use { zis ->
                 while (true) {
@@ -837,14 +912,17 @@ class RootfsManager private constructor(private val context: Context) {
                     val out = File(rootfsDir, rel)
                     if (entry.isDirectory || name.endsWith("/")) {
                         out.mkdirs()
+                        written += out
                         continue
                     }
                     out.parentFile?.mkdirs()
                     out.outputStream().use { zis.copyTo(it) }
                     if (name.contains("/bin/") || !name.contains(".")) out.setExecutable(true, false)
+                    written += out
                 }
             }
         }
+        return written
     }
 
 
@@ -1589,9 +1667,62 @@ class RootfsManager private constructor(private val context: Context) {
         return r.exitCode == 0
     }
 
+    /**
+     * Compare dotted revisions numerically. Lexicographic order is wrong here:
+     * "3.9.0" sorts *above* "3.22.1" as a string but below it as a version. The
+     * shell profile does the same job with `sort -V`; the two have to agree
+     * because they populate the same guest PATH.
+     */
+    private fun compareRevisions(a: String, b: String): Int {
+        val pa = a.split('.')
+        val pb = b.split('.')
+        for (i in 0 until maxOf(pa.size, pb.size)) {
+            val x = pa.getOrNull(i)?.trim()?.toIntOrNull() ?: 0
+            val y = pb.getOrNull(i)?.trim()?.toIntOrNull() ?: 0
+            if (x != y) return x.compareTo(y)
+        }
+        return 0
+    }
+
+    /**
+     * Resolve the guest PATH against what is really installed, newest first.
+     *
+     * Runs on every proot invocation but only touches two directories, so it is
+     * cheap; correctness beats memoising a value that changes the moment
+     * minis-android-sdk-setup lands a new build-tools or CMake revision.
+     */
+    private fun guestPath(): String {
+        val sdkDir = File(rootfsDir, "opt/android-sdk")
+        val resolved = StringBuilder(UBUNTU_GUEST_PATH_BASE)
+
+        // Prefer the revision the bundled aarch64 tools were installed as, so a
+        // stale side-by-side Google build-tools cannot shadow our aapt2.
+        val buildTools = File(sdkDir, "build-tools")
+        val pinned = File(buildTools, SDK_BUILD_TOOLS_REV)
+        if (pinned.isDirectory) {
+            resolved.append("/opt/android-sdk/build-tools/").append(SDK_BUILD_TOOLS_REV).append(':')
+        }
+        buildTools.listFiles()?.asSequence()
+            ?.filter { it.isDirectory && it.name != SDK_BUILD_TOOLS_REV }
+            ?.sortedWith { x, y -> compareRevisions(y.name, x.name) }
+            ?.forEach {
+                resolved.append("/opt/android-sdk/build-tools/").append(it.name).append(':')
+            }
+
+        val cmake = File(sdkDir, "cmake")
+        cmake.listFiles()?.asSequence()
+            ?.filter { it.isDirectory && File(it, "bin").isDirectory }
+            ?.sortedWith { x, y -> compareRevisions(y.name, x.name) }
+            ?.forEach {
+                resolved.append("/opt/android-sdk/cmake/").append(it.name).append("/bin:")
+            }
+
+        return resolved.append(UBUNTU_GUEST_PATH_TAIL).toString()
+    }
+
     private fun prootLoaderEnv(): Map<String, String> {
         val env = mutableMapOf(
-            "PATH" to UBUNTU_GUEST_PATH,
+            "PATH" to guestPath(),
             "PROOT_TMP_DIR" to PRootKernel.getProotTmpDir(context).absolutePath,
             "LD_LIBRARY_PATH" to nativeLibDir.absolutePath,
             "TMPDIR" to "/tmp",
@@ -1687,10 +1818,21 @@ class RootfsManager private constructor(private val context: Context) {
             "PIP_CERT",
             "NODE_EXTRA_CA_CERTS",
         )
-        private const val UBUNTU_GUEST_PATH =
+        /**
+         * Guest PATH, minus the two version-suffixed SDK directories.
+         *
+         * Those are appended by [guestPath] after resolving what is *actually*
+         * installed under the rootfs. Hardcoding `build-tools/35.0.2` and
+         * `cmake/3.22.1` here silently produced dead PATH entries: the app's own
+         * externalNativeBuild accepts CMake `3.22.1+`, and minis-android-sdk-setup
+         * installs CMake 3.31.6 (falling back to 3.22.1), so on a typical device
+         * `/opt/android-sdk/cmake/3.22.1/bin` does not exist and `cmake`/`ninja`
+         * were missing from every proot invocation.
+         */
+        private const val UBUNTU_GUEST_PATH_BASE =
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/bin:" +
-                "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:" +
-                "/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin"
+                "/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:"
+        private const val UBUNTU_GUEST_PATH_TAIL = "/opt/gradle/bin"
         private val FACTORY_PIP_BASELINE = setOf("pip", "setuptools", "wheel")
         private const val PIP_WORLD_HEADER = "# pip-world snapshot — extra packages beyond factory\n"
         private const val DPKG_WORLD_HEADER = "# dpkg-world snapshot — apt-mark showmanual names, one per line\n"
@@ -1706,6 +1848,18 @@ class RootfsManager private constructor(private val context: Context) {
         private const val SDK_TOOLS_ASSET = "android-sdk-tools-aarch64.zip"
         private const val CMD_TOOLS_ASSET = "android-cmdline-tools.zip"
         private const val SDK_BUILD_TOOLS_REV = "35.0.2"
+
+        /**
+         * Members of [SDK_TOOLS_ASSET] whose absence means the guest cannot build
+         * an APK. Mirrors SDK_TOOLS_REQUIRED in scripts/prepare_android_sandbox.sh
+         * — both sides of the same contract, one at packaging time and one at
+         * install time, because the archive can also be damaged in transit.
+         */
+        private val SDK_TOOLS_REQUIRED = listOf(
+            "build-tools/$SDK_BUILD_TOOLS_REV/aapt2",
+            "build-tools/$SDK_BUILD_TOOLS_REV/zipalign",
+            "platform-tools/adb",
+        )
 
         /**
          * Android 14+ stores CAs in the conscrypt APEX; `/system/etc/security/cacerts`

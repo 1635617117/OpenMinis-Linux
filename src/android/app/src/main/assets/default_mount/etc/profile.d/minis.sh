@@ -56,8 +56,25 @@ export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--max-old-space-size=192"
 
 # Toolchain paths (populated by minis-dev-setup / minis-android-sdk-setup).
 export ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
-export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/opt/android-sdk}"
-export PATH="$PATH:/opt/bin:/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:/opt/android-sdk/build-tools/35.0.2:/opt/android-sdk/cmake/3.22.1/bin:/opt/gradle/bin"
+export ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+# build-tools and cmake live in *versioned* subdirectories, and which versions
+# exist depends on what the setup CLIs managed to fetch (cmake 3.31.6 normally,
+# 3.22.1 as a fallback; build-tools 34.0.0 and/or 35.0.2). Pinning one revision
+# here left a dead PATH entry — cmake/ninja/aapt2 then appeared "not installed"
+# even though they were. Resolve whatever is present, highest version first.
+_minis_path_add() {
+  if [ -d "$1" ]; then PATH="$PATH:$1"; fi
+  return 0
+}
+for _bt in $(ls -1d "$ANDROID_HOME"/build-tools/*/ 2>/dev/null | sort -rV); do
+  _minis_path_add "${_bt%/}"
+done
+for _cm in $(ls -1d "$ANDROID_HOME"/cmake/*/bin/ 2>/dev/null | sort -rV); do
+  _minis_path_add "${_cm%/}"
+done
+unset _bt _cm
+export PATH="$PATH:/opt/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:/opt/gradle/bin"
+unset -f _minis_path_add
 for _jdk in /usr/lib/jvm/java-21-openjdk-arm64 /usr/lib/jvm/java-17-openjdk-arm64 /usr/lib/jvm/default-java; do
   if [ -d "$_jdk" ]; then
     export JAVA_HOME="$_jdk"
