@@ -20,10 +20,15 @@ class GuestWorkloadPolicyTest {
         val budget = BudgetClassifier.classify(incident)
         val wrapped = GuestLimits.wrap(incident)
         val groupKill = "kill -TERM -" + "$" + "$"
-        assertTrue(wrapped.contains("ulimit -H -t ${budget.cpuSeconds}"))
         assertTrue(wrapped.contains("ulimit -S -t ${budget.cpuSeconds}"))
-        assertTrue(wrapped.contains("ulimit -H -u ${budget.nproc}"))
-        assertTrue(wrapped.contains("ulimit -H -f ${budget.fileBlocks()}"))
+        assertTrue(wrapped.contains("ulimit -S -u ${budget.nproc}"))
+        // Hard cpu/nproc/fsize all carry the headroom multiplier — see
+        // GuardianScript.HARD_HEADROOM. Referencing the constant rather than a
+        // literal 4 keeps the two from drifting.
+        assertTrue(wrapped.contains("ulimit -H -t ${budget.cpuSeconds * GuardianScript.HARD_HEADROOM}"))
+        assertTrue(wrapped.contains("ulimit -H -u ${budget.nproc * GuardianScript.HARD_HEADROOM}"))
+        assertTrue(wrapped.contains("ulimit -S -f ${budget.fileBlocks()}"))
+        assertTrue(wrapped.contains("ulimit -H -f ${budget.fileBlocks() * GuardianScript.HARD_HEADROOM}"))
         assertTrue(wrapped.contains("trap 'kill -KILL"))
         assertTrue(wrapped.contains(groupKill))
         assertFalse(wrapped.contains("kill -0"))
@@ -194,6 +199,83 @@ class GuestWorkloadPolicyTest {
         assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.batch().nproc)
         assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.service().nproc)
         assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.setup().nproc)
+    }
+
+    /**
+     * [T-rlimit-soft-before-hard] The order IS the correctness property.
+     *
+     * bash's `ulimit -H -x N` calls setrlimit with {cur = the CURRENT soft,
+     * max = N}; it does not lower the soft for you. Linux rejects that with
+     * EINVAL whenever the inherited soft is already above N — which it always
+     * is at shell boot, since the soft comes from the Android app process. So
+     * emitting `-H` before `-S` meant every hard limit failed, silently,
+     * behind the `2>/dev/null || true` that is there for a good reason (a
+     * failed rlimit must not brick the shell).
+     *
+     * Observed on device before the fix: `Max processes 1024/57851`,
+     * `Max file size 8GiB/unlimited`, and `ulimit -S -u 50000` succeeded from
+     * an unprivileged guest process. The soft half looked enforced while the
+     * ceiling was fiction.
+     *
+     * This asserts the emitted ORDER, not just the presence of both lines —
+     * presence was already true when the bug shipped.
+     */
+    @Test
+    fun everyRlimitLowersSoftBeforeHard() {
+        // One budget with a CPU limit and one without, so the conditional
+        // `-t` branch is covered on both sides.
+        val budgets = mapOf(
+            "normal" to BudgetClassifier.normal(),
+            "service" to BudgetClassifier.service(),
+        )
+        for ((name, budget) in budgets) {
+            // Drive the emitter with the budget DIRECTLY. GuestLimits.wrap()
+            // re-classifies its argument from the command text, so wrapping a
+            // fixed command here would test the classifier's guess rather than
+            // the budget under iteration — the service case (cpuSeconds == 0)
+            // would be handed a script built for NORMAL and the `-t` branch
+            // would never be covered on the "absent" side.
+            val wrapped = GuardianScript.oneshot("true", budget)
+            for (flag in listOf("t", "u", "f")) {
+                val soft = wrapped.indexOf("ulimit -S -$flag ")
+                val hard = wrapped.indexOf("ulimit -H -$flag ")
+                val present = soft >= 0 && hard >= 0
+                if (flag == "t" && budget.cpuSeconds == 0) {
+                    assertFalse("$name: cpuSeconds==0 must emit no -t limit", present)
+                    continue
+                }
+                assertTrue("$name: expected both -S -$flag and -H -$flag", present)
+                assertTrue(
+                    "$name: -S -$flag must be emitted BEFORE -H -$flag " +
+                        "(soft=$soft hard=$hard) or the hard setrlimit fails with EINVAL",
+                    soft < hard,
+                )
+            }
+        }
+    }
+
+    /**
+     * The headroom multiplier must not put the hard ceiling anywhere near the
+     * UID ceiling. RLIMIT_NPROC counts per UID and includes the app's own
+     * processes, so a guest that could reach the kernel's value would be able
+     * to starve the app's forks — including the watcher meant to clean it up.
+     */
+    @Test
+    fun hardCeilingStaysWellUnderTheUidLimit() {
+        val kernelUidNproc = 57851 // measured on the reference device
+        val largestSoft = listOf(
+            BudgetClassifier.interactive(),
+            BudgetClassifier.normal(),
+            BudgetClassifier.batch(),
+            BudgetClassifier.service(),
+            BudgetClassifier.setup(),
+        ).maxOf { it.nproc }
+        val hard = largestSoft * GuardianScript.HARD_HEADROOM
+        assertTrue("hard nproc $hard is not below the soft $largestSoft", hard >= largestSoft)
+        assertTrue(
+            "hard nproc ceiling $hard leaves the app too little of the UID budget $kernelUidNproc",
+            hard * 4 <= kernelUidNproc,
+        )
     }
 
     /** [T-memory-poison-guard] The sandbox-side quota gate: pure decision. */
