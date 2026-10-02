@@ -9,8 +9,8 @@
 | JDK | **17** |
 | Android SDK | compileSdk 36，targetSdk 35，minSdk 26 |
 | Android NDK | **r29 `29.0.14206865`**，设置 `ANDROID_NDK_HOME`。已有 r28 不算可用 |
-| CMake | 3.22.1（用 SDK Manager 安装） |
-| 其它 | `curl`、`tar`、`make`、`awk`、`sed` |
+| CMake | **3.22.1 或更高**（DSL 写的是 `3.22.1+`）。aarch64 上 SDK Manager 未必装得到，`build_apk_aarch64.sh` 会自己解析并通过 `cmake.dir` 指定 |
+| 其它 | `curl`、`tar`、`make`、`sed`，以及 **`gawk`**（不能只是任意 awk，见下）|
 
 Gradle 使用仓库里的 wrapper（Gradle 8.11.1，AGP 8.7.3，Kotlin 2.1.0），不要另外安装。只打 `arm64-v8a`。
 
@@ -42,6 +42,18 @@ set MINIS_BUILD_MIRRORS=cn
 
 ## 编原生依赖和安装包
 
+aarch64 宿主机直接跑一键脚本即可：
+
+```sh
+./scripts/build_apk_aarch64.sh
+```
+
+它会初始化 `deps/proot` 子模块、编 PRoot、准备沙箱资产（含完整性校验与自动修复）、
+编 libunwind.a、解析 NDK/CMake/aapt2 并写入 `local.properties`，最后 `assembleRelease`
+把产物复制到 `dist/openminis-aarch64.apk`。
+
+也可以手工分步执行：
+
 ```sh
 ./deps/build_proot.sh
 ./scripts/prepare_android_sandbox.sh
@@ -50,18 +62,24 @@ cd src/android
 ```
 
 - `build_proot.sh` 用 NDK 交叉编译 PRoot，并放入 `assets/` 和 `jniLibs/arm64-v8a/`。`libproot-loader.so` 与 `libproot-loader32.so` 必须在 APK 里，否则客户机命令会报 `[Shell not running]`。
-- `prepare_android_sandbox.sh` 下载 Ubuntu 24.04 arm64 的 `ubuntu-base.tar.gz`（不进 git），并准备 aarch64 aapt2 与精简 sdkmanager。
-- 在 aarch64 客户机里不要用 Google 的 x86_64 `build-tools` 覆盖 aapt2。见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
+- `build_proot.sh` **需要 gawk**：proot 的 `loader-info.awk` 用了 `strtonum()`，那是 gawk 扩展，而 Debian/Ubuntu 默认的 `/usr/bin/awk` 是 mawk。脚本会自己找一个支持 `strtonum` 的 awk 并在 make 期间遮蔽默认的。
+- `prepare_android_sandbox.sh` 下载 Ubuntu 24.04 arm64 的 `ubuntu-base.tar.gz`（不进 git），并准备 aarch64 aapt2 与精简 sdkmanager。它会校验每个 blob：`android-sdk-tools-aarch64.zip` 来自第三方 release，35.0.2 那份的偏移量就是坏的，脚本用 `repair_vendor_zip.py` 就地重建。
+- 在 aarch64 宿主机上编译时，AGP 默认从 Maven 取 **x86_64** 的 aapt2，会以 `AAPT2 Daemon startup failed` 失败。`build_apk_aarch64.sh` 自动加 `-Pandroid.aapt2FromMavenOverride=` 指向一个能在本机跑的 aarch64 aapt2。同样地，在 aarch64 客户机里不要用 Google 的 x86_64 `build-tools` 覆盖 aapt2。见 [docs/android-sdk-mirrors.md](docs/android-sdk-mirrors.md)。
 - Release 签名见 [docs/SIGNING.md](docs/SIGNING.md)。仓库里有 `src/android/release.keystore` 和 `signing.properties` 时，`:app:assembleRelease` 用这套证书。
 
 `src/android/app/src/main/cpp/` 里的 JNI 由 Gradle 的 CMake 一起编译，不用单独跑。
 
 ## 排错
 
-- `deps/proot` 是空的：执行 `git submodule update --init --recursive`。
+- `deps/proot` 是空的：执行 `git submodule update --init --recursive`（`build_apk_aarch64.sh` 会自动做）。
+- `awk: loader/loader-info.awk: line 9: function strtonum never defined`：默认 awk 是 mawk。装 gawk（`apt-get install -y gawk`）后重跑；`build_proot.sh` 会自己找到它。
+- `AAPT2 Daemon startup failed` / `Bundled aapt2 not found`：在 aarch64 宿主机上十有八九是 AGP 取了 x86_64 的 aapt2。用 `build_apk_aarch64.sh`，或手工加 `-Pandroid.aapt2FromMavenOverride=<能跑的 aarch64 aapt2>`。
 - `Android NDK not found`：把 `ANDROID_NDK_HOME` 指到 NDK r29（`29.0.14206865`）。不要指到 r28。
+- CMake 相关的 `does not match ... required version`：DSL 要的是 `3.22.1+`，任何 ≥3.22.1 都行。`local.properties` 里的 `cmake.dir` 由脚本解析写入；手工构建时若 AGP 找不到 SDK 里的 CMake（手装的目录没有 `package.xml`，AGP 枚举不到），就自己写一行 `cmake.dir=`。不要在 `local.properties` 里写 `ndk.dir`，它已废弃（AGP 报 CXX5106），项目用 `ndkVersion` 定位。
+- 客户机里没有 aapt2/zipalign：说明捆绑的 `android-sdk-tools-aarch64.zip` 没解出来。跑 `python3 scripts/repair_vendor_zip.py --verify src/android/app/src/main/assets/android-sdk-tools-aarch64.zip` 看它是否损坏，再用 `prepare_android_sandbox.sh` 修复。App 侧会在 `/opt/android-sdk/.minis-sdk-tools-error` 留下失败原因。
 - 应用能开、终端不能跑：重跑 `./deps/build_proot.sh` 和 `./scripts/prepare_android_sandbox.sh` 后再编译。
 - 每条命令都是 `[Shell not running] (exit code: -1)`：检查 `src/android/app/src/main/jniLibs/arm64-v8a/` 里是否有 `libproot-loader.so` 和 `libproot-loader32.so`。只看到沙箱启动日志不够，要实际跑一条命令并确认退出码为 0。
+- 单元测试 `VendoredAssetIntegrityTest` 失败：说明 `assets/` 下有 blob 损坏或缺关键成员。这是故意的护栏——它拦住的正是"能打包但装到手机上跑不起来"那一类问题。
 
 ## 许可
 
