@@ -125,11 +125,6 @@ fun ProviderDetailScreen(
     var isEditingKey by remember { mutableStateOf(false) }
     var editKeyValue by remember { mutableStateOf("") }
     var keyVisible by remember { mutableStateOf(false) }
-    // [T-key-rotation] 备用 Key 池编辑态（与主 key 同库加密存储）。
-    var storedKeyPool by remember(instanceId) { mutableStateOf(providerRepository.loadKeyPool(instanceId)) }
-    var isEditingKeyPool by remember { mutableStateOf(false) }
-    var editKeyPoolValue by remember { mutableStateOf("") }
-    var keyPoolVisible by remember { mutableStateOf(false) }
 
     var isEnabled by remember { mutableStateOf(instance.isEnabled) }
     var customBaseURL by remember { mutableStateOf(instance.customBaseURL ?: "") }
@@ -227,122 +222,6 @@ fun ProviderDetailScreen(
                             keyVisible = false
                         },
                     )
-                }
-                // [T-key-rotation] 备用 Key 池：逗号分隔多个 key，每次调用
-                // 轮换取用，坏 key 由冷却熔断自动跳过。
-                if (!isOAuthProvider) {
-                    SettingsSection(
-                        header = "备用 Key 池（多 Key 轮换）",
-                        footer = "逗号分隔多个 key，每次调用轮换取用；坏 key 冷却熔断后自动跳过。留空只用主 Key。",
-                    ) {
-                        SettingsCardBlock {
-                            if (isEditingKeyPool) {
-                                SectionTextField(
-                                    value = editKeyPoolValue,
-                                    onValueChange = { editKeyPoolValue = it },
-                                    singleLine = false,
-                                    visualTransformation = if (keyPoolVisible) {
-                                        VisualTransformation.None
-                                    } else {
-                                        PasswordVisualTransformation()
-                                    },
-                                    trailingIcon = {
-                                        IconButton(onClick = { keyPoolVisible = !keyPoolVisible }) {
-                                            Icon(
-                                                if (keyPoolVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                                contentDescription = if (keyPoolVisible) "Hide" else "Show",
-                                            )
-                                        }
-                                    },
-                                    fieldModifier = Modifier.bringIntoViewOnFocus(),
-                                )
-                                Row(modifier = Modifier.padding(top = 8.dp)) {
-                                    MinisSmallOutlinedButton(
-                                        onClick = {
-                                            isEditingKeyPool = false
-                                            editKeyPoolValue = ""
-                                            keyPoolVisible = false
-                                        },
-                                        colors = ButtonDefaults.outlinedButtonColors(
-                                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        ),
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                                    ) {
-                                        Text(stringResource(R.string.common_cancel))
-                                    }
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    MinisSmallButton(
-                                        onClick = {
-                                            if (editKeyPoolValue.isBlank()) {
-                                                providerRepository.deleteKeyPool(instanceId)
-                                                storedKeyPool = ""
-                                                AppLogger.info(TAG, "Cleared key pool for ${instance.id}")
-                                            } else {
-                                                providerRepository.saveKeyPool(instanceId, editKeyPoolValue)
-                                                storedKeyPool = editKeyPoolValue
-                                                AppLogger.info(TAG, "Saved key pool for ${instance.id}")
-                                            }
-                                            isEditingKeyPool = false
-                                            editKeyPoolValue = ""
-                                            keyPoolVisible = false
-                                        },
-                                    ) {
-                                        Text(if (editKeyPoolValue.isBlank()) "清空" else "保存池")
-                                    }
-                                }
-                            } else {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = if (storedKeyPool.isBlank()) {
-                                            "未配置（单 Key 模式）"
-                                        } else if (keyPoolVisible) {
-                                            storedKeyPool
-                                        } else {
-                                            val keys = storedKeyPool.split(',').map { it.trim() }.filter { it.isNotBlank() }
-                                            "${keys.size} 个 key：" + keys.joinToString(", ") { maskedKey(it) }
-                                        },
-                                        style = MaterialTheme.typography.bodyMedium.copy(fontFamily = FontFamily.Monospace),
-                                        modifier = Modifier.weight(1f),
-                                    )
-                                    if (storedKeyPool.isNotBlank()) {
-                                        IconButton(onClick = { keyPoolVisible = !keyPoolVisible }) {
-                                            Icon(
-                                                if (keyPoolVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                                contentDescription = if (keyPoolVisible) "Hide" else "Show",
-                                            )
-                                        }
-                                    }
-                                    MinisSmallTextButton(
-                                        onClick = {
-                                            isEditingKeyPool = true
-                                            editKeyPoolValue = storedKeyPool
-                                        },
-                                    ) {
-                                        Text(stringResource(R.string.common_edit))
-                                    }
-                                    // [T-key-pool-clear] 删除入口：之前只有“编辑”，
-                                    // 池一旦设置就没有任何 UI 途径清空，只能靠
-                                    // 编辑态保存空值——而保存按钮又被 isNotBlank()
-                                    // 禁用，等于死路。这里加显式“清空”按钮，直接
-                                    // 调 deleteKeyPool 回到单 Key 模式。
-                                    MinisSmallOutlinedButton(
-                                        onClick = {
-                                            providerRepository.deleteKeyPool(instanceId)
-                                            storedKeyPool = ""
-                                            keyPoolVisible = false
-                                            AppLogger.info(TAG, "Cleared key pool for ${instance.id}")
-                                        },
-                                        colors = ButtonDefaults.outlinedButtonColors(
-                                            contentColor = MaterialTheme.colorScheme.error,
-                                        ),
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                                    ) {
-                                        Text("清空")
-                                    }
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }

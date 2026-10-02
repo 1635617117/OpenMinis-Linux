@@ -78,46 +78,5 @@ object ProviderKeyGate {
         }
     }
 
-    // -- [T-key-breaker] circuit breaker per bucket ---------------------
-    // Kelivo-equivalent: three consecutive transient failures trip the
-    // bucket for five minutes. While tripped, callers skip same-provider
-    // retries and fall through to the next fallback member instead of
-    // hammering a dead key through 1/2/4/8/16s backoff.
-    const val FAILURE_THRESHOLD = 3
-    const val COOLDOWN_MS = 5 * 60_000L
-
-    private class BreakerState(
-        val failures: java.util.concurrent.atomic.AtomicInteger,
-        @Volatile var openUntilMs: Long,
-    )
-
-    private val breakers = ConcurrentHashMap<String, BreakerState>()
-
-    /** Returns true exactly when this failure tripped the breaker (3rd strike). */
-    fun recordFailure(bucketKey: String): Boolean {
-        if (bucketKey.isBlank()) return false
-        val st = breakers.getOrPut(bucketKey) { BreakerState(java.util.concurrent.atomic.AtomicInteger(0), 0L) }
-        if (st.failures.incrementAndGet() >= FAILURE_THRESHOLD) {
-            st.openUntilMs = System.currentTimeMillis() + COOLDOWN_MS
-            return st.failures.get() == FAILURE_THRESHOLD
-        }
-        return false
-    }
-
-    fun recordSuccess(bucketKey: String) {
-        if (bucketKey.isBlank()) return
-        breakers[bucketKey]?.failures?.set(0)
-    }
-
-    fun isTripped(bucketKey: String): Boolean {
-        if (bucketKey.isBlank()) return false
-        val st = breakers[bucketKey] ?: return false
-        if (st.openUntilMs == 0L) return false
-        if (System.currentTimeMillis() > st.openUntilMs) {
-            st.openUntilMs = 0L
-            st.failures.set(0)
-            return false
-        }
-        return true
-    }
+    
 }

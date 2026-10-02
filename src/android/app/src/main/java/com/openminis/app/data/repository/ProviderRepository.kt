@@ -134,6 +134,10 @@ class ProviderRepository(private val context: Context) {
      */
     fun invalidateModelCache(instanceId: String) {
         prefs.edit().remove(lastFetchKey(instanceId)).apply()
+        // [T-key-cache-invalidate] 模型刷新后旧 ProviderFactory 的 memo
+        // 缓存必须作废 —— 否则已构造的 provider 带着旧 key/旧配置继续
+        // 存活，表现为“刷新了模型但发送用的还是旧 key”。
+        com.openminis.app.provider.ProviderFactory.invalidateAll()
     }
 
     private val encryptedPrefs: SharedPreferences by lazy {
@@ -554,12 +558,6 @@ class ProviderRepository(private val context: Context) {
 
         saveConfig(config)
         deleteApiKey(instanceId)
-        // [T-key-pool-delete-on-remove] 主 key 被删后备用 key 池也必须
-        // 一起清掉。池按 instanceId 存储，编辑/重加供应商若复用同一 id，
-        // 旧池会继续存在并优先于新主 key 被使用 —— 表现为“删了供应商
-        // 重加还是 Invalid API key”。池的入口只有删除与显式清空两个，
-        // removeInstance 是删除的必经之路。
-        deleteKeyPool(instanceId)
         // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
         // rules from Room and the resolver cache (they can never fire again).
         runCatching {
@@ -2342,26 +2340,15 @@ class ProviderRepository(private val context: Context) {
      * instances without a token, which must stay unauthenticated).
      */
     fun usableApiKey(instance: ProviderInstance, modelId: String = ""): String? =
-        // [T-key-rotation] 粘性轮换：池里按实例钉住当前 key，坏 key 熔断才轮换。
-        // modelId 参数保留兼容但不再用于游标维度；游标按 instanceId 统一分维。
-        com.openminis.app.provider.ProviderKeyRotation.current(instance.id, loadKeyPool(instance.id), modelId)
-            ?: loadApiKey(instance.id)
+        loadApiKey(instance.id)
             ?: if (instance.allowsEmptyAPIKey) "" else null
-
-    /** [T-key-rotation] 备用 Key 池（逗号分隔），与主 key 同库加密存储。 */
-    fun loadKeyPool(instanceId: String): String =
-        encryptedPrefs.getString("keypool_$instanceId", null).orEmpty()
-
-    fun saveKeyPool(instanceId: String, pool: String) {
-        encryptedPrefs.edit().putString("keypool_$instanceId", pool).apply()
-    }
-
-    fun deleteKeyPool(instanceId: String) {
-        encryptedPrefs.edit().remove("keypool_$instanceId").apply()
-    }
 
     fun deleteApiKey(instanceId: String) {
         encryptedPrefs.edit().remove("apikey_$instanceId").apply()
+        // [T-key-cache-invalidate] 删 key 同样要让 ProviderFactory 的
+        // memo 缓存失效 —— 否则已构造的 provider 继续用旧 key 存活，
+        // 删 key 后重加同实例仍是旧 key 生效。
+        com.openminis.app.provider.ProviderFactory.invalidateAll()
     }
 
     private val backupCoordinator by lazy {

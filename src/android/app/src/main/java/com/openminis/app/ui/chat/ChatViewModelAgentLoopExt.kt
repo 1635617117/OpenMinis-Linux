@@ -530,14 +530,8 @@ internal suspend fun ChatViewModel.runAgentLoop(
         // so we catch at collect level and unwrap.
         var collectDone = false
         var retryAttempt = 0  // per-provider; reset when falling back to the next member
-        // [T-key-breaker] 熔断桶按 provider+模型维度算，整个 while 循环共享。
-        var breakerBucket = ""
         while (!collectDone) {
             try {
-                breakerBucket = com.openminis.app.provider.ProviderKeyGate.key(
-                    currentProvider.javaClass.simpleName,
-                    currentProvider.model.displayName,
-                )
                 // [T-android-enhanced-cache] Stamp the per-turn Enhanced
                 // Cache flag onto the active provider here — the single
                 // choke point every turn passes through, regardless of how
@@ -963,8 +957,6 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 lastOtherToolInputMs = 0L
                 collectDone = true
                 com.openminis.app.agent.GenerationRunStore.finish(generationRunId, ok = true)
-                // [T-key-breaker] 一轮正常收尾即清空该桶的失败计数。
-                com.openminis.app.provider.ProviderKeyGate.recordSuccess(breakerBucket)
                 // Stream completed without error — clear any lingering retry UI state.
                 if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
                     _autoRetryAttempt.value = 0
@@ -989,25 +981,12 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     actual is com.openminis.app.data.model.LLMError.TransientError ||
                     actual is com.openminis.app.data.model.LLMError.RateLimited ||
                     is5xx) && !isPermanentCapacity
-                // [T-key-breaker] 冷却熔断：同一桶连续失败 3 次 → 5 分钟内跳过同源重试，
-                // 直接交给 fallback 成员，别用 1/2/4/8/16s 退避反复锤一把死 key。
-                val breakerTripped = com.openminis.app.provider.ProviderKeyGate.isTripped(breakerBucket)
-                if (isTransient) {
-                    // [T-key-rotation] 熔断刚跳闸 → 同实例粘性轮换推进到下一个备用 key。
-                    val justTripped = com.openminis.app.provider.ProviderKeyGate.recordFailure(breakerBucket)
-                    if (justTripped) {
-                        val instanceId = com.openminis.app.provider.SamplingIdentity.of(currentProvider)
-                        if (instanceId.isNotBlank()) {
-                            com.openminis.app.provider.ProviderKeyRotation.advance(instanceId)
-                        }
-                    }
-                }
                 val maxRetries = effectiveMaxRetries()
                 // 429 with another group member: switch endpoints instead of
                 // hammering the same key through 1/2/4/8/16s (inside a typical
                 // 60s relay window). Same-provider retries remain for network
                 // / 5xx, and for 429 when this is the last candidate — at most once.
-                val skipSameProviderRetry = (isRateLimit && remainingFallbacks.isNotEmpty()) || isPermanentCapacity || breakerTripped
+                val skipSameProviderRetry = (isRateLimit && remainingFallbacks.isNotEmpty()) || isPermanentCapacity
                 val sameProviderBudget = if (isRateLimit) minOf(maxRetries, 1) else maxRetries
                 if (isTransient && !skipSameProviderRetry && sameProviderBudget > 0 && retryAttempt < sameProviderBudget) {
                     val retryAfter = (actual as? com.openminis.app.data.model.LLMError.RateLimited)?.retryAfterSeconds
