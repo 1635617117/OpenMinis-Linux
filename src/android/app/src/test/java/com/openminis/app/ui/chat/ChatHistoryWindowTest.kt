@@ -158,9 +158,12 @@ class ChatHistoryWindowTest {
 
     @Test
     fun missingTailInsertsBeforeALiveRowThatSkippedTheGap() {
+        // Chunk [gap, live] in DB order; "live" is already painted. The fresh
+        // block (just "gap") must land BEFORE the painted live row.
         val index = ChatHistoryWindow.missingTailInsertIndex(
             currentSourceIds = listOf(listOf("a"), listOf("live")),
-            missingSourceIds = listOf(listOf("gap"), listOf("live")),
+            chunkSourceIds = listOf(listOf("gap"), listOf("live")),
+            freshStartIndex = 0,
         )
         assertEquals(1, index)
     }
@@ -171,7 +174,24 @@ class ChatHistoryWindowTest {
             -1,
             ChatHistoryWindow.missingTailInsertIndex(
                 currentSourceIds = listOf(listOf("a")),
-                missingSourceIds = listOf(listOf("gap")),
+                chunkSourceIds = listOf(listOf("gap")),
+                freshStartIndex = 0,
+            ),
+        )
+    }
+
+    @Test
+    fun missingTailDoesNotAnchorOnPaintedRowsThatSortBeforeTheFreshBlock() {
+        // [T-android-timeline-ledger] The first chunk row ("live") is already
+        // painted and the fresh block starts after it. Anchoring on the whole
+        // chunk put "later" BEFORE "live" — reordering the transcript. The
+        // fresh block must append instead.
+        assertEquals(
+            -1,
+            ChatHistoryWindow.missingTailInsertIndex(
+                currentSourceIds = listOf(listOf("a"), listOf("live")),
+                chunkSourceIds = listOf(listOf("live"), listOf("later")),
+                freshStartIndex = 1,
             ),
         )
     }

@@ -31,18 +31,28 @@ internal object ChatHistoryWindow {
     }
 
     /**
-     * Insertion index for rows that belong after the loaded cursor.
-     * -1 means append. A non-negative index is the first painted row that
-     * already represents one of those DB ids; the missing rows go immediately
-     * before it so a live turn is not placed under the gap it skipped.
+     * Insertion index for the not-yet-painted rows of a contiguous tail
+     * chunk. [chunkSourceIds] is the WHOLE chunk in DB (sort_order) order;
+     * [freshStartIndex] is the first chunk row that is not painted yet. The
+     * fresh block goes immediately before the first painted row that
+     * represents any chunk id at or after [freshStartIndex] — those rows
+     * sort after the fresh block. -1 means append.
+     *
+     * [T-android-timeline-ledger] Anchoring on the whole chunk regardless of
+     * paint state (the old behavior) could place the fresh block before
+     * painted rows that sort BEFORE it whenever an early chunk id was
+     * already attached to a live painted row — reordering the transcript
+     * and duplicating rows.
      */
     fun missingTailInsertIndex(
         currentSourceIds: List<List<String>>,
-        missingSourceIds: List<List<String>>,
+        chunkSourceIds: List<List<String>>,
+        freshStartIndex: Int,
     ): Int {
-        val missing = missingSourceIds.flatten().toSet()
-        if (missing.isEmpty()) return -1
-        return currentSourceIds.indexOfFirst { ids -> ids.any(missing::contains) }
+        if (freshStartIndex >= chunkSourceIds.size) return -1
+        val laterIds = chunkSourceIds.drop(freshStartIndex).flatten().toSet()
+        if (laterIds.isEmpty()) return -1
+        return currentSourceIds.indexOfFirst { ids -> ids.any(laterIds::contains) }
     }
 
     data class SortAnchor(val sortOrder: Int, val isUser: Boolean)

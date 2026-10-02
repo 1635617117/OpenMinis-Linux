@@ -216,14 +216,13 @@ internal fun ChatViewModel.loadSession() {
         }
         val messages = loaded.messages
         val ordered = loaded.ordered
-        loadedMessageTotal = loaded.totalMessages
-        loadedMessageOffset = loaded.firstMessageOffset
-        unrepresentedLoadedRows = 0
-        loadedOldestSortOrder = null
-        loadedNewestSortOrder = null
+        // [T-android-timeline-ledger] Single reset point for the window
+        // ledger: cursors cleared, counters seeded from the tail summary.
+        timeline.reset()
+        timeline.seedCounters(offset = loaded.firstMessageOffset, total = loaded.totalMessages)
         llmDigestLines.clear()
         llmDigestOmitted = 0
-        noteLoadedSortBounds(messages)
+        timeline.noteBounds(messages)
         // [T-android-coldopen-window-parse] agentHistory covers only the
         // newest request-side DB-row budget. Count in DB rows, not UI
         // messages — toChatMessages merges tool-result rows, so the UI list

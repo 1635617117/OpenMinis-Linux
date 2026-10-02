@@ -106,6 +106,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -791,18 +792,17 @@ class ChatViewModel(
     // Database window state. The canonical UI list contains only this loaded
     // window; older rows are fetched on demand instead of retaining the whole
     // session and its parsed LLM representation in memory.
-    internal var loadedMessageOffset = 0
-    internal var loadedMessageTotal = 0
-    internal var unrepresentedLoadedRows = 0
+    //
+    // [T-android-timeline-ledger] Cursors, counters and the operation mutex
+    // live in [TimelineWindow] (single owner — see its KDoc for what the old
+    // scattered-vars shape used to break).
+    internal val timeline = TimelineWindow()
     internal var loadingOlderMessages = false
-    /** [T-tail-attach-lock] Separate from loadingOlderMessages — tail attach must
-     * not block the "load older" pill button. */
-    private var attachingTail = false
+    // Tail-attach scheduling flags. Serialization itself is the ledger's
+    // mutationMutex — these only decide whether a drain is already running
+    // and whether one more pass is owed after it.
     private var tailAttachJob: kotlinx.coroutines.Job? = null
     private var tailAttachQueued = false
-    /** Stable page cursor. Not an offset, not created_at. */
-    internal var loadedOldestSortOrder: Int? = null
-    internal var loadedNewestSortOrder: Int? = null
     internal val llmDigestLines = ArrayDeque<HistoryDigest.Line>()
     internal var llmDigestOmitted = 0
 
@@ -845,26 +845,11 @@ class ChatViewModel(
     internal val _isLoadingHistory = MutableStateFlow(false)
     val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory.asStateFlow()
 
-    internal fun loadedPersistedRowCount(messages: List<ChatMessage> = _messages.value): Int =
-        messages.sumOf { it.sourceDbIds.size } + unrepresentedLoadedRows
-
-    internal fun refreshHasOlderMessages() {
-        val oldest = loadedOldestSortOrder
-        val newest = loadedNewestSortOrder
-        if (oldest == null || newest == null) {
-            _hasOlderMessages.value = false
-            _hasNewerMessages.value = false
-            return
-        }
-        _hasOlderMessages.value = loadedMessageOffset > 0
-        _hasNewerMessages.value = loadedMessageOffset + loadedPersistedRowCount() < loadedMessageTotal
-    }
-
     internal suspend fun refreshHistoryEdges(scheduleTail: Boolean = true) {
-        val oldest = loadedOldestSortOrder
-        val newest = loadedNewestSortOrder
+        val oldest = timeline.oldestSortOrder
+        val newest = timeline.newestSortOrder
         if (oldest == null || newest == null) {
-            loadedMessageOffset = 0
+            timeline.reset()
             _hasOlderMessages.value = false
             _hasNewerMessages.value = false
             return
@@ -881,10 +866,12 @@ class ChatViewModel(
                 endExclusive = newest + 1,
             )
         }
-        loadedMessageOffset = before
-        // Derive the total from DB sequence ranges, never from the number of
-        // painted rows. One ChatMessage can represent several DB rows.
-        loadedMessageTotal = before + loadedDbRows + after
+        // Derive the counters from DB sequence ranges, never from the number
+        // of painted rows. One ChatMessage can represent several DB rows.
+        // [T-android-timeline-ledger] The edge booleans are DB-authoritative:
+        // nothing else in the app may write them (the old offset-based
+        // refreshHasOlderMessages double ledger is gone).
+        timeline.seedCounters(offset = before, total = before + loadedDbRows + after)
         _hasOlderMessages.value = before > 0
         _hasNewerMessages.value = after > 0
         // A newer gap means the painted window is not the session tail.
@@ -901,39 +888,26 @@ class ChatViewModel(
         llmDigestLines.addAll(retained)
     }
 
-    internal fun noteLoadedSortBounds(rows: List<MessageEntity>) {
-        if (rows.isEmpty()) return
-        val oldest = rows.minOf { it.sortOrder }
-        val newest = rows.maxOf { it.sortOrder }
-        loadedOldestSortOrder = minOf(loadedOldestSortOrder ?: oldest, oldest)
-        loadedNewestSortOrder = maxOf(loadedNewestSortOrder ?: newest, newest)
-    }
-
     internal fun notePersistedUiRow(uiMessageId: String?, dbMessageId: String) {
         if (uiMessageId != null) {
-            var attached = false
             _messages.value = _messages.value.map { message ->
                 if (message.id == uiMessageId && dbMessageId !in message.sourceDbIds) {
-                    attached = true
                     message.copy(sourceDbIds = message.sourceDbIds + dbMessageId)
                 } else message
             }
-            if (!attached) unrepresentedLoadedRows++
-        } else {
-            unrepresentedLoadedRows++
         }
         viewModelScope.launch {
             val sort = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                 chatRepository.dao.sortOrderOf(dbMessageId)
             }
-            val newest = loadedNewestSortOrder
+            val newest = timeline.newestSortOrder
             // count == 1 is this row alone. Anything larger is a gap under it.
             // Jumping the cursor over that gap would hide the missing rows.
             val skipped = newest != null && withContext(kotlinx.coroutines.Dispatchers.IO) {
                 chatRepository.dao.countMessagesAfterSort(sessionId, newest) > 1
             }
             if (!skipped && sort != null && (newest == null || sort > newest)) {
-                loadedNewestSortOrder = sort
+                timeline.extendNewest(sort)
             }
             refreshHistoryEdges()
         }
@@ -942,86 +916,106 @@ class ChatViewModel(
     /**
      * Prepend one turn-aligned page. The newer side stays on screen.
      * A live turn sits on that edge, so a database fetch waits until it ends.
+     *
+     * [T-android-timeline-ledger] The whole fetch+splice holds the ledger's
+     * mutation mutex so a concurrent tail-attach drain cannot interleave its
+     * own splice into the same `_messages` publish.
      */
     fun loadOlderMessages() {
         if (loadingOlderMessages || _isStreaming.value) return
-        val before = loadedOldestSortOrder ?: return
+        val before = timeline.oldestSortOrder ?: return
         loadingOlderMessages = true
         _isLoadingHistory.value = true
         viewModelScope.launch {
             try {
-                val start = withContext(Dispatchers.IO) {
-                    olderTurnStart(before, ChatHistoryWindow.TURN_PAGE_SIZE)
-                }
-                // [T-load-older-fallback] Turn-aligned paging targets whole
-                // user turns. When the remaining history before the window has
-                // fewer than TURN_PAGE_SIZE user turns (or none at all),
-                // olderTurnStart returns null even though countMessagesBeforeSort
-                // still reports rows — mostly assistant-only trailing messages.
-                // Without a fallback, the pill stays lit but every click just
-                // calls refreshHistoryEdges and returns: visible button, zero
-                // effect. Fall back to a non-turn-aligned load of all remaining
-                // rows instead of freezing at the boundary.
-                val loadStart = if (start != null && start < before) {
-                    start
-                } else {
-                    // Turn alignment failed. Load everything from session start
-                    // to the current window boundary.
-                    val remaining = withContext(Dispatchers.IO) {
-                        chatRepository.dao.countMessagesBeforeSort(sessionId, before)
+                timeline.mutationMutex.withLock {
+                    val start = withContext(Dispatchers.IO) {
+                        olderTurnStart(before, ChatHistoryWindow.TURN_PAGE_SIZE)
                     }
-                    if (remaining <= 0) {
-                        refreshHistoryEdges()
-                        return@launch
-                    }
-                    // Walk back to the very first message that still exists.
-                    // Using sort_order 0 isn't safe after compact, so probe.
-                    var fallback: Int? = null
-                    var probeCursor = before
-                    while (true) {
-                        val anchors = withContext(Dispatchers.IO) {
-                            chatRepository.dao.loadOlderSortAnchors(sessionId, probeCursor, 200)
+                    // [T-load-older-fallback] Turn-aligned paging targets whole
+                    // user turns. When the remaining history before the window has
+                    // fewer than TURN_PAGE_SIZE user turns (or none at all),
+                    // olderTurnStart returns null even though countMessagesBeforeSort
+                    // still reports rows — mostly assistant-only trailing messages.
+                    // Without a fallback, the pill stays lit but every click just
+                    // calls refreshHistoryEdges and returns: visible button, zero
+                    // effect. Fall back to a non-turn-aligned load of all remaining
+                    // rows instead of freezing at the boundary.
+                    val loadStart = if (start != null && start < before) {
+                        start
+                    } else {
+                        // Turn alignment failed. Load everything from session start
+                        // to the current window boundary.
+                        val remaining = withContext(Dispatchers.IO) {
+                            chatRepository.dao.countMessagesBeforeSort(sessionId, before)
                         }
-                        if (anchors.isEmpty()) break
-                        fallback = anchors.last().sortOrder
-                        if (anchors.size < 200) break
-                        if (anchors.last().sortOrder >= probeCursor) break
-                        probeCursor = anchors.last().sortOrder
+                        if (remaining <= 0) {
+                            refreshHistoryEdges(scheduleTail = false)
+                            return@withLock
+                        }
+                        // Walk back to the very first message that still exists.
+                        // Using sort_order 0 isn't safe after compact, so probe.
+                        var fallback: Int? = null
+                        var probeCursor = before
+                        while (true) {
+                            val anchors = withContext(Dispatchers.IO) {
+                                chatRepository.dao.loadOlderSortAnchors(sessionId, probeCursor, 200)
+                            }
+                            if (anchors.isEmpty()) break
+                            fallback = anchors.last().sortOrder
+                            if (anchors.size < 200) break
+                            if (anchors.last().sortOrder >= probeCursor) break
+                            probeCursor = anchors.last().sortOrder
+                        }
+                        fallback
                     }
-                    fallback
-                }
-                if (loadStart == null || loadStart >= before) {
-                    // Fallback exhausted every probe but countMessagesBeforeSort
-                    // still saw rows — this is a data-path contradiction that
-                    // would keep the pill lit and every subsequent click a no-op.
-                    // Force the pill off so the user is not stuck in a dead loop.
-                    if (loadStart == null) {
-                        _hasOlderMessages.value = false
+                    if (loadStart == null || loadStart >= before) {
+                        // Fallback exhausted every probe but the earlier count
+                        // still saw rows. That contradiction almost always means
+                        // rows were DELETED mid-flight (truncate/retry renumbers
+                        // the tail); the old code hard-fused
+                        // `_hasOlderMessages=false` here, permanently hiding the
+                        // pill even when the DB still had older rows — the
+                        // "部分消息从会话页消失" bug. The DB recount inside
+                        // refreshHistoryEdges is the only authority on the edge.
+                        refreshHistoryEdges(scheduleTail = false)
+                        return@withLock
                     }
-                    refreshHistoryEdges()
-                    return@launch
-                }
-                val rows = withContext(Dispatchers.IO) {
-                    chatRepository.hydrateDisplayRows(
-                        loadSortRange(SortRange(loadStart, before)),
-                    )
-                }
-                if (rows.isNotEmpty()) {
-                    val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
-                    val older = rows.toChatMessages().filter { message ->
-                        message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
+                    val rows = withContext(Dispatchers.IO) {
+                        chatRepository.hydrateDisplayRows(
+                            loadSortRange(SortRange(loadStart, before)),
+                        )
                     }
-                    _messages.value = older + _messages.value
-                    noteLoadedSortBounds(rows)
+                    if (rows.isNotEmpty()) {
+                        val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                        val older = rows.toChatMessages()
+                        val fresh = older.filter { message ->
+                            message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
+                        }
+                        if (fresh.size < older.size) {
+                            // Rows in this page are already painted — the cursor
+                            // should have excluded them. Never eat them silently:
+                            // log loudly so a double-splice shows up in the trace.
+                            AppLogger.warning(
+                                TAG,
+                                "loadOlder: page [$loadStart,$before) returned ${older.size} rows, " +
+                                    "${older.size - fresh.size} already painted (cursor=${timeline.oldestSortOrder})",
+                            )
+                        }
+                        if (fresh.isNotEmpty()) {
+                            _messages.value = fresh + _messages.value
+                        }
+                        timeline.noteBounds(rows)
+                    }
+                    // [T-load-older-no-tail-attach] 不在这里 scheduleTail：
+                    // 用户刚点“加载更早”正在向上读历史，此时立刻触发
+                    // ensureSessionTailLoaded 追加尾部 chunk 会连续两次突变
+                    // _messages，LazyColumn 锚点被打掉 → 跳屏 + 一段记录
+                    // 被悄悄加载。尾部 gap 由 isStreaming 翻转收集器与
+                    // ensureSessionTailLoaded 的 queue 机制兜底，不需要
+                    // 借翻历史的动作来抢跑。
+                    refreshHistoryEdges(scheduleTail = false)
                 }
-                // [T-load-older-no-tail-attach] 不在这里 scheduleTail：
-                // 用户刚点“加载更早”正在向上读历史，此时立刻触发
-                // ensureSessionTailLoaded 追加尾部 chunk 会连续两次突变
-                // _messages，LazyColumn 锚点被打掉 → 跳屏 + 一段记录
-                // 被悄悄加载。尾部 gap 由 isStreaming 翻转收集器与
-                // ensureSessionTailLoaded 的 queue 机制兜底，不需要
-                // 借翻历史的动作来抢跑。
-                refreshHistoryEdges(scheduleTail = false)
             } finally {
                 loadingOlderMessages = false
                 _isLoadingHistory.value = false
@@ -1031,36 +1025,34 @@ class ChatViewModel(
 
     /**
      * The painted window must include the session tail. If rows exist after
-     * [loadedNewestSortOrder], append them. A click that only loads five turns
+     * the newest cursor, append them. A click that only loads five turns
      * is what left the newer transcript off screen.
      */
     fun ensureSessionTailLoaded() {
         if (sessionId.isEmpty()) return
-        if (_isStreaming.value || attachingTail || tailAttachJob?.isActive == true) {
+        if (_isStreaming.value || tailAttachJob?.isActive == true) {
             tailAttachQueued = true
             return
         }
         tailAttachQueued = false
         tailAttachJob = viewModelScope.launch {
-            attachingTail = true
             _isLoadingHistory.value = true
             try {
                 var idlePasses = 0
                 while (!_isStreaming.value && idlePasses < 3) {
-                    val before = loadedNewestSortOrder
+                    val before = timeline.newestSortOrder
                     drainMissingTail()
                     refreshHistoryEdges(scheduleTail = false)
                     val again = tailAttachQueued || _hasNewerMessages.value
                     tailAttachQueued = false
                     if (!again) break
-                    if (loadedNewestSortOrder == before) idlePasses++ else idlePasses = 0
+                    if (timeline.newestSortOrder == before) idlePasses++ else idlePasses = 0
                 }
             } finally {
                 val restart = tailAttachQueued && !_isStreaming.value
-                attachingTail = false
-                _isLoadingHistory.value = false
                 tailAttachJob = null
                 tailAttachQueued = false
+                _isLoadingHistory.value = false
                 if (restart) ensureSessionTailLoaded()
             }
         }
@@ -1073,7 +1065,7 @@ class ChatViewModel(
                 chatRepository.dao.nextSortOrder(sessionId)
             }
             val missing = ChatHistoryWindow.missingTailRange(
-                loadedNewestSortOrder,
+                timeline.newestSortOrder,
                 endExclusive,
             ) ?: return
             val chunkEnd = minOf(
@@ -1081,37 +1073,65 @@ class ChatViewModel(
                 missing.startInclusive.toLong() + ChatHistoryWindow.TAIL_ATTACH_CHUNK.toLong(),
             ).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             if (chunkEnd <= missing.startInclusive) return
-            val rows = withContext(Dispatchers.IO) {
-                chatRepository.hydrateDisplayRows(
-                    loadSortRange(SortRange(missing.startInclusive, chunkEnd)),
-                )
-            }
-            if (rows.isEmpty()) {
-                loadedNewestSortOrder = chunkEnd - 1
-                chunks++
-                continue
-            }
-            val missingMessages = rows.toChatMessages()
-            val current = _messages.value
-            val insertAt = ChatHistoryWindow.missingTailInsertIndex(
-                currentSourceIds = current.map { it.sourceDbIds },
-                missingSourceIds = missingMessages.map { it.sourceDbIds },
-            )
-            val present = current.flatMapTo(mutableSetOf()) { it.sourceDbIds }
-            val fresh = missingMessages.filter { message ->
-                message.sourceDbIds.none(present::contains)
-            }
-            if (fresh.isNotEmpty()) {
-                _messages.value = if (insertAt < 0) {
-                    current + fresh
-                } else {
-                    current.take(insertAt) + fresh + current.drop(insertAt)
+            // One chunk = one critical section: fetch + splice + cursor under
+            // the same lock so a concurrent load-older page cannot splice in
+            // between (that race produced duplicated and reordered rows).
+            timeline.mutationMutex.withLock {
+                val rows = withContext(Dispatchers.IO) {
+                    chatRepository.hydrateDisplayRows(
+                        loadSortRange(SortRange(missing.startInclusive, chunkEnd)),
+                    )
                 }
-            }
-            val previous = loadedNewestSortOrder
-            noteLoadedSortBounds(rows)
-            if (loadedNewestSortOrder == previous) {
-                loadedNewestSortOrder = maxOf(previous ?: chunkEnd - 1, chunkEnd - 1)
+                if (rows.isEmpty()) {
+                    // [T-android-timeline-ledger] A hydrate can legitimately
+                    // return nothing (body-store admission pressure) while the
+                    // DB still HAS rows in this range. The old code pushed the
+                    // cursor past the gap on empty rows — silently consuming
+                    // rows that were never painted. Verify against the DB:
+                    // consume only a genuinely empty range; otherwise leave
+                    // the cursor alone and stop this pass (a later attach
+                    // retries instead of spinning).
+                    val dbCount = withContext(Dispatchers.IO) {
+                        chatRepository.dao.countMessagesInSortRange(
+                            sessionId,
+                            missing.startInclusive,
+                            chunkEnd,
+                        )
+                    }
+                    if (dbCount > 0) {
+                        AppLogger.warning(
+                            TAG,
+                            "tail drain: range [${missing.startInclusive},$chunkEnd) has $dbCount rows " +
+                                "but hydrate returned none — leaving gap unconsumed",
+                        )
+                        return
+                    }
+                    timeline.forceNewestAtLeast(chunkEnd - 1)
+                    chunks++
+                    return@withLock
+                }
+                val missingMessages = rows.toChatMessages()
+                val current = _messages.value
+                val present = current.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                val freshStart = missingMessages.indexOfFirst { message ->
+                    message.sourceDbIds.none(present::contains)
+                }
+                if (freshStart >= 0) {
+                    val fresh = missingMessages.filter { message ->
+                        message.sourceDbIds.none(present::contains)
+                    }
+                    val insertAt = ChatHistoryWindow.missingTailInsertIndex(
+                        currentSourceIds = current.map { it.sourceDbIds },
+                        chunkSourceIds = missingMessages.map { it.sourceDbIds },
+                        freshStartIndex = freshStart,
+                    )
+                    _messages.value = if (insertAt < 0) {
+                        current + fresh
+                    } else {
+                        current.take(insertAt) + fresh + current.drop(insertAt)
+                    }
+                }
+                timeline.noteBounds(rows)
             }
             chunks++
         }
