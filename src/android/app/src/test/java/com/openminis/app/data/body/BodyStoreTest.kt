@@ -20,8 +20,11 @@ class BodyStoreTest {
         assertTrue(put.error, put.ok)
         assertEquals(payload.toList(), store.read(put.ref!!, payload.size)!!.toList())
         val kept = File(root, put.ref!!)
-        File(root, "deadbeef.tmp").writeText("partial")
-        BodyStore(root).discardTemps()
+        val orphan = File(root, "deadbeef.tmp").apply { writeText("partial") }
+        BodyStore(root).discardTemps(
+            maxAgeMillis = 0,
+            nowMillis = orphan.lastModified() + 1,
+        )
         assertFalse(File(root, "deadbeef.tmp").exists())
         assertTrue(kept.isFile)
         assertNull(store.read("../secrets"))
@@ -46,7 +49,10 @@ class BodyStoreTest {
         val root = tempRoot()
         val recent = File(root, "recent.tmp").apply { writeText("in flight") }
         val old = File(root, "old.tmp").apply { writeText("orphan") }
-        BodyStore(root).discardTemps(maxAgeMillis = 1_000, nowMillis = old.lastModified() + 2_000)
+        val now = old.lastModified() + 2_000
+        recent.setLastModified(now - 500)
+        old.setLastModified(now - 2_000)
+        BodyStore(root).discardTemps(maxAgeMillis = 1_000, nowMillis = now)
         assertTrue(recent.exists())
         assertFalse(old.exists())
         root.deleteRecursively()

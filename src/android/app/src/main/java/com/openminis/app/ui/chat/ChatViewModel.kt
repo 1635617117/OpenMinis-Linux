@@ -129,6 +129,12 @@ class ChatViewModel(
     val mcpRepository: com.openminis.app.data.repository.MCPRepository? = null,
 ) : ViewModel(), com.openminis.app.session.ChatSessionPort {
 
+    /** Whether this is a draft session (not yet persisted to DB). */
+    internal val isDraft: Boolean = sessionId.startsWith("__new__")
+
+    /** The real session ID, populated on first message for drafts. */
+    internal var realSessionId: String = if (isDraft) "" else sessionId
+
     /** Daily logs and session GLOBAL.md live in this chat's workspace. */
     internal fun sessionMemoryRepo(): MemoryRepository {
         val sid = com.openminis.app.sandbox.ExecutionCoordinator.ownerSessionId(
@@ -3391,9 +3397,6 @@ class ChatViewModel(
     // for `__new__…` keys), the function returns early, and no model name /
     // group name is ever set on the draft chat — exactly the bug T203 was
     // chasing through the wrong layer.
-    /** Whether this is a draft session (not yet persisted to DB). */
-    internal val isDraft: Boolean = sessionId.startsWith("__new__")
-
     /** Model group ID from long-press FAB, encoded in the draft session ID.
      *  substringBefore strips the folder marker in case both are present. */
     internal val initialGroupId: String? =
@@ -3407,9 +3410,6 @@ class ChatViewModel(
     internal val initialFolderId: String? =
         sessionId.substringAfter("__fld__", "").substringBefore("__grp__")
             .takeIf { it.isNotEmpty() }
-
-    /** The real session ID (same as sessionId for existing sessions, generated on first message for drafts). */
-    internal var realSessionId: String = if (isDraft) "" else sessionId
 
     private var unsubscribeSafeMode: (() -> Unit)? = null
     private var preserveShellOnClear = false

@@ -318,10 +318,23 @@ internal fun mergeStreamingOverlay(
     if (streaming.isEmpty()) return messages
     return messages.map { m ->
         val delta = streaming[m.id] ?: return@map m
+        // Streaming text is authoritative even when the canonical snapshot
+        // still carries the previous tool/text block list. Without updating
+        // that trailing text block, buildFlatChatItems renders stale content
+        // for assistant turns that already contain process blocks.
+        val sourceBlocks = if (delta.toolBlocks.isNotEmpty()) delta.toolBlocks else m.toolBlocks
+        val textIndex = sourceBlocks.indexOfLast { it.kind == "text" }
+        val blocks = if (textIndex >= 0 && sourceBlocks[textIndex].content != delta.content) {
+            sourceBlocks.toMutableList().also { list ->
+                list[textIndex] = list[textIndex].copy(content = delta.content)
+            }
+        } else {
+            sourceBlocks
+        }
         m.copy(
             content = delta.content,
             isStreaming = true,
-            toolBlocks = delta.toolBlocks,
+            toolBlocks = blocks,
             isAwaitingModelResponse = delta.isAwaitingModelResponse,
         )
     }

@@ -15,8 +15,14 @@ object ResourceLimits {
     const val MAX_DECLARED_UNCOMPRESSED = 8 * 1024 * 1024
     /** One session load may materialize at most this many preview bytes. */
     const val SESSION_PREVIEW_BUDGET = 1024 * 1024
-    /** Process-wide budget for concurrent untrusted expansions. */
-    const val ADMIT_BUDGET_BYTES = 8L * 1024L * 1024L
+    /**
+     * Process-wide budget for concurrent untrusted expansions. A full-size
+     * BodyStore read holds the returned prefix and one bounded I/O chunk at
+     * the same time, so the budget must cover both without rejecting a body
+     * that is otherwise within MAX_DECLARED_UNCOMPRESSED.
+     */
+    const val ADMIT_BUDGET_BYTES =
+        MAX_DECLARED_UNCOMPRESSED.toLong() + 64L * 1024L
     const val SUBSTR_CHUNK_CHARS = 65536
     const val HEALTHY_TICK_MS = 60_000L
     /**

@@ -68,13 +68,15 @@ class ChatTimelineVisibilityRegressionTest {
 
         assertEquals(target.key, afterPrepend.first { it is FlatChatItem.UserBubble && it.message.id == "user-40" }.key)
         assertEquals(target.key, afterAppend.first { it is FlatChatItem.UserBubble && it.message.id == "user-40" }.key)
-        assertEquals(before.size + 2, afterAppend.size)
+        // A new assistant turn contributes its header and markdown row in
+        // addition to the new user bubble.
+        assertEquals(before.size + 3, afterAppend.size)
     }
 
     @Test
     fun streamingOverlayChangesContentWithoutDroppingMiddleMessage() {
         val base = session(100)
-        val middle = base[80] // assistant-40
+        val middle = base[81] // assistant-40
         val delta = StreamingDelta(
             content = "streamed-middle",
             toolBlocks = middle.toolBlocks,

@@ -11,7 +11,7 @@ class BrowserCookieCodecTest {
     @Test
     fun sameSiteNoneForcesSecureAndUsesCookieHost() {
         val encoded = BrowserCookieCodec.encode(
-            "https://example.com/login",
+            "https://accounts.google.com/login",
             mapOf(
                 "name" to "SID",
                 "value" to "abc",
