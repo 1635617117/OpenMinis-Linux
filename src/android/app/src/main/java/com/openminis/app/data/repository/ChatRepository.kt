@@ -164,9 +164,15 @@ class ChatRepository(
         fromNewest: Boolean,
     ): SessionTail {
         if (startInclusive >= endExclusive) return SessionTail(emptyList(), totalMessages, startInclusive)
-        if (!com.openminis.app.data.body.Admission.tryAdmit(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())) {
-            return SessionTail(emptyList(), totalMessages, if (fromNewest) endExclusive else startInclusive)
-        }
+        // Admission is a process-wide concurrency hint, not a statement that the
+        // database range is empty. Treating a temporary denial as an empty result
+        // made loadSession clear both history edges and permanently strand the
+        // middle of long conversations. Keep the local per-row budget below, and
+        // continue with this bounded query even when another preview owns the
+        // reservation; this preserves a real cursor that the UI can page from.
+        val admitted = com.openminis.app.data.body.Admission.tryAdmit(
+            ResourceLimits.SESSION_PREVIEW_BUDGET.toLong(),
+        )
         try {
             val rows = ArrayList<com.openminis.app.data.db.MessageEntity>()
             var previewBytes = 0L
@@ -241,7 +247,9 @@ class ChatRepository(
             }
             return SessionTail(rows, totalMessages, startInclusive)
         } finally {
-            com.openminis.app.data.body.Admission.release(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())
+            if (admitted) {
+                com.openminis.app.data.body.Admission.release(ResourceLimits.SESSION_PREVIEW_BUDGET.toLong())
+            }
         }
     }
 
@@ -295,6 +303,39 @@ class ChatRepository(
 
     suspend fun loadMessagesTail(sessionId: String, limit: Int): List<com.openminis.app.data.db.MessageEntity> =
         loadSessionTail(sessionId, limit = limit).messages
+
+    /**
+     * Request-side transcript rows. Unlike [loadSessionTail], this bypasses the
+     * SAFE_MESSAGE_FROM projection and never applies DisplayParts.shrink: the
+     * model must receive the persisted body, while the UI may receive a compact
+     * rendering projection of the same row.
+     */
+    suspend fun loadRequestHistory(
+        sessionId: String,
+        limit: Int,
+    ): List<com.openminis.app.data.db.MessageEntity> {
+        val total = dao.messageCountForSession(sessionId)
+        if (total <= 0) return emptyList()
+        val start = (total - limit).coerceAtLeast(0)
+        val pageSize = 50
+        val store = filesDir?.let { BodyStore(File(it, "bodies")) }
+        val rows = ArrayList<com.openminis.app.data.db.MessageEntity>(limit.coerceAtMost(total))
+        var offset = start
+        while (offset < total && rows.size < limit) {
+            val page = dao.loadMessagesTailRaw(
+                sessionId,
+                minOf(pageSize, limit - rows.size),
+                offset,
+            )
+            if (page.isEmpty()) break
+            for (row in page) {
+                val raw = if (row.bodyRef.isNullOrBlank()) null else readDisplayBody(row, store)
+                rows.add(if (raw.isNullOrBlank() || raw == row.partsJson) row else row.copy(partsJson = raw))
+            }
+            offset += page.size
+        }
+        return rows
+    }
 
     /**
      * [T-android-huge-session-load-oom] Bounded heads for title generation,
@@ -1225,8 +1266,12 @@ class ChatRepository(
     companion object {
         private const val TAG = "ChatRepository"
 
-        /** Hard cap on how many messages [ChatRepository.loadSessionTail] returns in one call. */
-        internal const val MAX_TAIL_MESSAGES = 400
+        /**
+         * Upper bound for one authoritative context hydrate. The UI remains
+         * tail-windowed, but model context must be able to recover history
+         * beyond the old 400-row cache when a long session is reopened.
+         */
+        internal const val MAX_TAIL_MESSAGES = 4_000
 
         // Session-list preview only needs ~100 chars. Regex.replace on a
         // 500 KB parts_json body was a leftover ICU Matcher.reset path.

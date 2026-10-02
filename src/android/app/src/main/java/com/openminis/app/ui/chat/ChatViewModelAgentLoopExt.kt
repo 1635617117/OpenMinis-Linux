@@ -47,6 +47,14 @@ internal suspend fun ChatViewModel.runAgentLoop(
     /** [T-android-instant-thinking] send 路径已预插占位气泡，复用其 id。 */
     overrideAssistantId: String? = null,
 ) {
+    // Room is the transcript authority. Rebuild immediately before the first
+    // request so UI paging, cold-open tail limits, and the resident hot-cache
+    // cannot hide older user instructions from the model. The current user row
+    // is already persisted by sendMessage; this also restores raw BodyStore
+    // bodies instead of the display projection.
+    withContext(Dispatchers.IO) {
+        rebuildAgentHistoryFromDatabase(activeSessionId)
+    }
     AppLogger.info(ChatViewModel.TAG_STREAM, "runAgentLoop ENTER provider=${provider.javaClass.simpleName} historySize=${agentHistory.size}")
     // [T-generation-run] 每轮生成落账：崩溃后可定位半截流归属哪个会话/模型。
     // 成功时 finish(DONE)；失败路径不落 FINISH，留 RUNNING 由

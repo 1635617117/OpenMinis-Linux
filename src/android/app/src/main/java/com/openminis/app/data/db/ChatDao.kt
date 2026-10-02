@@ -356,6 +356,19 @@ interface ChatDao {
     """)
     suspend fun loadMessagesTail(sessionId: String, limit: Int, offset: Int): List<MessageEntity>
 
+    /** Full request-side body projection. Callers must page and hydrate boundedly. */
+    @Query("""
+        SELECT id, session_id, role, parts_json, created_at, token_usage, sort_order,
+               reasoning_content, stream_interrupt_count, updated_at, error_info,
+               model_id, model_display_name, provider_type, provider_instance_id,
+               body_bytes, body_ref, body_sha, preview
+        FROM messages
+        WHERE session_id = :sessionId
+        ORDER BY sort_order ASC
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun loadMessagesTailRaw(sessionId: String, limit: Int, offset: Int): List<MessageEntity>
+
     @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order ASC LIMIT 200")
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>>
 
@@ -378,6 +391,9 @@ interface ChatDao {
 
     @Query("SELECT COALESCE(MAX(sort_order), -1) + 1 FROM messages WHERE session_id = :sessionId")
     suspend fun nextSortOrder(sessionId: String): Int
+
+    @Query("SELECT sort_order FROM messages WHERE session_id = :sessionId")
+    suspend fun sortOrders(sessionId: String): List<Int>
 
     @Query("DELETE FROM messages WHERE session_id = :sessionId")
     suspend fun deleteMessages(sessionId: String)

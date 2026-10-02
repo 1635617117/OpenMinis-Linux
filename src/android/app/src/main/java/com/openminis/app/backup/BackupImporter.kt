@@ -429,6 +429,23 @@ class BackupImporter(
         // from a few genuinely dangling rows.
         var orphanedMessages = 0
         val orphanSessionIds = mutableSetOf<String>()
+        // Old exports may omit sortOrder or contain the legacy default 0 for
+        // every row. Allocate a unique monotonic cursor per session while
+        // importing so later keyset/range paging cannot loop over the same
+        // sort_order and strand the middle of the transcript.
+        val nextSortBySession = mutableMapOf<String, Int>()
+        val usedSortBySession = mutableMapOf<String, MutableSet<Int>>()
+        fun importedSortOrder(sessionId: String, raw: Int?): Int {
+            val used = usedSortBySession.getOrPut(sessionId) {
+                dao.sortOrders(sessionId).toMutableSet()
+            }
+            var next = nextSortBySession[sessionId] ?: ((used.maxOrNull() ?: -1) + 1)
+            val candidate = raw?.takeIf { it >= 0 && it !in used } ?: next
+            var assigned = candidate
+            while (!used.add(assigned)) assigned = (assigned + 1).coerceAtMost(Int.MAX_VALUE)
+            nextSortBySession[sessionId] = (assigned + 1).coerceAtMost(Int.MAX_VALUE)
+            return assigned
+        }
         readJsonl(dataDir, "messages") { rec ->
             // Every 200 records, not every one: at ~50k messages a per-record
             // StateFlow emit would post more frames than the UI can draw and
@@ -466,7 +483,7 @@ class BackupImporter(
                     partsJson = (m["parts"]?.toString()) ?: "[]",
                     createdAt = createdAt,
                     tokenUsage = m["tokenUsage"]?.takeIf { it.toString() != "null" }?.toString(),
-                    sortOrder = m.int("sortOrder") ?: 0,
+                    sortOrder = importedSortOrder(sessionId, m.int("sortOrder")),
                     reasoningContent = m.str("reasoningContent"),
                     streamInterruptCount = m.int("streamInterruptCount") ?: 0,
                     updatedAt = createdAt,

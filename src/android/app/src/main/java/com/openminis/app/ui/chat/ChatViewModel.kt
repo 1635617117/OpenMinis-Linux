@@ -654,9 +654,14 @@ class ChatViewModel(
         // [T-android-stream-flush-dualpath] Newline fast-path thresholds (iOS parity).
         private const val NEWLINE_FLUSH_MIN_CHARS = 50
         private const val NEWLINE_FLUSH_MAX_LEN = 5_000
-        /** Initial parsed DB-row budget for the request-side LLM history. */
-        const val INITIAL_LLM_HISTORY_ROW_CAP: Int = 200
-        internal const val MAX_AGENT_HISTORY_MESSAGES: Int = 400
+        /**
+         * DB rows parsed for request history on cold open. This is deliberately
+         * larger than the UI tail: the database is the transcript authority and
+         * scrolling the UI must never decide what the agent remembers.
+         */
+        const val INITIAL_LLM_HISTORY_ROW_CAP: Int = 4_000
+        /** Hot cache ceiling; the request assembler may still reduce by byte/context budget. */
+        internal const val MAX_AGENT_HISTORY_MESSAGES: Int = 4_000
         // T258: tool block statuses with no committed tool_result. retryLast()
         // drops blocks in any of these states because they would orphan the
         // assistant tool_use entry on retry (the API rejects unmatched
@@ -1013,14 +1018,26 @@ class ChatViewModel(
                     refreshHistoryEdges(scheduleTail = false)
                     return@withLock
                 }
-                val rows = withContext(Dispatchers.IO) {
+                val pageRows = withContext(Dispatchers.IO) {
                     chatRepository.hydrateDisplayRows(
-                        loadSortRange(SortRange(loadStart, before)),
+                        loadSortRange(
+                            SortRange(
+                                loadStart,
+                                if (before == Int.MAX_VALUE) before else before + 1,
+                            ),
+                        ),
                     )
                 }
+                val rows = pageRows
                 if (rows.isNotEmpty()) {
-                    val known = _messages.value.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                    val current = _messages.value
+                    val known = current.flatMapTo(mutableSetOf()) { it.sourceDbIds }
                     val older = rows.toChatMessages()
+                    val updated = current.map { message ->
+                        older.firstOrNull { incoming ->
+                            incoming.sourceDbIds.any(message.sourceDbIds::contains)
+                        } ?: message
+                    }
                     val fresh = older.filter { message ->
                         message.sourceDbIds.isEmpty() || message.sourceDbIds.none(known::contains)
                     }
@@ -1034,8 +1051,8 @@ class ChatViewModel(
                                 "${older.size - fresh.size} already painted (cursor=${timeline.oldestSortOrder})",
                         )
                     }
-                    if (fresh.isNotEmpty()) {
-                        _messages.value = fresh + _messages.value
+                    if (fresh.isNotEmpty() || updated != current) {
+                        _messages.value = fresh + updated
                         added = true
                     }
                     timeline.noteBounds(rows)
@@ -1112,7 +1129,16 @@ class ChatViewModel(
             timeline.mutationMutex.withLock {
                 val rows = withContext(Dispatchers.IO) {
                     chatRepository.hydrateDisplayRows(
-                        loadSortRange(SortRange(missing.startInclusive, chunkEnd)),
+                        // Include the already-painted boundary row so a
+                        // toolUse immediately before this chunk can be paired
+                        // with its toolResult inside toChatMessages(). The
+                        // overlap is removed by sourceDbIds below.
+                        loadSortRange(
+                            SortRange(
+                                if (missing.startInclusive > Int.MIN_VALUE) missing.startInclusive - 1 else missing.startInclusive,
+                                chunkEnd,
+                            ),
+                        ),
                     )
                 }
                 if (rows.isEmpty()) {
@@ -1146,6 +1172,16 @@ class ChatViewModel(
                 val missingMessages = rows.toChatMessages()
                 val current = _messages.value
                 val present = current.flatMapTo(mutableSetOf()) { it.sourceDbIds }
+                // The first row may be an overlap from the already-painted
+                // window. Replace that existing bubble as well: this is what
+                // makes a toolResult that arrived in the next chunk update the
+                // previously painted toolUse card instead of being silently
+                // discarded as a duplicate.
+                val updated = current.map { message ->
+                    missingMessages.firstOrNull { incoming ->
+                        incoming.sourceDbIds.any(message.sourceDbIds::contains)
+                    } ?: message
+                }
                 val freshStart = missingMessages.indexOfFirst { message ->
                     message.sourceDbIds.none(present::contains)
                 }
@@ -1159,10 +1195,12 @@ class ChatViewModel(
                         freshStartIndex = freshStart,
                     )
                     _messages.value = if (insertAt < 0) {
-                        current + fresh
+                        updated + fresh
                     } else {
-                        current.take(insertAt) + fresh + current.drop(insertAt)
+                        updated.take(insertAt) + fresh + updated.drop(insertAt)
                     }
+                } else if (updated != current) {
+                    _messages.value = updated
                 }
                 timeline.noteBounds(rows)
             }
@@ -5267,28 +5305,38 @@ class ChatViewModel(
         }
     }
 
-    internal fun List<MessageEntity>.toChatMessages(): List<ChatMessage> {
-        // First pass: extract all toolResult data keyed by toolUseId
-        val toolResultMap = mutableMapOf<String, ToolResultData>()
-        for (entity in this) {
+    private fun buildToolResultMap(entities: List<MessageEntity>): Map<String, ToolResultData> {
+        val result = mutableMapOf<String, ToolResultData>()
+        for (entity in entities) {
             if (entity.role != "user") continue
-            try {
+            runCatching {
                 val array = org.json.JSONArray(entity.partsJson)
                 for (i in 0 until array.length()) {
                     val obj = array.getJSONObject(i)
-                    if (obj.optString("type") == "toolResult") {
-                        val value = obj.getJSONObject("value")
-                        val toolUseId = value.optString("toolUseId", "")
-                        if (toolUseId.isNotEmpty()) {
-                            toolResultMap[toolUseId] = ToolResultData(
-                                output = value.optString("output", ""),
-                                success = value.optBoolean("success", true),
-                            )
-                        }
+                    if (obj.optString("type") != "toolResult") continue
+                    val value = obj.getJSONObject("value")
+                    val toolUseId = value.optString("toolUseId", "")
+                    if (toolUseId.isNotEmpty()) {
+                        result[toolUseId] = ToolResultData(
+                            output = value.optString("output", ""),
+                            success = value.optBoolean("success", true),
+                        )
                     }
                 }
-            } catch (_: Exception) { /* skip malformed */ }
+            }
         }
+        return result
+    }
+
+    internal fun List<MessageEntity>.toChatMessages(
+        toolResultContext: List<MessageEntity> = emptyList(),
+    ): List<ChatMessage> {
+        // Build the result index from this page plus a small boundary context,
+        // but convert UI rows from this page only. A toolUse and its toolResult
+        // commonly land on opposite sides of a page boundary; decoding the
+        // context without emitting it prevents the middle row from being
+        // filtered or merged away.
+        val toolResultMap = buildToolResultMap(this + toolResultContext)
 
         // Second pass: convert messages, merging tool results into blocks
         // Filter out user messages that only contain toolResult parts (no visible text)
@@ -5587,12 +5635,14 @@ class ChatViewModel(
         }
     }
 
-    internal suspend fun awaitBoundedHistoryRebuild(
-        sid: String,
-    ): List<com.openminis.app.data.db.MessageEntity> {
-        val tail = chatRepository.hydrateDisplayRows(
-            chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES),
-        )
+    /**
+     * Rebuild the request-side history from Room immediately before a new send.
+     * The UI is intentionally paged, so `_messages` and the resident cache are
+     * not authoritative for model memory. This also repairs a ViewModel that was
+     * reopened on the tail and never had its older UI pages loaded.
+     */
+    internal suspend fun rebuildAgentHistoryFromDatabase(sid: String) {
+        val tail = chatRepository.loadRequestHistory(sid, MAX_AGENT_HISTORY_MESSAGES)
         val parsed = tail.map { it.toLLMMessage() }
         agentHistory.clear()
         toolLoopDetector.reset()
@@ -5600,7 +5650,15 @@ class ChatViewModel(
         llmHistoryStartOffset = (
             chatRepository.dao.messageCountForSession(sid) - tail.size
         ).coerceAtLeast(0)
-        return tail
+    }
+
+    internal suspend fun awaitBoundedHistoryRebuild(
+        sid: String,
+    ): List<com.openminis.app.data.db.MessageEntity> {
+        rebuildAgentHistoryFromDatabase(sid)
+        return chatRepository.hydrateDisplayRows(
+            chatRepository.loadMessagesTail(sid, MAX_AGENT_HISTORY_MESSAGES),
+        )
     }
 
 
