@@ -153,3 +153,7 @@ deps/lame-3.100/**/.deps/
 src/android/app/libs/rclone.aar
 
 src/android/mirrors.local.properties
+
+# Python bytecode (scripts/*.py)
+__pycache__/
+*.pyc
