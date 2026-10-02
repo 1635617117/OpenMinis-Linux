@@ -20,8 +20,6 @@ import com.openminis.app.sandbox.SessionWorkspace
 import com.openminis.app.sandbox.WorkspaceMover
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -31,14 +29,6 @@ class ChatRepository(
     internal val goalDao: GoalDao,
     private val filesDir: File? = null,
 ) {
-    /**
-     * `MAX(sort_order) + 1` is only safe when allocation and insertion are
-     * one serialized critical section. A concurrent tool/result writer could
-     * otherwise receive the same cursor and make range paging ambiguous.
-     * The lock is process-local; all normal app writes share this repository.
-     */
-    private val messageAppendMutex = Mutex()
-
     fun observeSessions(): Flow<List<ChatSessionEntity>> = dao.observeSessions()
 
     suspend fun createSession(
@@ -781,13 +771,12 @@ class ChatRepository(
      * target tool_use. Mirrors iOS ChatStore.updateMessageParts.
      */
     suspend fun updateMessageParts(id: String, partsJson: String) {
-        val meta = dao.bodyMeta(id)
-        if (meta != null && meta.bodyBytes > ResourceLimits.INLINE_BODY_BYTES &&
-            meta.bodyRef == null && partsJson.length < meta.bodyBytes
-        ) {
-            return
+        val meta = dao.bodyMeta(id) ?: return
+        val stored = storeBody(partsJson, requireOffload = partsJson.toByteArray(Charsets.UTF_8).size > ResourceLimits.INLINE_BODY_BYTES)
+        if (stored.ref == null && stored.bodyBytes > ResourceLimits.INLINE_BODY_BYTES) {
+            throw IllegalStateException("Unable to store oversized message body")
         }
-        val stored = storeBody(partsJson)
+        // Publish the DB pointer only after BodyStore has durably committed the file.
         dao.updateMessageBody(
             id = id,
             partsJson = stored.inline,
@@ -851,8 +840,7 @@ class ChatRepository(
         errorInfo: String? = null,
     ): MessageEntity {
         val stored = storeBody(partsJson)
-        return messageAppendMutex.withLock {
-            val sortOrder = dao.nextSortOrder(sessionId)
+        return run {
             val now = System.currentTimeMillis()
         // Cap the body so a runaway tool_result (e.g. a 13 MB browser_use
         // dump — Issue #17) cannot land an oversize blob into a Room row
@@ -872,14 +860,14 @@ class ChatRepository(
             preview = stored.preview,
             createdAt = now,
             tokenUsage = tokenUsage,
-            sortOrder = sortOrder,
+            sortOrder = 0,
             reasoningContent = reasoningContent,
             modelId = modelSnapshot?.modelId,
             modelDisplayName = modelSnapshot?.displayName,
             providerType = modelSnapshot?.providerTypeRaw,
             providerInstanceId = modelSnapshot?.providerInstanceId,
         )
-        dao.insertMessage(message)
+        val inserted = dao.appendMessage(message)
         // [T-android-preview-flicker-toolresult] Only overwrite the preview
         // when this row actually yields one. A tool-result row is
         // `[{"type":"toolResult",…}]`, a shape extractTextPreview does not
@@ -898,7 +886,7 @@ class ChatRepository(
         } else {
             dao.touchSession(sessionId, now)
         }
-        return message
+        return inserted
         }
     }
 
@@ -1240,7 +1228,7 @@ class ChatRepository(
         val preview: String?,
     )
 
-    private fun storeBody(partsJson: String): StoredBody {
+    private fun storeBody(partsJson: String, requireOffload: Boolean = false): StoredBody {
         val bytes = partsJson.toByteArray(Charsets.UTF_8)
         val preview = partsJson.take(ResourceLimits.PREVIEW_BYTES)
         if (bytes.size <= ResourceLimits.INLINE_BODY_BYTES) {
@@ -1248,6 +1236,9 @@ class ChatRepository(
         }
         val dir = filesDir?.let { File(it, "bodies") }
         val put = if (dir == null) null else BodyStore(dir).put(bytes)
+        if (requireOffload && put?.ok != true) {
+            throw IllegalStateException("Unable to persist oversized message body: ${put?.error ?: "body directory unavailable"}")
+        }
         val note = if (put?.ok == true) {
             "body stored (${bytes.size} bytes)"
         } else {

@@ -108,13 +108,13 @@ class BrowserUseManager(
                 useWideViewPort = true
                 builtInZoomControls = false
                 setSupportMultipleWindows(true)
-                mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 allowFileAccess = true
                 allowContentAccess = true
                 @Suppress("DEPRECATION")
-                allowFileAccessFromFileURLs = true
+                allowFileAccessFromFileURLs = false
                 @Suppress("DEPRECATION")
-                allowUniversalAccessFromFileURLs = true
+                allowUniversalAccessFromFileURLs = false
                 val seed = systemUa ?: userAgentString
                 userAgentString = ChromeUserAgent.resolve(profile, seed, customUA)
             }

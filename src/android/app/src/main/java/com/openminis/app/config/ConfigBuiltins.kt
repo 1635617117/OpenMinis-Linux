@@ -96,9 +96,10 @@ internal object ConfigBuiltins {
                     "Change it in the chat menu. Destructive commands still confirm under YOYO.",
                 valueSchema = ConfigSchema.Str(),
                 reader = {
+                    val sid = ChatViewModelStore.activeSessionId
                     val mode = effectivePermissionMode(
-                        SecurityGateHolder.gate.getPermissionMode(),
-                        ApprovalGate.isSessionAllowAll(),
+                        SecurityGateHolder.activeSessionMode(sid),
+                        ApprovalGate.isSessionAllowAll(sid),
                     )
                     ConfigValue.Str(mode.name)
                 },

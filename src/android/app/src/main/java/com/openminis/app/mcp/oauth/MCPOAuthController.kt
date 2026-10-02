@@ -81,7 +81,8 @@ class MCPOAuthController(private val context: Context) {
 
             val callback = try {
                 suspendCancellableCoroutine<Pair<String, String?>?> { cont ->
-                    val srv = OAuthCallbackServer(port) { code, state ->
+                    val callbackPath = runCatching { URI(redirect).path }.getOrNull().orEmpty().ifEmpty { "/oauth/callback" }
+                    val srv = OAuthCallbackServer(port, expectedPath = callbackPath) { code, state ->
                         if (cont.isActive) cont.resume(code to state)
                     }
                     callbackServer = srv

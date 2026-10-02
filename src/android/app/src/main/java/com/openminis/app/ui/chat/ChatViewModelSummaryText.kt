@@ -12,23 +12,23 @@ import com.openminis.app.data.model.LLMMessage
 internal fun ChatViewModel.buildConversationTextForSummary(history: List<LLMMessage>): String = buildString {
         for (msg in history) {
             val role = msg.role.name.lowercase()
-            val text = msg.content.take(500)
+            val text = ChatViewModel.preserveSummaryEdges(msg.content, 500)
             if (text.isNotEmpty()) {
                 append(role).append(": ").append(text).append('\n')
             }
             for (part in msg.contentParts) {
                 when (part) {
                     is AgentContentPart.Text -> {
-                        append(role).append(": ").append(part.text.take(500)).append('\n')
+                        append(role).append(": ").append(ChatViewModel.preserveSummaryEdges(part.text, 500)).append('\n')
                     }
                     is AgentContentPart.ToolUse -> {
-                        val preview = part.input.toString().take(200)
+                        val preview = ChatViewModel.preserveSummaryEdges(part.input.toString(), 200)
                         append(role).append(" [tool:").append(part.name).append("]: ")
                             .append(preview).append('\n')
                     }
                     is AgentContentPart.ToolResult -> {
                         append(role).append(" [result:").append(part.name).append("]: ")
-                            .append(part.content.take(500)).append('\n')
+                            .append(ChatViewModel.preserveSummaryEdges(part.content, 500)).append('\n')
                     }
                     is AgentContentPart.ImageData -> {
                         append(role).append(" [image: ").append(part.mimeType).append("]\n")

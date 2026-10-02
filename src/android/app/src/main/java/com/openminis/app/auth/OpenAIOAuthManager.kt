@@ -55,21 +55,16 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         loginCallbackServer = null
 
         val authUrl = buildAuthorizationUrl()
-        // Redact the code_challenge so the log doesn't expose PKCE material
-        // verbatim — leave everything else so the user/diagnostician can
-        // verify scope, redirect_uri, client_id, state.
-        val redactedAuthUrl = authUrl.replace(Regex("code_challenge=[^&]+"), "code_challenge=<redacted>")
-        AppLogger.info(TAG, "authorize URL: $redactedAuthUrl")
-        AppLogger.info(TAG, "redirect_uri=$redirectUri callbackPort=$callbackPort")
+        AppLogger.info(TAG, "authorization flow prepared (callbackPort=$callbackPort)")
 
         val accessToken = withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
             val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
-                val server = OAuthCallbackServer(callbackPort) { receivedCode, receivedState ->
+                val server = OAuthCallbackServer(callbackPort, expectedPath = redirectPath, onCode = { receivedCode, receivedState ->
                     if (cont.isActive) {
                         cont.resume(receivedCode to receivedState)
                     }
-                }
+                })
                 loginCallbackServer = server
                 server.start()
                 AppLogger.info(TAG, "callback server listening on port $callbackPort path=$redirectPath")
@@ -91,20 +86,17 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
             loginCallbackServer?.stop()
             loginCallbackServer = null
-            val stateMatches = expectedState != null && state == expectedState
-            AppLogger.info(
-                TAG,
-                "callback received: codeLen=${code.length} state=$state expected=$expectedState match=$stateMatches",
-            )
+            val stateMatches = !expectedState.isNullOrEmpty() && !state.isNullOrEmpty() && state == expectedState
+            AppLogger.info(TAG, "callback received: codePresent=${code.isNotEmpty()} statePresent=${!state.isNullOrEmpty()} match=$stateMatches")
             if (!stateMatches) {
-                AppLogger.warning(TAG, "state mismatch — proceeding anyway to mirror prior behaviour")
+                throw IllegalStateException("OAuth state mismatch; refusing to exchange authorization code")
             }
 
             // Step 2: Exchange code for tokens (JSON body, matching iOS CodexOAuthManager)
             exchangeCodeJson(code)
         }
 
-        AppLogger.info(TAG, "=== OAuth login complete (instance=$instanceId tokenLen=${accessToken.length}) ===")
+        AppLogger.info(TAG, "=== OAuth login complete (instance=$instanceId) ===")
         return accessToken
     }
 
@@ -121,7 +113,7 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         saveOAuthString("verifier", verifier)
         val state = generateState()
         expectedState = state
-        AppLogger.debug(TAG, "PKCE: verifierLen=${verifier.length} stateLen=${state.length}")
+        AppLogger.debug(TAG, "PKCE and state generated")
         return "$authURL?" + listOf(
             "client_id=$clientId",
             "redirect_uri=${Uri.encode(redirectUri)}",
@@ -208,10 +200,7 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val responseCode = response.code
         val responseBody = response.body?.string() ?: ""
         response.close()
-        AppLogger.info(
-            TAG,
-            "token exchange response: $responseCode bodyLen=${responseBody.length} body[0..500]=${responseBody.take(500)}",
-        )
+        AppLogger.info(TAG, "token exchange response received: $responseCode")
 
         if (responseCode !in 200..299) {
             AppLogger.error(TAG, "token exchange non-2xx: $responseCode")
@@ -240,7 +229,7 @@ class OpenAIOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
         AppLogger.info(
             TAG,
-            "token exchange OK accessTokenLen=${accessToken.length} expiresIn=${expiresIn}s hasRefresh=${json.has("refresh_token")}",
+            "token exchange OK expiresIn=${expiresIn}s hasRefresh=${json.has("refresh_token")}",
         )
         return accessToken
     }

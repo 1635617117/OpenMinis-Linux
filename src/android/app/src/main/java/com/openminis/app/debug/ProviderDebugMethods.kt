@@ -49,8 +49,7 @@ internal object ProviderDebugMethods {
         // Android equivalent and are reported as null/absent rather than
         // synthesized — keeps "what's missing" honest for callers.
         val supportedCreds = JSONArray().apply {
-            put("apiKey")
-            if (type == ProviderType.anthropic || type == ProviderType.openAI) put("oauth")
+            for (credential in ProviderRepository.supportedCredentials(type)) put(credential.name)
         }
         val builtInIds = JSONArray()
         for (m in type.builtInModels) builtInIds.put(m.id)

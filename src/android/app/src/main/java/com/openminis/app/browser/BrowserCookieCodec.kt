@@ -21,8 +21,10 @@ object BrowserCookieCodec {
     fun encode(pageUrl: String, raw: Map<String, Any?>): EncodedCookie? {
         val name = cookieString(raw, "name")?.takeIf { it.isNotEmpty() } ?: return null
         val value = cookieString(raw, "value") ?: return null
-        val defaultDomain = runCatching { URI(pageUrl).host }.getOrNull().orEmpty()
-        val domain = cookieString(raw, "domain")?.takeIf { it.isNotEmpty() } ?: defaultDomain
+        val pageHost = runCatching { URI(pageUrl).host?.lowercase(Locale.US) }.getOrNull().orEmpty()
+        if (pageHost.isEmpty()) return null
+        val requestedDomain = cookieString(raw, "domain")?.trim()?.lowercase(Locale.US)
+        val domain = requestedDomain?.takeIf { isAllowedDomain(pageHost, it) } ?: if (requestedDomain == null) pageHost else return null
         val path = cookieString(raw, "path")?.takeIf { it.isNotEmpty() } ?: "/"
         val sameSite = normalizeSameSite(cookieString(raw, "sameSite", "same_site"))
         var secure = cookieBool(raw, "secure") == true
@@ -45,6 +47,13 @@ object BrowserCookieCodec {
             name = name,
             domain = domain,
         )
+    }
+
+    internal fun isAllowedDomain(pageHost: String, cookieDomain: String): Boolean {
+        val host = pageHost.trim().trimEnd('.').lowercase(Locale.US)
+        val domain = cookieDomain.trim().removePrefix(".").trimEnd('.').lowercase(Locale.US)
+        if (host.isEmpty() || domain.isEmpty() || domain.contains('/') || domain.contains(':')) return false
+        return host == domain || host.endsWith(".$domain")
     }
 
     fun normalizeSameSite(raw: String?): String? {

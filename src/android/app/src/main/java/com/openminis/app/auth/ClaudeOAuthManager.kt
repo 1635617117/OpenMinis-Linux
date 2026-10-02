@@ -135,11 +135,11 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
         val accessToken = withContext(Dispatchers.IO) {
             // Step 1: Wait for callback code
             val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
-                val server = OAuthCallbackServer(callbackPort) { receivedCode, receivedState ->
+                val server = OAuthCallbackServer(callbackPort, expectedPath = redirectPath, onCode = { receivedCode, receivedState ->
                     if (cont.isActive) {
                         cont.resume(receivedCode to receivedState)
                     }
-                }
+                })
                 callbackServer = server
                 server.start()
                 Log.i(TAG, "Callback server started on port $callbackPort")
@@ -162,11 +162,11 @@ class ClaudeOAuthManager(context: Context, instanceId: String) : OAuthManager(co
 
             callbackServer?.stop()
             callbackServer = null
-            Log.i(TAG, "Callback received — code length: ${code.length}")
+            Log.i(TAG, "Callback received: codePresent=${code.isNotEmpty()} statePresent=${!state.isNullOrEmpty()}")
 
             // Step 2: Validate state (CSRF protection)
             val savedState = loadOAuthString("state")
-            if (state != null && state != savedState) {
+            if (savedState.isNullOrEmpty() || state.isNullOrEmpty() || state != savedState) {
                 throw Exception("OAuth state mismatch — possible CSRF attack")
             }
 

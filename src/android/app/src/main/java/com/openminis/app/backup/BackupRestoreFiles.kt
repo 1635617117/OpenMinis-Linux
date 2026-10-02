@@ -92,7 +92,16 @@ object BackupRestoreFiles {
                 continue
             }
             val sha = entry.sha256 ?: continue
-            val blob = File(File(File(packageRoot, "blobs"), sha.take(2)), sha)
+            if (entry.size < 0 || !sha.matches(Regex("[0-9a-f]{64}"))) {
+                result.rejectedPaths += 1
+                continue
+            }
+            val blobsRoot = File(packageRoot, "blobs").canonicalFile
+            val blob = File(File(blobsRoot, sha.take(2)), sha)
+            if (!isContained(blob, blobsRoot)) {
+                result.rejectedPaths += 1
+                continue
+            }
             if (!blob.isFile) {
                 AppLogger.info(
                     TAG,

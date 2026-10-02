@@ -83,6 +83,34 @@ internal suspend fun ChatViewModel.finishStoppedRun(
                 ),
             )
         }
+        // Match the persistence order in persistInterruptedTurn(): the
+        // assistant interruption is followed by the synthetic tool result.
+        // Resume must see that complete pair before a queued prompt starts.
+        val cancelledToolParts = stoppedTool?.let { (toolId, toolName, _) ->
+            if (!toolId.isNullOrBlank() && !toolName.isNullOrBlank()) {
+                listOf(
+                    AgentContentPart.ToolResult(
+                        id = toolId,
+                        name = toolName,
+                        content = ChatViewModel.CANCELLED_MARKER,
+                        isError = true,
+                    ),
+                )
+            } else null
+        }
+        if (!cancelledToolParts.isNullOrEmpty()) {
+            val alreadyRecorded = agentHistory.any { message ->
+                message.contentParts.any { part ->
+                    part is AgentContentPart.ToolResult &&
+                        cancelledToolParts.any { it.id == part.id && it.name == part.name }
+                }
+            }
+            if (!alreadyRecorded) {
+                appendBoundedHistory(
+                    LLMMessage(role = LLMMessage.Role.USER, content = "", contentParts = cancelledToolParts),
+                )
+            }
+        }
         if (_promptQueue.value.isNotEmpty()) resumeQueueAfterCancel()
     }
 }

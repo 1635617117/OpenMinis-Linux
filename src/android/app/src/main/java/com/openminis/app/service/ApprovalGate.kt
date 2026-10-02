@@ -12,170 +12,128 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 object ApprovalGate {
-
     private const val TAG = "ApprovalGate"
     private const val TIMEOUT_MS = 90_000L
-
     private val pending = ConcurrentHashMap<String, MutableStateFlow<Boolean?>>()
     private val approvalDetails = ConcurrentHashMap<String, ApprovalRequest>()
-
-    // Session-scoped allow list. "本次会话全部允许" now means ALL tools for
-    // the rest of this session (user expectation: one tap, no more dialogs —
-    // observed complaint: shell approved-all, file_write still prompted).
-    // Fatal confirms still prompt via mustPrompt.
-    @Volatile private var sessionAllowAll = false
-    private val sessionAllowedTools = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
-
-    fun enableSessionAllowAll() {
-        sessionAllowAll = true
-        Log.i(TAG, "session allow-all enabled")
-    }
-
-    fun allowToolForSession(toolName: String) {
-        sessionAllowedTools.add(toolName)
-        Log.i(TAG, "session allow-same-tool enabled tool=$toolName")
-    }
-
-    fun isSessionAllowAll(): Boolean = sessionAllowAll
-
-    fun isToolAllowedForSession(toolName: String): Boolean =
-        sessionAllowAll || sessionAllowedTools.contains(toolName)
-
-    fun resetSessionAllowAll() {
-        if (sessionAllowAll || sessionAllowedTools.isNotEmpty()) {
-            Log.i(TAG, "session allow-all reset")
-        }
-        sessionAllowAll = false
-        sessionAllowedTools.clear()
-    }
-
-    fun bindSession(sessionId: String?) {
-        if (boundSessionId == sessionId) return
-        resetSessionAllowAll()
-        boundSessionId = sessionId
-    }
-
-    @Volatile private var boundSessionId: String? = null
-
-    private val _pendingApprovals = MutableStateFlow<Map<String, ApprovalRequest>>(emptyMap())
-    val pendingApprovals: StateFlow<Map<String, ApprovalRequest>> = _pendingApprovals.asStateFlow()
+    private val sessionAllowAll = ConcurrentHashMap.newKeySet<String>()
+    private val sessionAllowedTools = ConcurrentHashMap<String, MutableSet<String>>()
+    @Volatile private var legacyBoundSessionId: String? = null
 
     data class ApprovalRequest(
         val id: String,
         val toolName: String,
         val preview: String,
-        val timestamp: Long = System.currentTimeMillis()
+        val timestamp: Long = System.currentTimeMillis(),
+        val sessionId: String? = null,
     )
+
+    private fun legacySession(): String? = legacyBoundSessionId
+
+    fun enableSessionAllowAll() { enableSessionAllowAll(legacySession()) }
+    fun enableSessionAllowAll(sessionId: String?) {
+        sessionId?.let { sessionAllowAll.add(it) }
+        Log.i(TAG, "session allow-all enabled session=$sessionId")
+    }
+
+    fun allowToolForSession(toolName: String) { allowToolForSession(toolName, legacySession()) }
+    fun allowToolForSession(toolName: String, sessionId: String?) {
+        val sid = sessionId ?: return
+        sessionAllowedTools.computeIfAbsent(sid) { ConcurrentHashMap.newKeySet() }.add(toolName)
+    }
+
+    fun isSessionAllowAll(): Boolean = isSessionAllowAll(legacySession())
+    fun isSessionAllowAll(sessionId: String?): Boolean = sessionId?.let(sessionAllowAll::contains) == true
+
+    fun isToolAllowedForSession(toolName: String): Boolean =
+        isToolAllowedForSession(toolName, legacySession())
+    fun isToolAllowedForSession(toolName: String, sessionId: String?): Boolean {
+        val sid = sessionId ?: return false
+        return sessionAllowAll.contains(sid) || sessionAllowedTools[sid]?.contains(toolName) == true
+    }
+
+    fun resetSessionAllowAll() { resetSessionAllowAll(legacySession()) }
+    fun resetSessionAllowAll(sessionId: String?) {
+        val sid = sessionId ?: return
+        sessionAllowAll.remove(sid)
+        sessionAllowedTools.remove(sid)
+    }
+
+    /** Compatibility default for old APIs; explicit session-aware calls never read this pointer. */
+    fun bindSession(sessionId: String?) { legacyBoundSessionId = sessionId }
+
+    private val _pendingApprovals = MutableStateFlow<Map<String, ApprovalRequest>>(emptyMap())
+    val pendingApprovals: StateFlow<Map<String, ApprovalRequest>> = _pendingApprovals.asStateFlow()
+    private val pendingBySession = ConcurrentHashMap<String, MutableStateFlow<Map<String, ApprovalRequest>>>()
+    private val emptySessionApprovals = MutableStateFlow<Map<String, ApprovalRequest>>(emptyMap()).asStateFlow()
+
+    fun pendingApprovals(sessionId: String?): StateFlow<Map<String, ApprovalRequest>> =
+        sessionId?.let {
+            pendingBySession.computeIfAbsent(it) { sid ->
+                MutableStateFlow(approvalDetails.filterValues { request -> request.sessionId == sid })
+            }.asStateFlow()
+        } ?: emptySessionApprovals
 
     fun isConfigured(): Boolean = true
 
-    fun requestApproval(): String {
-        val id = UUID.randomUUID().toString()
-        pending[id] = MutableStateFlow(null as Boolean?)
-        Log.d(TAG, "approval requested id=$id")
-        return id
-    }
+    fun requestApproval(): String = requestApproval(legacySession(), "", "", false)
 
-    /**
-     * Returns a pending-approval id, or "" when the request was auto-approved
-     * by the session allow-all switch. An empty id never enters [pending] or
-     * the broadcast map, so no card / notification is surfaced; [waitFor]
-     * treats it as approved.
-     */
-    fun requestApproval(toolName: String, preview: String, mustPrompt: Boolean = false): String {
-        if (!mustPrompt && isToolAllowedForSession(toolName)) {
-            Log.d(TAG, "approval auto-allowed (session same-tool) tool=$toolName")
-            return ""
-        }
-        if (sessionAllowAllSkipsPrompt(sessionAllowAll, mustPrompt)) {
-            Log.d(TAG, "approval auto-allowed (session allow-all) tool=$toolName")
-            return ""
-        }
+    fun requestApproval(toolName: String, preview: String, mustPrompt: Boolean = false): String =
+        requestApproval(legacySession(), toolName, preview, mustPrompt)
+
+    fun requestApproval(sessionId: String?, toolName: String, preview: String, mustPrompt: Boolean = false): String {
+        val sid = sessionId
+        if (!mustPrompt && isToolAllowedForSession(toolName, sid)) return ""
+        if (sessionAllowAllSkipsPrompt(isSessionAllowAll(sid), mustPrompt)) return ""
         val id = UUID.randomUUID().toString()
-        pending[id] = MutableStateFlow(null as Boolean?)
-        approvalDetails[id] = ApprovalRequest(id, toolName, preview)
+        pending[id] = MutableStateFlow(null)
+        approvalDetails[id] = ApprovalRequest(id, toolName, preview, sessionId = sid)
         refreshPendingBroadcast()
-        Log.d(TAG, "approval requested id=$id tool=$toolName")
         return id
     }
 
-    suspend fun waitFor(id: String): Boolean {
+    suspend fun waitFor(id: String, sessionId: String? = null): Boolean {
         if (id.isEmpty()) return true
+        val detail = approvalDetails[id] ?: return false
+        if (sessionId != null && detail.sessionId != sessionId) return false
         val flow = pending[id] ?: return false
-        return try {
-            withTimeout(TIMEOUT_MS) {
-                flow.first { it != null } == true
-            }
-        } catch (e: TimeoutCancellationException) {
-            Log.i(TAG, "approval timed out -> denied")
-            deny(id)
-            false
-        } catch (e: Exception) {
-            Log.w(TAG, "approval wait threw: ${e.message}")
-            deny(id)
-            false
-        }
+        return try { withTimeout(TIMEOUT_MS) { flow.first { it != null } == true } }
+        catch (_: TimeoutCancellationException) { deny(id, sessionId); false }
+        catch (_: Exception) { deny(id, sessionId); false }
     }
 
-    fun approve(id: String) {
-        resolve(id, true)
-        Log.d(TAG, "approved id=$id")
-    }
+    fun approve(id: String, sessionId: String? = null) { resolve(id, true, sessionId) }
+    fun deny(id: String, sessionId: String? = null) { resolve(id, false, sessionId) }
 
-    fun deny(id: String) {
-        resolve(id, false)
-        Log.d(TAG, "denied id=$id")
-    }
-
-    /**
-     * Resolves [id] exactly once and drops both its flow and its detail entry.
-     *
-     * Both maps are cleared regardless of whether the flow was still pending:
-     * a caller (or [cleanupAll]) may resolve an id whose flow was already
-     * removed, and leaving the [ApprovalRequest] behind would keep it visible
-     * in [pendingApprovals] forever. The flow is removed from [pending] first
-     * but its terminal value is still delivered — [waitFor] captured the flow
-     * reference, so the waiter wakes regardless of the map removal.
-     */
-    private fun resolve(id: String, value: Boolean) {
-        val flow = pending.remove(id)
+    private fun resolve(id: String, value: Boolean, sessionId: String? = null) {
+        val detail = approvalDetails[id] ?: return
+        if (sessionId != null && detail.sessionId != sessionId) return
         approvalDetails.remove(id)
-        flow?.value = value
+        pending.remove(id)?.value = value
         refreshPendingBroadcast()
     }
 
     private fun refreshPendingBroadcast() {
-        _pendingApprovals.value = pending.keys
-            .mapNotNull { id ->
-                approvalDetails[id]?.let { request -> id to request }
-            }
-            .toMap()
+        _pendingApprovals.value = approvalDetails.toMap()
+        pendingBySession.forEach { (sid, flow) ->
+            flow.value = approvalDetails.filterValues { it.sessionId == sid }
+        }
     }
 
-    /**
-     * Snapshot of the ids that still have a live approval flow. Used by
-     * AgentForegroundService to clear the matching notification-bar entries
-     * before [cleanupAll] empties the queue (ApprovalGate cannot reach the
-     * notification manager itself).
-     */
-    fun pendingIds(): List<String> = pending.keys.toList()
+    fun pendingIds(sessionId: String? = null): List<String> = approvalDetails.values
+        .filter { sessionId == null || it.sessionId == sessionId }.map { it.id }
 
-    /**
-     * Denies every pending request so any coroutine blocked in [waitFor] wakes
-     * up immediately instead of waiting out its 90 s timeout, then drops any
-     * orphaned detail entries and republishes [pendingApprovals].
-     */
-    fun cleanupAll() {
-        val ids = pending.keys.toList()
-        Log.d(TAG, "cleanupAll: resolving ${ids.size} pending approvals")
-        ids.forEach { id -> resolve(id, false) }
-        // Defensive sweep: a detail whose flow already resolved but whose
-        // broadcast map was not refreshed would otherwise stay visible.
-        approvalDetails.keys.toList().forEach { approvalDetails.remove(it) }
+    fun cleanupAll(sessionId: String? = null) {
+        val ids = pendingIds(sessionId)
+        ids.forEach { resolve(it, false, sessionId) }
+        if (sessionId == null) {
+            approvalDetails.keys.toList().forEach { approvalDetails.remove(it) }
+            pending.clear()
+            sessionAllowAll.clear()
+            sessionAllowedTools.clear()
+            legacyBoundSessionId = null
+        } else resetSessionAllowAll(sessionId)
         refreshPendingBroadcast()
-        // A torn-down session must not leak the allow-all switch into the next
-        // conversation — reset it together with the queue.
-        resetSessionAllowAll()
     }
 
     fun pendingCount(): Int = pending.size

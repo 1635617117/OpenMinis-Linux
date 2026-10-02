@@ -70,18 +70,34 @@ internal object ResidentWindow {
     }
 
     /**
-     * A boundary is legal when the first RETAINED entry does not carry a
-     * tool result whose tool use it does not also carry. The agent loop
-     * keeps a turn's use and result in the same message, so a self-contained
-     * tool turn is a fine boundary — demanding "no result at all" made the
-     * cap a no-op on exactly the tool-heavy sessions that need it.
+     * Validate the complete retained suffix, not just its first message. A
+     * result must follow an unmatched use with the same id and name. This is
+     * important when a provider stores the use in an assistant message and
+     * the result in a following user message: cutting between those rows would
+     * leave a valid-looking first row but orphan the result later in the suffix.
+     * An unmatched use is allowed only in the final assistant message because
+     * that is the in-flight turn and may legitimately await execution.
      */
     private fun isLegalBoundary(history: List<LLMMessage>, index: Int): Boolean {
         if (index >= history.size) return false
-        val parts = history[index].contentParts
-        val hasResult = parts.any { it is AgentContentPart.ToolResult }
-        val hasUse = parts.any { it is AgentContentPart.ToolUse }
-        return !hasResult || hasUse
+        data class Use(val id: String, val name: String, val messageIndex: Int)
+        val pending = ArrayList<Use>()
+        history.subList(index, history.size).forEachIndexed { offset, message ->
+            val messageIndex = index + offset
+            message.contentParts.forEach { part ->
+                when (part) {
+                    is AgentContentPart.ToolUse -> pending += Use(part.id, part.name, messageIndex)
+                    is AgentContentPart.ToolResult -> {
+                        val match = pending.indexOfFirst { it.id == part.id && it.name == part.name }
+                        if (match < 0) return false
+                        pending.removeAt(match)
+                    }
+                    else -> Unit
+                }
+            }
+        }
+        val finalIndex = history.lastIndex
+        return pending.all { it.messageIndex == finalIndex && history[finalIndex].role == LLMMessage.Role.ASSISTANT }
     }
 
     /** Smallest index >= [from] that is a legal cut point, or `null`. */

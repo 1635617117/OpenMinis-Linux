@@ -6,24 +6,36 @@ import com.openminis.app.data.db.compositeEntryKey
 import com.openminis.app.data.db.toProviderConfig
 import com.openminis.app.data.model.ProviderConfig
 
+/** JSON may seed Room only after a successful DAO read confirms it is empty. */
+internal fun mayImportLegacyProviderMirror(dbReadFailed: Boolean, dbInstanceCount: Int): Boolean =
+    !dbReadFailed && dbInstanceCount == 0
+
+/** A mismatch requests repair from Room; it never authorizes JSON to replace Room. */
+internal fun shouldRepairProviderMirror(liveHash: String?, dbHash: String?): Boolean =
+    liveHash != dbHash
+
+/** Run a legacy JSON migration without treating an unpersisted value as loaded. */
+internal suspend fun <T> persistLegacyProviderMirror(persist: suspend () -> T): T = try {
+    persist()
+} catch (e: Exception) {
+    android.util.Log.e("ProviderRepo", "[ProviderStore] JSON→DB import failed; refusing unpersisted config: ${e.message}", e)
+    throw IllegalStateException("Provider mirror migration could not be persisted", e)
+}
+
     /**
      * [T-android-provider-room-store] DB-first load with three-way
      * reconciliation between provider.db and the legacy JSON mirror:
      *
      *   - DB has rows AND meta.json_sync_hash matches the live mirror's
      *     hash → DB is in sync with what we last wrote. Use DB.
-     *   - DB has rows but the hash mismatches → an older app build was
-     *     installed at some point, wrote through the JSON path, and
-     *     bypassed our DB. The JSON is fresher. Re-import JSON → rewrite
-     *     DB → resync hash.
+     *   - DB has rows but the hash mismatches → keep DB authoritative and
+     *     repair the compatibility JSON mirror from that DB snapshot.
      *   - DB is empty but JSON exists → first launch on a build that
      *     knows about the DB. One-shot import from JSON → DB.
      *   - Both empty → empty config (fresh install).
      *
-     * The JSON mirror is the durable downgrade safety net: we keep
-     * writing it on every save so the old build always sees current
-     * config; if the user round-trips through an old build, the
-     * hash check above re-syncs DB to whatever JSON looks like now.
+     * The JSON mirror remains a downgrade compatibility copy. Current builds
+     * always treat Room as authoritative and repair the copy when it diverges.
      */
 internal suspend fun ProviderRepository.loadConfigSuspending(): ProviderConfig {
         val rawJson = prefs.getString("config", null)
@@ -64,9 +76,11 @@ internal suspend fun ProviderRepository.loadConfigSuspending(): ProviderConfig {
                 }?.value
                 cfg to storedHash
             } catch (e: Exception) {
-                android.util.Log.w("ProviderRepo", "[ProviderStore] DB load failed, falling back to JSON: ${e.message}")
-                daoReadFailed = true
-                null to null
+                // A non-zero count proves this is an existing DB-backed store.
+                // Never replace unreadable rows with the legacy mirror: the
+                // mirror may be stale (or may itself be the failed write).
+                android.util.Log.e("ProviderRepo", "[ProviderStore] DB snapshot failed; refusing JSON fallback: ${e.message}", e)
+                throw IllegalStateException("Provider store snapshot unreadable; refusing mirror overwrite", e)
             }
         } else {
             null to null
@@ -74,16 +88,31 @@ internal suspend fun ProviderRepository.loadConfigSuspending(): ProviderConfig {
 
         if (dbConfig != null) {
             val liveHash = rawJson?.let(::hashJsonMirror)
-            if (liveHash == dbHashStored) {
-                return dbConfig
+            if (shouldRepairProviderMirror(liveHash, dbHashStored)) {
+                // A mirror write can lag or fail after the DB transaction. The
+                // DB snapshot is authoritative on this build; never let an old
+                // mirror overwrite it. Repair the mirror from the DB snapshot.
+                android.util.Log.w(
+                    "ProviderRepo",
+                    "[ProviderStore] mirror hash mismatch (stored=${dbHashStored?.take(8)} live=${liveHash?.take(8)}) — retaining DB",
+                )
+                runCatching { persistToDbAndMirror(dbConfig) }
+                    .onFailure { e -> android.util.Log.w("ProviderRepo", "[ProviderStore] DB→mirror repair failed: ${e.message}") }
             }
-            // Hash mismatch: JSON has been written by an older build during
-            // a downgrade window. Re-import JSON → reseed DB so DB catches
-            // up to the user's actual current config.
-            android.util.Log.i(
-                "ProviderRepo",
-                "[ProviderStore] hash mismatch (stored=${dbHashStored?.take(8)} live=${liveHash?.take(8)}) — re-importing JSON mirror",
+            return dbConfig
+        }
+
+        if (daoReadFailed) {
+            // The database could not be queried at all. A parseable legacy
+            // mirror cannot prove it is newer, so loading it would risk
+            // replacing an existing DB-backed configuration.
+            throw IllegalStateException(
+                "Provider store unreadable (DB read failed); refusing JSON fallback",
             )
+        }
+
+        if (!mayImportLegacyProviderMirror(daoReadFailed, instanceCount)) {
+            throw IllegalStateException("Provider store unreadable; refusing legacy mirror import")
         }
 
         if (rawJson != null) {
@@ -94,12 +123,7 @@ internal suspend fun ProviderRepository.loadConfigSuspending(): ProviderConfig {
                 null
             }
             if (parsed != null) {
-                val mirrored = try {
-                    persistToDbAndMirror(parsed)
-                } catch (e: Exception) {
-                    android.util.Log.w("ProviderRepo", "[ProviderStore] JSON→DB import failed: ${e.message}")
-                    parsed
-                }
+                val mirrored = persistLegacyProviderMirror { persistToDbAndMirror(parsed) }
                 // Migrate the per-user lastUsedEntryId SharedPreferences key
                 // from the legacy random-uuid entry id form to the new
                 // composite "{instanceId}/{modelId}" shape, using the
@@ -129,23 +153,6 @@ internal suspend fun ProviderRepository.loadConfigSuspending(): ProviderConfig {
                 )
                 return mirrored
             }
-        }
-
-        // [T-android-provider-room-store] Last-resort fallback. If DB had
-        // rows but the live JSON mirror is unparseable (disk corruption,
-        // interrupted write, etc.) AND we couldn't re-import, KEEP THE DB
-        // — losing user config is worse than running with a stale mirror.
-        // The next successful save will rewrite the mirror and resync the
-        // hash. Returning ProviderConfig() here would let the very next
-        // mutator's persistToDbAndMirror overwrite the populated DB with
-        // an empty config, silently wiping the user's providers.
-        if (dbConfig != null) {
-            android.util.Log.w(
-                "ProviderRepo",
-                "[ProviderStore] mirror unreadable + re-import failed; keeping " +
-                    "${dbConfig.instances.size} DB instances as authoritative",
-            )
-            return dbConfig
         }
 
         // [T-android-provider-empty-load-wipe] Reaching here means BOTH stores

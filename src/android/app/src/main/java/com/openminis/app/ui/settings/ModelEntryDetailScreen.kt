@@ -92,13 +92,16 @@ fun ModelEntryDetailScreen(
     var imageOutput by remember { mutableStateOf("image" in effectiveOutput) }
     var audioOutput by remember { mutableStateOf("audio" in effectiveOutput) }
     var videoOutput by remember { mutableStateOf("video" in effectiveOutput) }
+    val globalAutoCompactOn = com.openminis.app.data.AutoCompactPrefs.isEnabled()
+    val globalCompactPercent = com.openminis.app.data.AutoCompactPrefs.thresholdPercent()
+    var autoCompactInherited by remember { mutableStateOf(overrides.autoCompactEnabled == null) }
     var autoCompactOn by remember {
-        mutableStateOf(overrides.autoCompactEnabled ?: com.openminis.app.data.AutoCompactPrefs.isEnabled())
+        mutableStateOf(overrides.autoCompactEnabled ?: globalAutoCompactOn)
     }
+    var compactPercentInherited by remember { mutableStateOf(overrides.compactThresholdPercent == null) }
     var compactPercentText by remember {
         mutableStateOf(
-            (overrides.compactThresholdPercent
-                ?: com.openminis.app.data.AutoCompactPrefs.thresholdPercent()).toString(),
+            (overrides.compactThresholdPercent ?: globalCompactPercent).toString(),
         )
     }
     var maxRetriesText by remember {
@@ -166,9 +169,11 @@ fun ModelEntryDetailScreen(
                         inputModalities = if (newInputs.toSet() != baseInputs.toSet()) newInputs else null,
                         outputModalities = if (newOutputs.toSet() != baseOutputs.toSet()) newOutputs else null,
                         maxThinkingLevel = overrides.maxThinkingLevel,
-                        autoCompactEnabled = autoCompactOn,
+                        // Null is the persisted inherit marker. Never stamp the
+                        // current global value into a model that follows it.
+                        autoCompactEnabled = autoCompactOn.takeUnless { autoCompactInherited },
                         compactThresholdPercent = compactPercentText.trim().toIntOrNull()?.coerceIn(50, 95)
-                            ?: com.openminis.app.data.AutoCompactPrefs.DEFAULT_THRESHOLD_PERCENT,
+                            ?.takeUnless { compactPercentInherited },
                         maxRetries = maxRetriesText.trim().toIntOrNull()?.coerceIn(0, 8)
                             ?: com.openminis.app.provider.HttpRetryAfter.DEFAULT_MAX_RETRIES,
                         temperature = parsedTemperature,
@@ -220,17 +225,37 @@ fun ModelEntryDetailScreen(
             footer = stringResource(R.string.modeldetail_context_retry_footer),
         ) {
             SettingsSwitchRow(
+                title = "Follow global auto-compact setting",
+                subtitle = if (autoCompactInherited) "Using the global setting" else "Model-specific setting",
+                checked = autoCompactInherited,
+                onCheckedChange = { inherit ->
+                    if (inherit) autoCompactOn = globalAutoCompactOn
+                    autoCompactInherited = inherit
+                },
+            )
+            SettingsSwitchRow(
                 title = stringResource(R.string.modeldetail_auto_compact),
                 checked = autoCompactOn,
+                enabled = !autoCompactInherited,
                 onCheckedChange = { autoCompactOn = it },
+            )
+            SettingsSwitchRow(
+                title = "Follow global compact threshold",
+                subtitle = if (compactPercentInherited) "Using the global threshold" else "Model-specific threshold",
+                checked = compactPercentInherited,
+                onCheckedChange = { inherit ->
+                    if (inherit) compactPercentText = globalCompactPercent.toString()
+                    compactPercentInherited = inherit
+                },
             )
             SettingsCardBlock {
                 RowLabel(text = stringResource(R.string.modeldetail_compact_threshold))
                 SectionTextField(
                     value = compactPercentText,
                     onValueChange = { compactPercentText = it.filter { c -> c.isDigit() }.take(2) },
-                    placeholder = "90",
+                    placeholder = globalCompactPercent.toString(),
                     singleLine = true,
+                    readOnly = compactPercentInherited,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 )
                 Spacer(Modifier.height(12.dp))

@@ -29,6 +29,18 @@ class SecurityGateImplTest {
     }
 
     @Test
+    fun browserReadActionsAutoAllowButSideEffectsConfirm() {
+        for (action in listOf("screenshot", "get_text", "scroll", "get_page_info", "find_elements", "hover", "get_readable", "get_backbone", "list_tabs", "wait_for_dom_stable")) {
+            val decision = gate.decide(gate.classify("browser_use", "{\"action\":\"$action\"}"), PermissionMode.ASK)
+            assertTrue("$action should auto allow: $decision", decision is Decision.Allow)
+        }
+        for (action in listOf("navigate", "click", "type", "execute_js", "get_cookies", "set_cookies", "fetch", "unknown")) {
+            val decision = gate.decide(gate.classify("browser_use", "{\"action\":\"$action\"}"), PermissionMode.ASK)
+            assertTrue("$action should require confirmation: $decision", decision is Decision.NeedConfirm)
+        }
+    }
+
+    @Test
     fun askConfirmsFileWrite() {
         val d = gate.decide(gate.classify("file_write", """{"path":"/tmp/a","content":"x"}"""), PermissionMode.ASK)
         assertTrue(d is Decision.NeedConfirm)

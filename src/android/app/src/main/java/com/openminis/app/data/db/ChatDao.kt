@@ -6,6 +6,7 @@ import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.RawQuery
+import androidx.room.Transaction
 import androidx.sqlite.db.SupportSQLiteQuery
 import kotlinx.coroutines.flow.Flow
 
@@ -36,6 +37,8 @@ FROM messages
  * here must exactly match the aliases the dynamic SQL emits — Room
  * binds by column name, not by ordinal.
  */
+private const val MAX_SORT_RETRIES = 4
+
 data class MessageBodyMeta(
     val id: String,
     @ColumnInfo(name = "body_bytes") val bodyBytes: Long,
@@ -372,8 +375,31 @@ interface ChatDao {
     @Query("$SAFE_MESSAGE_FROM WHERE session_id = :sessionId ORDER BY sort_order ASC LIMIT 200")
     fun observeMessages(sessionId: String): Flow<List<MessageEntity>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insertMessage(message: MessageEntity)
+
+    /** Allocate and insert under SQLite's write transaction, shared across DAO/database instances. */
+    @Transaction
+    suspend fun appendMessage(message: MessageEntity): MessageEntity {
+        var candidate = nextSortOrder(message.sessionId)
+        repeat(MAX_SORT_RETRIES) {
+            val row = message.copy(sortOrder = candidate)
+            try {
+                insertMessage(row)
+                return row
+            } catch (conflict: android.database.sqlite.SQLiteConstraintException) {
+                val detail = conflict.message.orEmpty()
+                if (!detail.contains("messages.session_id, messages.sort_order") &&
+                    !detail.contains("index_messages_session_id_sort_order")
+                ) throw conflict
+                // A competing connection may have committed this cursor first.
+                val retry = nextSortOrder(message.sessionId)
+                if (retry == candidate || retry < 0) throw conflict
+                candidate = retry
+            }
+        }
+        throw IllegalStateException("Could not allocate unique message sort_order")
+    }
 
     /**
      * [T-android-voice-correction] User messages newer than [since] (epoch ms),

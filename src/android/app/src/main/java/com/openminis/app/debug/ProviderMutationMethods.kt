@@ -52,6 +52,9 @@ internal object ProviderMutationMethods {
         val credentialType = try { ProviderCredential.valueOf(credTypeStr) } catch (_: Exception) {
             throw RPCException(-32602, "Unknown credentialType: $credTypeStr")
         }
+        if (!ProviderRepository.supportsCredential(type, credentialType)) {
+            throw RPCException(-32602, "credentialType=$credTypeStr is not supported for providerType=$typeRaw")
+        }
         val customBaseURL = params.optString("customBaseURL", "").ifEmpty { null }
         val appendV1Suffix = params.optBoolean("appendV1Suffix", true)
         val isEnabled = params.optBoolean("isEnabled", true)

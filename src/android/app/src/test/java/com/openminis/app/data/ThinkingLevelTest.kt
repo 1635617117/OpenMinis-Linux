@@ -78,6 +78,24 @@ class ThinkingLevelTest {
     }
 
     @Test
+    fun modelOverrides_autoCompactFieldsAreNullableAndEmptyAware() {
+        val inherited = ModelOverrides()
+        assertNull(inherited.autoCompactEnabled)
+        assertNull(inherited.compactThresholdPercent)
+        assertEquals(true, inherited.isEmpty)
+        assertEquals(false, ModelOverrides(autoCompactEnabled = false).isEmpty)
+        assertEquals(false, ModelOverrides(compactThresholdPercent = 75).isEmpty)
+    }
+
+    @Test
+    fun modelOverrides_oldJsonMissingAutoCompactFieldsInherits() {
+        val ov = json.decodeFromString(ModelOverrides.serializer(), "{\"displayName\":\"old\"}")
+        assertNull(ov.autoCompactEnabled)
+        assertNull(ov.compactThresholdPercent)
+        assertEquals("old", ov.displayName)
+    }
+
+    @Test
     fun modelOverrides_knownMaxThinkingLevel_roundTrips() {
         val wire = """{"maxThinkingLevel":"MAX"}"""
         val ov = json.decodeFromString(ModelOverrides.serializer(), wire)

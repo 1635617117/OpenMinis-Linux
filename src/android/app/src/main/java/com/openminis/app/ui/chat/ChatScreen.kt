@@ -3113,7 +3113,9 @@ fun ChatScreen(
             val added = viewModel.loadOlderPage()
             if (!added) break
             jumped = target
-            loaded = messages.map { it.id to (it.role == "user") }
+            // `messages` is a composition snapshot. Paging publishes a newer
+            // list asynchronously, so re-resolve from the VM after the load.
+            loaded = viewModel.uiMessages.value.map { it.id to (it.role == "user") }
         }
         if (target == null) return@scrollToPreviousUserTurn
         val targetKey = FlatKeys.of(FlatKeys.KIND_USER, target)

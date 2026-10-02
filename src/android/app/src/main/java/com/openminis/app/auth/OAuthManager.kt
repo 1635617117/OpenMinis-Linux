@@ -165,8 +165,8 @@ abstract class OAuthManager(
 
     suspend fun startLogin(onComplete: (Boolean) -> Unit) {
         callbackServer?.stop()
-        callbackServer = OAuthCallbackServer(callbackPort) { code, state ->
-            if (state != null && state != currentState) {
+        callbackServer = OAuthCallbackServer(callbackPort, expectedPath = redirectPath, onCode = { code, state ->
+            if (currentState.isNullOrEmpty() || state.isNullOrEmpty() || state != currentState) {
                 Log.w(TAG, "State mismatch")
                 onComplete(false)
                 return@OAuthCallbackServer
@@ -175,7 +175,7 @@ abstract class OAuthManager(
                 val success = exchangeCode(code)
                 withContext(Dispatchers.Main) { onComplete(success) }
             }
-        }
+        })
         callbackServer?.start()
 
         val url = buildAuthorizationUrl()

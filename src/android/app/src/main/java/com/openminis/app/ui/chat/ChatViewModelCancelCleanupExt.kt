@@ -62,6 +62,16 @@ internal fun ChatViewModel.handleUserCancelledCleanup() {
                 isError = true,
             )
         }
+        // Keep the request-side history in lockstep with the durable row. The
+        // old path only wrote DB asynchronously, so Resume could race and send
+        // an assistant tool_use without its cancellation result.
+        if (agentHistory.lastOrNull()?.contentParts?.none { part ->
+                part is AgentContentPart.ToolResult && parts.any { it.id == part.id }
+            } != false) {
+            appendBoundedHistory(
+                LLMMessage(role = LLMMessage.Role.USER, content = "", contentParts = parts),
+            )
+        }
         viewModelScope.launch(Dispatchers.IO) {
             persistToolResultMessage(parts)
         }

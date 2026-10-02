@@ -130,6 +130,7 @@ class BackupExporter(
                     onProgress?.invoke("Exporting chats…")
                     stats[BackupCategory.CHATS.key] =
                         exportChats(dataDir, trees, options.snapshotAtMillis)
+                    exportBodyBlobs(blobStore, fileIndex)
                 }
                 if (BackupCategory.SHARED_FILES in options.categories) {
                     onProgress?.invoke("Exporting shared files…")
@@ -379,16 +380,45 @@ class BackupExporter(
      * restoring it would resurrect a red error badge against a message that
      * never failed for this install.
      */
+    private fun exportBodyBlobs(blobStore: BackupBlobStore, fileIndex: BackupFileIndexWriter) {
+        val root = File(context.filesDir, "bodies")
+        if (!root.isDirectory) return
+        for (body in root.listFiles().orEmpty()) {
+            if (!body.isFile || body.name.endsWith(".tmp")) continue
+            runCatching {
+                when (val outcome = blobStore.addFile(body, "chats/_bodies/${body.name}")) {
+                    is BackupBlobStore.Outcome.Stored, is BackupBlobStore.Outcome.Duplicate -> {
+                        val sha = when (outcome) {
+                            is BackupBlobStore.Outcome.Stored -> outcome.sha256
+                            is BackupBlobStore.Outcome.Duplicate -> outcome.sha256
+                            else -> return@runCatching
+                        }
+                        fileIndex.write(BackupFileIndexEntry.file(
+                            "chats/_bodies/${body.name}", body.length(), sha, BackupCategory.CHATS
+                        ))
+                    }
+                    is BackupBlobStore.Outcome.SkippedTooLarge -> fileIndex.write(
+                        BackupFileIndexEntry.sizeSkipped("chats/_bodies/${body.name}", body.length(), BackupCategory.CHATS)
+                    )
+                }
+            }
+        }
+    }
+
     private fun messageRecord(m: MessageEntity): JsonElement = buildJsonObject {
         put("id", JsonPrimitive(m.id))
         put("sessionId", JsonPrimitive(m.sessionId))
         put("role", JsonPrimitive(m.role))
         put("parts", parseParts(m.partsJson))
         put("createdAt", JsonPrimitive(iso8601(m.createdAt)))
+        put("updatedAt", JsonPrimitive(iso8601(m.updatedAt ?: m.createdAt)))
         put("tokenUsage", m.tokenUsage?.let { parseJsonOrNull(it) } ?: JsonNull)
         put("reasoningContent", m.reasoningContent?.let(::JsonPrimitive) ?: JsonNull)
         put("streamInterruptCount", JsonPrimitive(m.streamInterruptCount))
         put("sortOrder", JsonPrimitive(m.sortOrder))
+        put("bodyBytes", JsonPrimitive(m.bodyBytes))
+        m.bodyRef?.let { put("bodyRef", JsonPrimitive(it)) }
+        m.bodySha?.let { put("bodySha", JsonPrimitive(it)) }
         // [T-token-attribution-snapshot] Per-message model attribution. Emitted
         // only when present, so a package from a device with no snapshots keeps
         // its previous shape and older importers see nothing new.

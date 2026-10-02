@@ -54,15 +54,16 @@ object OpenRouterOAuthManager {
         callbackServer = null
 
         val (verifier, challenge) = generatePKCE()
-        Log.i(TAG, "PKCE generated — verifier length: ${verifier.length}")
+        val state = generateState()
+        Log.i(TAG, "PKCE and state generated")
 
         val apiKey = withContext(Dispatchers.IO) {
-            val code = suspendCancellableCoroutine { cont ->
-                val server = OAuthCallbackServer(CALLBACK_PORT, FALLBACK_PORTS) { receivedCode, _ ->
+            val (code, callbackState) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
+                val server = OAuthCallbackServer(CALLBACK_PORT, FALLBACK_PORTS, expectedPath = "/callback", onCode = { receivedCode, receivedState ->
                     if (cont.isActive) {
-                        cont.resume(receivedCode)
+                        cont.resume(receivedCode to receivedState)
                     }
-                }
+                })
                 callbackServer = server
                 server.start()
                 val boundPort = server.boundPort
@@ -78,9 +79,10 @@ object OpenRouterOAuthManager {
                     .appendQueryParameter("callback_url", callbackUrl)
                     .appendQueryParameter("code_challenge", challenge)
                     .appendQueryParameter("code_challenge_method", "S256")
+                    .appendQueryParameter("state", state)
                     .appendQueryParameter("_nc", System.currentTimeMillis().toString()) // cache-bust
                     .build()
-                Log.d(TAG, "Auth URL: $authUrl")
+                Log.d(TAG, "OpenRouter authorization URL prepared")
 
                 // Open in Chrome Custom Tab (in-app browser, like iOS SFSafariViewController)
                 val customTabsIntent = CustomTabsIntent.Builder()
@@ -93,7 +95,10 @@ object OpenRouterOAuthManager {
 
             callbackServer?.stop()
             callbackServer = null
-            Log.i(TAG, "Callback received — code length: ${code.length}")
+            Log.i(TAG, "Callback received: codePresent=${code.isNotEmpty()} statePresent=${!callbackState.isNullOrEmpty()}")
+            if (state.isEmpty() || callbackState.isNullOrEmpty() || callbackState != state) {
+                throw IllegalStateException("OpenRouter OAuth state mismatch; refusing to exchange authorization code")
+            }
 
             // Exchange code for permanent API key
             exchangeCode(code, verifier)
@@ -114,6 +119,8 @@ object OpenRouterOAuthManager {
         Log.i(TAG, "Logout — cleared API key (instance: $instanceId)")
     }
 
+    private fun generateState(): String = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(ByteArray(32).also { SecureRandom().nextBytes(it) })
+
     private fun generatePKCE(): Pair<String, String> {
         val bytes = ByteArray(96)
         SecureRandom().nextBytes(bytes)
@@ -123,8 +130,7 @@ object OpenRouterOAuthManager {
         val hash = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray(Charsets.UTF_8))
         val challenge = standardBase64ToUrlSafe(hash)
 
-        Log.d(TAG, "PKCE verifier (${verifier.length} chars): ${verifier.take(20)}...")
-        Log.d(TAG, "PKCE challenge (${challenge.length} chars): $challenge")
+        Log.d(TAG, "PKCE verifier and challenge generated")
 
         return verifier to challenge
     }
@@ -151,9 +157,7 @@ object OpenRouterOAuthManager {
         body.put("code_verifier", verifier)
         body.put("code_challenge_method", "S256")
 
-        Log.d(TAG, "Exchange request body: ${body.toString()}")
-        Log.d(TAG, "Code: $code")
-        Log.d(TAG, "Verifier (${verifier.length} chars): ${verifier.take(20)}...${verifier.takeLast(10)}")
+        Log.d(TAG, "OpenRouter token exchange request prepared")
 
         val request = Request.Builder()
             .url(KEYS_URL)
@@ -164,14 +168,15 @@ object OpenRouterOAuthManager {
             .build()
 
         val response = client.newCall(request).execute()
+        val responseCode = response.code
         val responseBody = response.body?.string() ?: ""
-        Log.i(TAG, "Response status: ${response.code}")
+        Log.i(TAG, "Response status: $responseCode")
         // [T-android-oauth-log-redaction] SUCCESS body carries the live API key
         // — never log its content, only the size.
         Log.d(TAG, "Response body received (len=${responseBody.length})")
 
         if (!response.isSuccessful) {
-            throw Exception("OpenRouter key exchange failed (${response.code}): $responseBody")
+            throw Exception("OpenRouter key exchange failed (${response.code})")
         }
 
         val json = JSONObject(responseBody)

@@ -271,10 +271,19 @@ private inline fun ChatViewModel.compactAllImpl(
                 // folded into one ever-changing blob.
                 summaryChunks = ChatViewModel.appendSummaryChunk(prev?.summaryChunks, summary),
             )
-            runCatching { chatRepository.dao.insertCompactMarker(marker) }
-                .onFailure {
-                    Log.w(ChatViewModel.TAG, "Failed to persist compact marker: ${it.message}")
+            val markerPersisted = runCatching {
+                chatRepository.dao.insertCompactMarker(marker)
+                true
+            }.getOrElse {
+                Log.w(ChatViewModel.TAG, "Failed to persist compact marker: ${it.message}")
+                false
+            }
+            if (!markerPersisted) {
+                withContext(Dispatchers.Main) {
+                    appendSystemInfo("Compaction failed: could not save the compact marker.", "compact")
                 }
+                return@launch
+            }
             _compactSummary.value = summary
             // Keep the marker in memory so effectiveAgentHistory() can
             // resolve the boundary on the very next outgoing turn.

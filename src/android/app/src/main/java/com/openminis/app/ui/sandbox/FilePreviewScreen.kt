@@ -471,12 +471,19 @@ private fun HtmlPreview(item: FileItem) {
         factory = { ctx ->
             WebView(ctx).apply {
                 setLayerType(android.view.View.LAYER_TYPE_HARDWARE, null)
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.allowFileAccess = true
+                // This is an inert local-file preview, not the agent browser.
+                // Disable script execution and cross-origin/file URL access so
+                // an HTML attachment cannot read adjacent private files or
+                // issue active network requests while being previewed.
+                settings.javaScriptEnabled = false
+                settings.domStorageEnabled = false
+                settings.allowFileAccess = true // needed only to load the selected file itself
+                settings.allowContentAccess = false
                 @Suppress("DEPRECATION")
-                settings.allowFileAccessFromFileURLs = true
-                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                settings.allowFileAccessFromFileURLs = false
+                @Suppress("DEPRECATION")
+                settings.allowUniversalAccessFromFileURLs = false
+                settings.mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
                 // T-webview-popup-d3c6e10f: mirror ffc85ad's WebPreviewBottomSheet
                 // fix. Pages using `height: 100vh` + `overflow: hidden` were
                 // collapsing to a 0-height clipped box (white screen) on first

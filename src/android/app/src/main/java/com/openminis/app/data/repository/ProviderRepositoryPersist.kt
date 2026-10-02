@@ -40,11 +40,9 @@ internal suspend fun ProviderRepository.persistToDbAndMirror(config: ProviderCon
     // failure / corrupted prefs XML. We log so the situation is
     // observable; the DB already holds the new state authoritatively,
     // and a subsequent successful save will resync the mirror + hash.
-    // The downside if the next save never comes: a hash mismatch on
-    // next cold-start would try to re-import the stale mirror — but
-    // the dbConfig-fallback at the end of loadConfigSuspending keeps
-    // the DB rows when re-import fails or is rejected, so the user's
-    // data is not lost.
+    // If the mirror write fails, the DB remains authoritative. The next
+    // cold start detects the mismatch and repairs the compatibility mirror
+    // from the DB snapshot instead of importing stale JSON.
     val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
     // [T-android-provider-memo] Any persisted config change can reshape
     // instances/entries (baseURL, UA, azure flags, useResponsesAPI…). The

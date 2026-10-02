@@ -25,7 +25,8 @@ object SecurityGateHolder {
         if (p.contains(KEY_MODE)) {
             p.edit().putString(KEY_MODE, PermissionMode.ASK.name).apply()
         }
-        activeSessionMode = PermissionMode.ASK
+        activeSessionModes.clear()
+        legacyActiveSessionMode = PermissionMode.ASK
         gate.setPermissionMode(PermissionMode.ASK)
         val raw = p.getString(KEY_RULES, "[]") ?: "[]"
         val rules = mutableListOf<PermissionRule>()
@@ -57,15 +58,21 @@ object SecurityGateHolder {
             .edit().putString(KEY_MODE, mode.name).apply()
     }
 
-    @Volatile
-    private var activeSessionMode: PermissionMode = PermissionMode.ASK
+    private val activeSessionModes = java.util.concurrent.ConcurrentHashMap<String, PermissionMode>()
+    @Volatile private var legacyActiveSessionMode: PermissionMode = PermissionMode.ASK
 
-    fun setActiveSessionMode(mode: PermissionMode) {
-        activeSessionMode = if (mode.isYoyo()) PermissionMode.ALLOW_ALL else PermissionMode.ASK
-        gate.setPermissionMode(activeSessionMode)
+    fun setActiveSessionMode(mode: PermissionMode, sessionId: String? = null) {
+        val normalized = if (mode.isYoyo()) PermissionMode.ALLOW_ALL else PermissionMode.ASK
+        if (sessionId.isNullOrBlank()) legacyActiveSessionMode = normalized
+        else activeSessionModes[sessionId] = normalized
+        // Keep the legacy gate getter useful for settings/old callers. Decisions
+        // in intercept always use the caller's explicit mode below.
+        gate.setPermissionMode(normalized)
     }
 
-    fun activeSessionMode(): PermissionMode = activeSessionMode
+    fun activeSessionMode(sessionId: String? = null): PermissionMode =
+        if (sessionId.isNullOrBlank()) legacyActiveSessionMode
+        else activeSessionModes[sessionId] ?: PermissionMode.ASK
 
     fun setRules(context: Context, rules: List<PermissionRule>) {
         gate.setPermissionRules(rules)
@@ -100,8 +107,11 @@ object SecurityGateHolder {
         // Session allow-all is the same decision as global ALLOW_ALL. Applying
         // it here — before any Denied short-circuit — is what stops "本会话全部
         // 允许" from swallowing the command with no dialog.
-        val sessionAllowAll = ApprovalGate.isSessionAllowAll()
-        val mode = effectivePermissionMode(activeSessionMode, sessionAllowAll)
+        val sessionAllowAll = ApprovalGate.isSessionAllowAll(callerSessionId)
+        // A missing caller id is intentionally conservative: legacy global mode
+        // state must never turn an unbound operation into YOYO.
+        val storedMode = callerSessionId?.let(::activeSessionMode) ?: PermissionMode.ASK
+        val mode = effectivePermissionMode(storedMode, sessionAllowAll)
         val decision = gate.withCallerSession(callerSessionId) { gate.decide(cmd, mode) }
         gate.audit(cmd, decision, null)
         return when (decision) {
@@ -123,6 +133,7 @@ object SecurityGateHolder {
             is Decision.NeedConfirm -> {
                 val preview = decision.preview.take(240).ifBlank { decision.reason }
                 val id = ApprovalGate.requestApproval(
+                    callerSessionId,
                     canonical,
                     preview,
                     mustPrompt = decision.mustPrompt,
@@ -135,7 +146,7 @@ object SecurityGateHolder {
                     canonical,
                     preview,
                 )
-                val approved = ApprovalGate.waitFor(id)
+                val approved = ApprovalGate.waitFor(id, callerSessionId)
                 ApprovalNotifier.cancelApproval(context, id)
                 if (!approved) {
                     // [T-android-rejected-tool-retry-loop] A bare "rejected"

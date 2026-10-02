@@ -240,6 +240,15 @@ class ChatViewModel(
         /** Per-chunk cap; a runaway summary must not fill the pool. */
         internal const val SUMMARY_CHUNK_MAX_CHARS = 4_000
 
+        /** Keep both the opening context and the operationally important tail. */
+        internal fun preserveSummaryEdges(text: String, maxChars: Int): String {
+            if (text.length <= maxChars) return text
+            if (maxChars <= 1) return text.take(maxChars.coerceAtLeast(0))
+            val tailSize = maxChars / 3
+            val headSize = maxChars - tailSize - 1
+            return text.take(headSize) + "…" + text.takeLast(tailSize)
+        }
+
         /** Chunks injected per turn after retrieval. */
         internal const val SUMMARY_CHUNK_TOP_K = 3
 
@@ -273,7 +282,7 @@ class ChatViewModel(
          * retrieved by keyword later. Pure function, testable.
          */
         internal fun appendSummaryChunk(existingJson: String?, newSummary: String): String {
-            val capped = newSummary.take(SUMMARY_CHUNK_MAX_CHARS)
+            val capped = preserveSummaryEdges(newSummary, SUMMARY_CHUNK_MAX_CHARS)
             val kept = parseSummaryChunkRecords(existingJson)
                 .filter { it.first.isNotBlank() }
                 .toMutableList()
@@ -2127,15 +2136,17 @@ class ChatViewModel(
     @Volatile private var askUserDeferred: kotlinx.coroutines.CompletableDeferred<String>? = null
 
     val pendingApprovals: StateFlow<Map<String, ApprovalGate.ApprovalRequest>> =
-        ApprovalGate.pendingApprovals
+        ApprovalGate.pendingApprovals(realSessionId.ifEmpty { sessionId })
 
     fun approvePendingTool(id: String) {
-        ApprovalGate.approve(id)
+        val sid = realSessionId.ifEmpty { sessionId }
+        ApprovalGate.approve(id, sid)
         ApprovalNotifier.cancelApproval(context, id)
     }
 
     fun denyPendingTool(id: String) {
-        ApprovalGate.deny(id)
+        val sid = realSessionId.ifEmpty { sessionId }
+        ApprovalGate.deny(id, sid)
         ApprovalNotifier.cancelApproval(context, id)
     }
 
@@ -2151,7 +2162,8 @@ class ChatViewModel(
      * which contradicted the label the user tapped.
      */
     fun approveAllForSession(id: String) {
-        ApprovalGate.enableSessionAllowAll()
+        val sid = realSessionId.ifEmpty { sessionId }
+        ApprovalGate.enableSessionAllowAll(sid)
         approvePendingTool(id)
     }
 
@@ -2170,10 +2182,13 @@ class ChatViewModel(
     }
 
     internal fun applyGateMode(mode: com.openminis.app.security.PermissionMode) {
-        SecurityGateHolder.setActiveSessionMode(mode)
-        ApprovalGate.bindSession(realSessionId.ifEmpty { sessionId })
-        if (mode.isYoyo()) ApprovalGate.enableSessionAllowAll()
-        else ApprovalGate.resetSessionAllowAll()
+        val sid = realSessionId.ifEmpty { sessionId }
+        SecurityGateHolder.setActiveSessionMode(mode, sid)
+        // Preserve legacy behavior for older callers, but all gate state writes
+        // above and below are explicitly keyed by this ViewModel's session.
+        ApprovalGate.bindSession(sid)
+        if (mode.isYoyo()) ApprovalGate.enableSessionAllowAll(sid)
+        else ApprovalGate.resetSessionAllowAll(sid)
     }
 
     private fun activeOverrides(): com.openminis.app.data.model.ModelOverrides? {
@@ -3934,6 +3949,19 @@ class ChatViewModel(
         // so none re-adds an orphan side-channel entry after the wipe.
         clearAllStreamFlushStates()
         _streamingById.value = emptyMap()
+        // Reset window cursors, edge flags and pending tail work with the data.
+        timeline.reset()
+        loadingOlderFlag.set(false)
+        tailAttachQueued = false
+        tailAttachJob?.cancel()
+        tailAttachJob = null
+        _hasOlderMessages.value = false
+        _hasNewerMessages.value = false
+        _isLoadingHistory.value = false
+        pendingSendText = null
+        _pendingCaret.value = null
+        _showCompactBeforeSendPrompt.value = false
+        _compactSummary.value = null
         // Memory state — match iOS clearChat() field list one-for-one.
         _messages.value = emptyList()
         agentHistory.clear()

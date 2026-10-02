@@ -293,6 +293,13 @@ class BackupImporter(
         val dao = db.chatDao()
         val dataDir = File(root, "data")
 
+        // Restore content-addressed message bodies before rows point at them.
+        val bodyRoot = File(context.filesDir, "bodies")
+        BackupRestoreFiles.restore(root, fileIndex, BackupCategory.CHATS, bodyRoot) { path ->
+            if (!path.startsWith("chats/_bodies/")) null
+            else File(bodyRoot, path.removePrefix("chats/_bodies/"))
+        }
+
         // Folders first: sessions carry a folderId, so applying folders
         // beforehand means the reference resolves immediately.
         readJsonl(dataDir, "folders") { rec ->
@@ -475,6 +482,12 @@ class BackupImporter(
                 return@readJsonl
             }
             val createdAt = m.millis("createdAt") ?: 0
+            val incomingUpdated = m.millis("updatedAt") ?: createdAt
+            val existingMessage = dao.getMessage(sessionId, id)
+            if (existingMessage != null && (existingMessage.updatedAt ?: existingMessage.createdAt) >= incomingUpdated) {
+                report.skipped += 1
+                return@readJsonl
+            }
             dao.insertMessage(
                 MessageEntity(
                     id = id,
@@ -488,7 +501,10 @@ class BackupImporter(
                     sortOrder = importedSortOrder(sessionId, m.int("sortOrder")),
                     reasoningContent = m.str("reasoningContent"),
                     streamInterruptCount = m.int("streamInterruptCount") ?: 0,
-                    updatedAt = createdAt,
+                    updatedAt = incomingUpdated,
+                    bodyBytes = m.millis("bodyBytes") ?: 0,
+                    bodyRef = m.str("bodyRef"),
+                    bodySha = m.str("bodySha"),
                     // errorInfo is device-local (§0.2) and is never restored.
                     errorInfo = null,
                     // [T-token-attribution-snapshot] Absent in packages written
@@ -576,7 +592,7 @@ class BackupImporter(
         ) { path ->
             // "chats/<sid>/<rest…>"
             val parts = path.split('/')
-            if (parts.size < 3 || parts[0] != "chats") null
+            if (parts.size < 3 || parts[0] != "chats" || parts[1] == "_bodies") null
             else File(sessionsRoot, parts.drop(1).joinToString("/"))
         }
         applyFileResult(report, files)

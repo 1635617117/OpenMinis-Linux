@@ -32,24 +32,12 @@ internal fun ProviderRepository.saveConfig(config: ProviderConfig) {
             // consistent id shape rather than mixing legacy random uuids and
             // composite keys.
             //
-            // Catch persistence failures so callers stay fire-and-forget
-            // (matches the legacy `apply()` contract — pre-Room saveConfig
-            // never threw). DB write fails are rare in practice (disk full,
-            // SQLite corruption, transaction deadlock) but uncaught they'd
-            // crash whichever UI handler triggered the mutation. Still
-            // emit the in-memory state so the UI reflects the user's
-            // intent even when the disk write didn't land; the next
-            // successful save resyncs everything.
-            val canonical = try {
-                runBlocking { persistToDbAndMirror(config) }
-            } catch (e: Exception) {
-                android.util.Log.e(
-                    "ProviderRepo",
-                    "[ProviderStore] saveConfig persistence failed; emitting in-memory only: ${e.message}",
-                    e,
-                )
-                config
-            }
+            // Publish only after the DB transaction succeeds. Showing a
+            // state that was never durable lets the next restart silently
+            // discard the user's change and makes later read-modify-write
+            // operations build on a false snapshot. Callers can surface the
+            // exception or retry; the last published config remains intact.
+            val canonical = runBlocking { persistToDbAndMirror(config) }
             _config.value = canonical.copy(
                 instances = canonical.instances.toMutableList(),
                 modelEntries = canonical.modelEntries.toMutableList(),

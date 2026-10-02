@@ -426,7 +426,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
 
             val accessToken = withContext(Dispatchers.IO) {
                 val (code, state) = suspendCancellableCoroutine<Pair<String, String?>> { cont ->
-                    val server = OAuthCallbackServer(callbackPort) { receivedCode, receivedState ->
+                    val server = OAuthCallbackServer(callbackPort, expectedPath = CALLBACK_PATH, onCode = { receivedCode, receivedState ->
                         if (cont.isActive) {
                             // Successful redirect — clear the
                             // external-cancel hook before the callback
@@ -437,7 +437,7 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
                             loginCallbackServer?.onExternalCancel = null
                             cont.resume(receivedCode to receivedState)
                         }
-                    }
+                    })
                     // [T-xai-oauth-stop-resume, port iOS d1dbdd5d]
                     // If the user dismisses the Custom Tab before xAI
                     // redirects, externalCancel() resumes us with a
@@ -491,9 +491,9 @@ class XAIOAuthManager(context: Context, instanceId: String) : OAuthManager(conte
 
                 loginCallbackServer?.stop()
                 loginCallbackServer = null
-                Log.i(TAG, "xAI callback received — code length: ${code.length}")
+                Log.i(TAG, "xAI callback received: codePresent=${code.isNotEmpty()} statePresent=${!state.isNullOrEmpty()}")
 
-                if (expectedState.isNotEmpty() && state != null && state != expectedState) {
+                if (expectedState.isBlank() || state.isNullOrBlank() || state != expectedState) {
                     throw Exception("xAI OAuth state mismatch — possible CSRF, refusing to exchange")
                 }
 

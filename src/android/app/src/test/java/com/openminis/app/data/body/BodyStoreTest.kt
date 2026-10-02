@@ -29,6 +29,30 @@ class BodyStoreTest {
     }
 
     @Test
+    fun read_rejects_body_whose_content_hash_does_not_match_ref() {
+        val root = tempRoot()
+        val store = BodyStore(root)
+        val put = store.put("trusted".toByteArray())
+        val body = File(root, put.ref!!)
+        val bytes = body.readBytes()
+        bytes[bytes.lastIndex] = (bytes.last().toInt() xor 1).toByte()
+        body.writeBytes(bytes)
+        assertNull(store.read(put.ref!!, 1024))
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun discardTemps_keeps_recent_temp_but_removes_old_orphan() {
+        val root = tempRoot()
+        val recent = File(root, "recent.tmp").apply { writeText("in flight") }
+        val old = File(root, "old.tmp").apply { writeText("orphan") }
+        BodyStore(root).discardTemps(maxAgeMillis = 1_000, nowMillis = old.lastModified() + 2_000)
+        assertTrue(recent.exists())
+        assertFalse(old.exists())
+        root.deleteRecursively()
+    }
+
+    @Test
     fun over_cap_is_refused_before_a_file_is_written() {
         val root = tempRoot()
         val store = BodyStore(root)
@@ -47,6 +71,16 @@ class BodyStoreTest {
         assertFalse(put.ok)
         assertNull(put.ref)
         assertTrue(root.listFiles().orEmpty().none { it.isFile && !it.name.endsWith(".tmp") })
+        root.deleteRecursively()
+    }
+
+    @Test
+    fun near_cap_raw_body_round_trips_under_admission_budget() {
+        val root = tempRoot()
+        val payload = ByteArray(ResourceLimits.MAX_DECLARED_UNCOMPRESSED) { (it * 31).toByte() }
+        val put = BodyStore(root).put(payload)
+        assertTrue(put.ok)
+        assertEquals(payload.size, BodyStore(root).read(put.ref!!, payload.size)!!.size)
         root.deleteRecursively()
     }
 

@@ -21,7 +21,7 @@ object PersistedMessageStatus {
             onDelete = ForeignKey.CASCADE,
         )
     ],
-    indices = [Index(value = ["session_id", "sort_order"])]
+    indices = [Index(value = ["session_id", "sort_order"], unique = true)]
 )
 data class MessageEntity(
     @PrimaryKey val id: String,

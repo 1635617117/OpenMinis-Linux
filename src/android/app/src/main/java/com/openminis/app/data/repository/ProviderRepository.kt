@@ -99,6 +99,18 @@ class ProviderRepository(private val context: Context) {
         /** [T-newchat-default-model-fallback-android] Global last-used model entry id. */
         internal const val KEY_LAST_USED_ENTRY = "lastUsedModelEntryId"
 
+        /** Single source of truth for provider type × credential support. */
+        internal fun supportedCredentials(type: ProviderType): List<ProviderCredential> = when (type) {
+            ProviderType.anthropic, ProviderType.openAI, ProviderType.openRouter,
+            ProviderType.xAI, ProviderType.kimiCode, ProviderType.openAIResponses ->
+                listOf(ProviderCredential.apiKey, ProviderCredential.oauth)
+            ProviderType.gemini -> listOf(ProviderCredential.apiKey)
+            ProviderType.antigravity, ProviderType.unsupported -> listOf(ProviderCredential.apiKey)
+        }
+
+        internal fun supportsCredential(type: ProviderType, credential: ProviderCredential): Boolean =
+            credential in supportedCredentials(type)
+
         /**
          * [T-android-provider-voice] Normalize a base URL for shadow-voice
          * cross-instance de-dup: lowercased, trailing "/" and "/v1" stripped.
@@ -300,13 +312,9 @@ class ProviderRepository(private val context: Context) {
         if (_configLoaded.value) return
         synchronized(configLock) {
             if (_configLoaded.value) return
-            // [T-android-provider-empty-load-wipe] loadConfig() throws when the
-            // store is unreadable. Do NOT let that escape into the caller: this
-            // runs from UI handlers (every read-modify-write mutator calls it),
-            // and a throw there crashes whichever gesture triggered it. Leaving
-            // _configLoaded false means the next access retries, and callers
-            // see the empty placeholder — which is safe, because the mutators'
-            // saves cannot overwrite a store the loader refused to read.
+            // A read-modify-write operation must never proceed from the empty
+            // placeholder when persisted data could not be read. Keep this
+            // failure observable to each caller so it can abort before mutation.
             val loaded = try {
                 loadConfig()
             } catch (e: Exception) {
@@ -314,7 +322,7 @@ class ProviderRepository(private val context: Context) {
                     "ProviderRepo",
                     "[ProviderStore] ensureConfigLoaded failed; staying unloaded for retry: ${e.message}",
                 )
-                return
+                throw IllegalStateException("Provider configuration could not be loaded; mutation aborted", e)
             }
             _config.value = loaded
             _configLoaded.value = true
@@ -1162,6 +1170,7 @@ class ProviderRepository(private val context: Context) {
 
     /** Append [entryId] to the agent-loop direct-pin list if not already there. */
     fun addAgentLoopEntry(entryId: String) {
+        ensureConfigLoaded()
         val cur = _config.value.agentLoopModelEntryIds.toList()
         if (entryId in cur) return
         setAgentLoopEntryIds(cur + entryId)
@@ -1169,6 +1178,7 @@ class ProviderRepository(private val context: Context) {
 
     /** Remove [entryId] from the agent-loop direct-pin list. No-op if absent. */
     fun removeAgentLoopEntry(entryId: String) {
+        ensureConfigLoaded()
         val cur = _config.value.agentLoopModelEntryIds.toList()
         if (entryId !in cur) return
         setAgentLoopEntryIds(cur.filterNot { it == entryId })
@@ -1176,6 +1186,7 @@ class ProviderRepository(private val context: Context) {
 
     /** Append [groupId] to the agent-loop group-pin list if not already there. */
     fun addAgentLoopGroup(groupId: String) {
+        ensureConfigLoaded()
         val cur = _config.value.agentLoopGroupIds.toList()
         if (groupId in cur) return
         setAgentLoopGroupIds(cur + groupId)
@@ -1183,6 +1194,7 @@ class ProviderRepository(private val context: Context) {
 
     /** Remove [groupId] from the agent-loop group-pin list. No-op if absent. */
     fun removeAgentLoopGroup(groupId: String) {
+        ensureConfigLoaded()
         val cur = _config.value.agentLoopGroupIds.toList()
         if (groupId !in cur) return
         setAgentLoopGroupIds(cur.filterNot { it == groupId })
@@ -1355,6 +1367,7 @@ class ProviderRepository(private val context: Context) {
     var defaultPrimaryGroupId: String?
         get() = _config.value.defaultPrimaryGroupId
         set(value) = synchronized(configLock) {
+            ensureConfigLoaded()
             val config = workingCopy()
             config.defaultPrimaryGroupId = value
             saveConfig(config)
@@ -1363,6 +1376,7 @@ class ProviderRepository(private val context: Context) {
     var defaultSubGroupId: String?
         get() = _config.value.defaultSubGroupId
         set(value) = synchronized(configLock) {
+            ensureConfigLoaded()
             val config = workingCopy()
             config.defaultSubGroupId = value
             saveConfig(config)

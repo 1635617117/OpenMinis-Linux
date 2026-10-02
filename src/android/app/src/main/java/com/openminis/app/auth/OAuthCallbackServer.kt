@@ -9,10 +9,13 @@ import java.net.URI
 class OAuthCallbackServer(
     private val port: Int,
     private val fallbackPorts: List<Int> = emptyList(),
+    private val expectedPath: String = "/callback",
     private val onCode: (code: String, state: String?) -> Unit,
 ) {
     companion object {
         private const val TAG = "OAuthCallbackServer"
+        private const val MAX_REQUEST_LINE = 4096
+        private const val MAX_RESPONSE_BYTES = 1024
     }
 
     private var serverSocket: ServerSocket? = null
@@ -59,48 +62,28 @@ class OAuthCallbackServer(
                 while (running) {
                     val socket = serverSocket?.accept() ?: break
                     try {
+                        socket.soTimeout = 5000
                         val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
                         val requestLine = reader.readLine() ?: continue
-                        Log.d(TAG, "Request: $requestLine")
-
-                        // CORS preflight for providers (e.g. xAI) that
-                        // OPTIONS /callback from their authorization page
-                        // before redirecting the browser. Without this we
-                        // return a 404 to the preflight and the browser
-                        // never follows the redirect — OAuth stalls.
-                        // Read the rest of the headers to find Origin and
-                        // only echo back permissive CORS for known xAI hosts.
-                        if (requestLine.startsWith("OPTIONS")) {
-                            var origin: String? = null
-                            while (true) {
-                                val h = reader.readLine() ?: break
-                                if (h.isEmpty()) break
-                                val lower = h.lowercase()
-                                if (lower.startsWith("origin:")) {
-                                    origin = h.substringAfter(":").trim()
-                                }
-                            }
-                            val trustedHosts = listOf("auth.x.ai", "accounts.x.ai")
-                            val allowOrigin = if (origin != null && trustedHosts.any { origin!!.contains(it) }) {
-                                origin
-                            } else {
-                                "null"
-                            }
-                            val pre = "HTTP/1.1 204 No Content\r\n" +
-                                "Access-Control-Allow-Origin: $allowOrigin\r\n" +
-                                "Access-Control-Allow-Methods: GET, OPTIONS\r\n" +
-                                "Access-Control-Allow-Headers: *\r\n" +
-                                "Access-Control-Max-Age: 600\r\n" +
-                                "Connection: close\r\n\r\n"
-                            socket.getOutputStream().write(pre.toByteArray())
-                            socket.close()
-                            continue
+                        if (requestLine.length > MAX_REQUEST_LINE) { writeResponse(socket, 414, "Request URI too long"); continue }
+                        val parts = requestLine.split(' ')
+                        if (parts.size != 3 || parts[2] != "HTTP/1.1") { writeResponse(socket, 400, "Bad request"); continue }
+                        if (parts[0] != "GET") { writeResponse(socket, 405, "Method not allowed"); continue }
+                        val requestTarget = parts[1]
+                        var headerBytes = 0
+                        while (true) {
+                            val header = reader.readLine() ?: break
+                            headerBytes += header.length
+                            if (header.isEmpty() || headerBytes > MAX_REQUEST_LINE) break
                         }
+                        if (headerBytes > MAX_REQUEST_LINE) { writeResponse(socket, 431, "Headers too large"); continue }
 
-                        // Parse GET /callback?code=xxx&state=yyy HTTP/1.1
-                        val parts = requestLine.split(" ")
-                        if (parts.size >= 2) {
-                            val uri = URI("http://localhost${ parts[1] }")
+                        // Parse only the exact loopback callback path.
+                        val uri = URI("http://localhost$requestTarget")
+                            if (uri.rawPath != expectedPath || uri.rawFragment != null || (uri.rawQuery?.length ?: 0) > MAX_REQUEST_LINE) {
+                                writeResponse(socket, 404, "Not found")
+                                continue
+                            }
                             val params = uri.query?.split("&")?.associate {
                                 val kv = it.split("=", limit = 2)
                                 kv[0] to (if (kv.size > 1) java.net.URLDecoder.decode(kv[1], "UTF-8") else "")
@@ -111,16 +94,14 @@ class OAuthCallbackServer(
 
                             // Send response
                             val html = "<html><body><h1>Authorization complete</h1><p>You can close this tab.</p><script>window.close()</script></body></html>"
-                            val response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: ${html.length}\r\nConnection: close\r\n\r\n$html"
-                            socket.getOutputStream().write(response.toByteArray())
-                            socket.close()
+                            writeResponse(socket, 200, html)
+                            Log.i(TAG, "OAuth callback accepted: codePresent=${!code.isNullOrEmpty()} statePresent=${!state.isNullOrEmpty()}")
 
-                            if (code != null) {
+                            if (!code.isNullOrEmpty()) {
                                 onCode(code, state)
                                 stop()
                                 return@Thread
                             }
-                        }
                         socket.close()
                     } catch (e: Exception) {
                         Log.w(TAG, "Error handling connection", e)
@@ -131,6 +112,14 @@ class OAuthCallbackServer(
                 if (running) Log.e(TAG, "Server error", e)
             }
         }.start()
+    }
+
+    private fun writeResponse(socket: java.net.Socket, status: Int, body: String) {
+        val safeBody = body.toByteArray(Charsets.UTF_8).let { if (it.size > MAX_RESPONSE_BYTES) it.copyOf(MAX_RESPONSE_BYTES) else it }
+        val reason = when (status) { 200 -> "OK"; 400 -> "Bad Request"; 404 -> "Not Found"; 405 -> "Method Not Allowed"; 414 -> "URI Too Long"; 431 -> "Request Header Fields Too Large"; else -> "Error" }
+        val response = "HTTP/1.1 $status $reason\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: ${safeBody.size}\r\nConnection: close\r\n\r\n"
+        socket.getOutputStream().use { it.write(response.toByteArray()); it.write(safeBody) }
+        socket.close()
     }
 
     fun stop() {

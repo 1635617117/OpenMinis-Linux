@@ -167,6 +167,33 @@ class CompactToolPairingTest {
     }
 
     @Test
+    fun `result before use is dropped even when a later call has same id`() {
+        val slice = listOf(toolResult("call_ORDER"), assistantToolUse("call_ORDER"))
+        val repaired = dropOrphanedToolParts(slice)
+        assertTrue("the earlier result is invalid", repaired.none { m ->
+            m.contentParts.any { it is AgentContentPart.ToolResult }
+        })
+        assertTrue("the trailing in-flight call is retained", repaired.last().contentParts.any {
+            it is AgentContentPart.ToolUse && it.id == "call_ORDER"
+        })
+    }
+
+    @Test
+    fun `a result with a mismatched name does not pair`() {
+        val slice = listOf(
+            assistantToolUse("call_NAME"),
+            LLMMessage(
+                role = LLMMessage.Role.USER,
+                content = "",
+                contentParts = listOf(AgentContentPart.ToolResult(id = "call_NAME", name = "different_tool", content = "ok")),
+            ),
+        )
+        val repaired = dropOrphanedToolParts(slice)
+        assertTrue(repaired.any { it.contentParts.any { p -> p is AgentContentPart.ToolResult && p.name == "shell_execute" && p.isError } })
+        assertTrue(repaired.none { it.contentParts.any { p -> p is AgentContentPart.ToolResult && p.name == "different_tool" } })
+    }
+
+    @Test
     fun `a plain text message with no parts is never dropped`() {
         val slice = listOf(
             toolResult("call_ORPHAN"),

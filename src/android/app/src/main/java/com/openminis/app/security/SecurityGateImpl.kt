@@ -76,7 +76,7 @@ class SecurityGateImpl : SecurityGate {
             "file_read", "list_dir", "grep", "grep_source", "glob",
             "web_search", "web_fetch", "search_sessions", "read_session",
             "memory_get", "recall_memory", "read_image", "describe_image",
-            "code_graph", "browser_use", "ocr_image", "get_screen_time",
+            "code_graph", "ocr_image", "get_screen_time",
         )
         val WRITE_TOOLS = setOf(
             "file_write", "file_edit", "multi_edit", "su_exec",
@@ -115,6 +115,7 @@ class SecurityGateImpl : SecurityGate {
             "list_dir", "grep", "grep_source", "glob" ->
                 GateCommand(name, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读文件/目录操作，可逆")
             "web_search", "web_fetch" -> GateCommand(name, toolArgs, Capability.NET, Reversibility.REVERSIBLE, "只读网络")
+            "browser_use" -> classifyBrowserUse(toolArgs)
             "ocr_image" -> GateCommand(name, toolArgs, Capability.FS, Reversibility.REVERSIBLE, "只读图片文字")
             "get_screen_time" -> GateCommand(name, toolArgs, Capability.SYSTEM, Reversibility.REVERSIBLE, "只读屏幕使用时间")
             "execute_code", "code_exec" ->
@@ -208,7 +209,9 @@ class SecurityGateImpl : SecurityGate {
         if (rule == "allow") return Decision.Allow("规则放行: ${cmd.toolName}")
 
         // [2] Always pass: read-only tools (unless mode==DENY_ALL).
-        if (cmd.toolName in READ_ONLY_TOOLS && mode != PermissionMode.DENY_ALL) {
+        if ((cmd.toolName in READ_ONLY_TOOLS || (cmd.toolName == "browser_use" && isBrowserReadOnlyAction(cmd))) &&
+            mode != PermissionMode.DENY_ALL
+        ) {
             return Decision.Allow("只读工具自动放行")
         }
 
@@ -264,7 +267,9 @@ class SecurityGateImpl : SecurityGate {
             return Decision.Denied("当前为拒绝全部模式")
         }
         if (mode == PermissionMode.READ_ONLY || mode == PermissionMode.PLAN) {
-            if (cmd.toolName in WRITE_TOOLS || cmd.toolName in SHELL_TOOLS) {
+            if (cmd.toolName in WRITE_TOOLS || cmd.toolName in SHELL_TOOLS ||
+                (cmd.toolName == "browser_use" && !isBrowserReadOnlyAction(cmd))
+            ) {
                 return Decision.Denied("只读/计划模式禁止写与执行")
             }
         }
@@ -380,7 +385,8 @@ class SecurityGateImpl : SecurityGate {
 
     private fun isLowRisk(cmd: GateCommand, command: String, risk: RiskLevel): Boolean {
         if (risk != RiskLevel.NORMAL) return false
-        if (cmd.toolName in READ_ONLY_TOOLS || cmd.toolName in COORDINATOR_TOOLS) return true
+        if (cmd.toolName in READ_ONLY_TOOLS && !(cmd.toolName == "browser_use" && cmd.reversibility == Reversibility.IRREVERSIBLE)) return true
+        if (cmd.toolName in COORDINATOR_TOOLS) return true
         if (cmd.toolName in SHELL_TOOLS) return isSafeReadOnlyCommand(command)
         return false
     }
@@ -556,6 +562,32 @@ class SecurityGateImpl : SecurityGate {
                 "禁止删除 /data 整体"
             else -> "致命违规操作"
         }
+    }
+
+    private fun isBrowserReadOnlyAction(cmd: GateCommand): Boolean {
+        val action = try { JSONObject(cmd.toolArgs).optString("action", "").lowercase() } catch (_: Exception) { "" }
+        return action in setOf(
+            "screenshot", "get_text", "scroll", "get_page_info", "find_elements", "hover",
+            "get_readable", "get_backbone", "list_tabs", "wait_for_dom_stable",
+        )
+    }
+
+    private fun classifyBrowserUse(toolArgs: String): GateCommand {
+        val action = try { JSONObject(toolArgs).optString("action", "").lowercase() } catch (_: Exception) { "" }
+        val readOnly = action in setOf(
+            "screenshot", "get_text", "scroll", "get_page_info", "find_elements", "hover",
+            "get_readable", "get_backbone", "list_tabs", "wait_for_dom_stable",
+        )
+        val capability = when (action) {
+            "fetch" -> Capability.NET
+            "get_cookies", "set_cookies", "execute_js", "navigate", "click", "type" -> Capability.NET
+            else -> Capability.SYSTEM
+        }
+        return GateCommand(
+            "browser_use", toolArgs, capability,
+            if (readOnly) Reversibility.REVERSIBLE else Reversibility.IRREVERSIBLE,
+            if (readOnly) "浏览器只读 action: $action" else "浏览器副作用 action: ${action.ifEmpty { "unknown" }}",
+        )
     }
 
     private fun classifyShellCommand(toolName: String, toolArgs: String): GateCommand {

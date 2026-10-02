@@ -21,7 +21,7 @@ import com.openminis.app.data.db.CodeEdgeEntity
         CodeEdgeEntity::class,
         SessionGoalEntity::class,
     ],
-    version = 20, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
+    version = 21, // keep DatabaseVersionGuard.CODE_DB_VERSION in lockstep
     // [T-android-downgrade-compat] Kept ON so MigrationTestHelper and CI can
     // validate every migration (and its downgrade counterpart) against the
     // committed schema json. Without it the upgrade/downgrade chain has no
@@ -470,7 +470,7 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL(
                     "UPDATE messages SET preview = CASE " +
                         "WHEN body_bytes <= 2048 THEN parts_json " +
-                        "ELSE '[{\"type\":\"text\",\"text\":' || json_quote(substr(parts_json, 1, 2000)) || '}]' " +
+                        "ELSE '[{\"type\":\"text\",\"value\":' || json_quote(substr(parts_json, 1, 2000)) || '}]' " +
                         "END",
                 )
             }
@@ -505,6 +505,43 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_20_19 = object : Migration(20, 19) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 // Keep session_goals so a downgrade does not discard a user's goal.
+            }
+        }
+
+        /** Re-number legacy duplicate cursors deterministically before enforcing uniqueness. */
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.beginTransaction()
+                try {
+                    db.execSQL("DROP INDEX IF EXISTS `index_messages_session_id_sort_order`")
+                    db.execSQL("""
+                        UPDATE messages
+                        SET sort_order = (
+                            SELECT COUNT(*) - 1
+                            FROM messages AS prior
+                            WHERE prior.session_id = messages.session_id
+                              AND (prior.created_at < messages.created_at OR
+                                   (prior.created_at = messages.created_at AND prior.id <= messages.id))
+                        )
+                    """.trimIndent())
+                    db.execSQL(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS `index_messages_session_id_sort_order` " +
+                            "ON `messages` (`session_id`, `sort_order`)"
+                    )
+                    db.setTransactionSuccessful()
+                } finally {
+                    db.endTransaction()
+                }
+            }
+        }
+
+        val MIGRATION_21_20 = object : Migration(21, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DROP INDEX IF EXISTS `index_messages_session_id_sort_order`")
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS `index_messages_session_id_sort_order` " +
+                        "ON `messages` (`session_id`, `sort_order`)"
+                )
             }
         }
 
@@ -550,6 +587,7 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_17_18, MIGRATION_18_17,
                         MIGRATION_18_19, MIGRATION_19_18,
                         MIGRATION_19_20, MIGRATION_20_19,
+                        MIGRATION_20_21, MIGRATION_21_20,
                     )
                     .build()
                     .also { INSTANCE = it }

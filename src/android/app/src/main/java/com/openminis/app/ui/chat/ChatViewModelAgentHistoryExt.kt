@@ -26,13 +26,21 @@ internal fun ChatViewModel.effectiveAgentHistoryUncounted(): List<LLMMessage> {
     val chunkRetrieved: String? = marker.summaryChunks?.let { json ->
         val query = agentHistory.lastOrNull { it.role == LLMMessage.Role.USER }?.content.orEmpty()
         ChatViewModel.selectSummaryChunks(json, query)
-            .takeIf { it.size >= 2 }
+            .takeIf { it.isNotEmpty() }
             ?.joinToString("\n\n---\n\n")
     }
-    val effectiveSummaryWrappedText = if (chunkRetrieved != null) {
+    val effectiveSummaryWrappedText = if (chunkRetrieved != null && chunkRetrieved != summary) {
+        // The chunk pool is an accelerator for relevance, not the source of
+        // truth. It intentionally evicts old per-compaction chunks, while
+        // `summary` is regenerated from previousSummary and therefore carries
+        // the cumulative history. Always retain that cumulative summary so a
+        // long-running chat cannot lose early decisions merely because the
+        // rolling pool crossed SUMMARY_CHUNK_POOL_MAX.
         "<context-summary>\n" +
-            "The following is retrieved background context from earlier parts of this conversation that were compacted. Only the parts relevant to the current instruction are shown.\n" +
+            "The following cumulative summary preserves the earlier conversation. A few relevant compaction excerpts follow as additional detail.\n" +
             "Treat it as background context only. The user's most recent message (below or in the next turn) takes precedence — if it changes the task, the goal, or any numbers/scope, follow the new instruction and do not resume the old plan from this summary.\n\n" +
+            summary +
+            "\n\n--- relevant compaction excerpts ---\n" +
             chunkRetrieved +
             "\n</context-summary>"
     } else {

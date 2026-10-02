@@ -30,7 +30,23 @@ class ResidentWindowTest {
         content = "",
         contentParts = listOf(
             AgentContentPart.ToolUse(id, "shell_execute", JSONObject().put("cmd", "run")),
-            AgentContentPart.ToolResult("call-$id", "shell_execute", "y".repeat(chars)),
+            AgentContentPart.ToolResult(id, "shell_execute", "y".repeat(chars)),
+        ),
+    )
+
+    private fun splitToolUse(id: String) = LLMMessage(
+        role = LLMMessage.Role.ASSISTANT,
+        content = "",
+        contentParts = listOf(
+            AgentContentPart.ToolUse(id, "shell_execute", JSONObject().put("cmd", "run")),
+        ),
+    )
+
+    private fun splitToolResult(id: String, chars: Int) = LLMMessage(
+        role = LLMMessage.Role.USER,
+        content = "",
+        contentParts = listOf(
+            AgentContentPart.ToolResult(id, "shell_execute", "y".repeat(chars)),
         ),
     )
 
@@ -79,6 +95,25 @@ class ResidentWindowTest {
             firstParts.none { it is AgentContentPart.ToolResult } ||
                 firstParts.any { it is AgentContentPart.ToolUse },
         )
+    }
+
+    @Test
+    fun `a split tool round is never cut between use and result`() {
+        val history = listOf(
+            text("head"),
+            splitToolUse("split-call"),
+            splitToolResult("split-call", 4096),
+            text("tail"),
+        )
+        val cut = ResidentWindow.byteCut(history, budget = 1L)
+        assertTrue("must cut at least the head: $cut", cut > 0)
+        val kept = history.subList(cut, history.size)
+        val uses = kept.flatMap { message ->
+            message.contentParts.filterIsInstance<AgentContentPart.ToolUse>().map { it.id to it.name }
+        }.toSet()
+        kept.flatMap { it.contentParts.filterIsInstance<AgentContentPart.ToolResult>() }.forEach { result ->
+            assertTrue("result ${result.id} must retain its use", (result.id to result.name) in uses)
+        }
     }
 
     @Test
