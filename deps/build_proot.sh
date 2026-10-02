@@ -30,7 +30,9 @@ set -e
 #   - Android NDK r29 (29.0.14206865). Set $ANDROID_NDK_HOME to that
 #     revision, or install it with sdkmanager "ndk;29.0.14206865".
 #     An existing r28 tree is not accepted.
-#   - curl, tar, make, awk, sed
+#   - curl, tar, make, sed, and **gawk** (not just any awk — see the
+#     strtonum note in build_proot()). Debian/Ubuntu default to mawk, which
+#     is not enough.
 #
 # Usage:
 #   ./build_proot.sh           # incremental build
@@ -286,6 +288,43 @@ build_proot() {
 
     log_info "Building proot (aarch64)..."
 
+    # -----------------------------------------------------------------------
+    # src/loader/loader-info.awk calls strtonum(), which is a **gawk
+    # extension**. Debian and Ubuntu ship mawk as /usr/bin/awk, and proot's
+    # GNUmakefile:239 invokes a bare `awk` with no $(AWK) variable to
+    # override, so on a stock system the build dies deep in the loader step:
+    #
+    #   awk: loader/loader-info.awk: line 9: function strtonum never defined
+    #   make: *** [GNUmakefile:239: loader/loader-info.c] Error 2
+    #
+    # Nothing about that message points at the awk flavour, which makes it a
+    # very expensive thing to diagnose. Resolve an awk that genuinely supports
+    # strtonum and, when it is not the default one, shadow it through a PATH
+    # shim for the make invocation only — so the rest of the build keeps using
+    # whatever awk it was already using.
+    # -----------------------------------------------------------------------
+    awk_supports_strtonum() {
+        "$1" 'BEGIN { if (strtonum("0x10") != 16) exit 1 }' >/dev/null 2>&1 </dev/null
+    }
+    local strtonum_awk=""
+    local cand
+    for cand in awk gawk; do
+        command -v "$cand" >/dev/null 2>&1 || continue
+        if awk_supports_strtonum "$(command -v "$cand")"; then
+            strtonum_awk="$(command -v "$cand")"
+            break
+        fi
+    done
+    if [ -z "$strtonum_awk" ]; then
+        log_error "proot's loader-info.awk needs gawk's strtonum(); the default awk does not have it. Install gawk (Debian/Ubuntu: apt-get install -y gawk) and re-run."
+    fi
+    local awk_shim=""
+    if [ "$(command -v awk)" != "$strtonum_awk" ]; then
+        awk_shim="$(mktemp -d)"
+        ln -s "$strtonum_awk" "$awk_shim/awk"
+        log_info "default awk lacks strtonum(); shadowing it with $strtonum_awk for this build"
+    fi
+
     # proot's GNUmakefile has a quirk where `-f <path>` out-of-tree builds
     # double-prefix source paths via $(SRC)$<. Simpler to build in-tree under
     # src/ — object files land next to sources, cleaned by `make clean`.
@@ -298,6 +337,10 @@ build_proot() {
 
     (
         cd "$PROOT_DIR/src"
+        if [ -n "$awk_shim" ]; then
+            PATH="$awk_shim:$PATH"
+            export PATH
+        fi
         if [ "$FORCE_REBUILD" = "1" ]; then
             make clean >/dev/null 2>&1 || true
         fi
@@ -312,6 +355,8 @@ build_proot() {
             LDFLAGS="$ldflags" \
             -j"$(sysctl -n hw.ncpu 2>/dev/null || nproc)"
     )
+
+    [ -n "$awk_shim" ] && rm -rf "$awk_shim"
 
     local built="$PROOT_DIR/src/proot"
     if [ ! -f "$built" ]; then
