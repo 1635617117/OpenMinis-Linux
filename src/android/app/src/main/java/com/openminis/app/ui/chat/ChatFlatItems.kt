@@ -23,6 +23,15 @@ internal sealed class FlatChatItem {
     abstract val contentType: String
 
     /**
+     * Defensive-dedupe helper: the same row with `#<n>` appended to the key.
+     * The suffix lives ONLY in the key — message ids and `messageId` fields
+     * stay clean so key parsing (FlatKeys.parse) always recovers the real
+     * id. Before this hook the dedupe rewrote UserBubble.message.id itself,
+     * which is what desynced the up-button target resolution.
+     */
+    abstract fun withKeySuffix(suffix: String): FlatChatItem
+
+    /**
      * Cheap-equals — see [AssistantText]. User messages are short and don't
      * stream, but during a streaming overlay rebuild we still re-create the
      * entire FlatChatItem list, and LazyColumn calls equals to decide skip.
@@ -40,9 +49,11 @@ internal sealed class FlatChatItem {
     class UserBubble(
         val message: ChatMessage,
         val precededByUser: Boolean = false,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "user:${message.id}"
+        override val key = FlatKeys.of(FlatKeys.KIND_USER, message.id) + keySuffix
         override val contentType = "user"
+        override fun withKeySuffix(suffix: String): FlatChatItem = UserBubble(message, precededByUser, suffix)
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is UserBubble) return false
@@ -57,9 +68,11 @@ internal sealed class FlatChatItem {
         val messageId: String,
         val speakerName: String = "",
         val speakerVendor: String = "",
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "header:$messageId"
+        override val key = FlatKeys.of(FlatKeys.KIND_HEADER, messageId) + keySuffix
         override val contentType = "header"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
     /**
@@ -79,9 +92,12 @@ internal sealed class FlatChatItem {
         val isStreaming: Boolean,
         /** Joined raw markdown of the parent message, used by the selection toolbar's Copy Markdown action. */
         val messageMarkdown: String,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "text:$messageId:${block.id}"
+        override val key = FlatKeys.of(FlatKeys.KIND_TEXT, messageId, block.id) + keySuffix
         override val contentType = "text"
+        override fun withKeySuffix(suffix: String): FlatChatItem =
+            AssistantText(messageId, block, isStreaming, messageMarkdown, suffix)
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is AssistantText) return false
@@ -126,9 +142,23 @@ internal sealed class FlatChatItem {
         val showTranslate: Boolean = false,
         val segmentText: String = "",
         val translateWholeReply: Boolean = false,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "mdblock:$messageId:$parentBlockId:$blockIndex"
+        override val key = FlatKeys.of(FlatKeys.KIND_MDBLOCK, messageId, parentBlockId, blockIndex) + keySuffix
         override val contentType = "mdblock"
+        override fun withKeySuffix(suffix: String): FlatChatItem = AssistantMarkdownBlock(
+            messageId = messageId,
+            parentBlockId = parentBlockId,
+            rawText = rawText,
+            blockIndex = blockIndex,
+            isLastBlockOfMessage = isLastBlockOfMessage,
+            messageIsStreaming = messageIsStreaming,
+            messageMarkdown = messageMarkdown,
+            showTranslate = showTranslate,
+            segmentText = segmentText,
+            translateWholeReply = translateWholeReply,
+            keySuffix = suffix,
+        )
         /** True when this fragment is the streaming tail of a live message. */
         val isStreaming: Boolean get() = messageIsStreaming && isLastBlockOfMessage
         override fun equals(other: Any?): Boolean {
@@ -179,9 +209,11 @@ internal sealed class FlatChatItem {
         // restored / legacy items render collapsed (the pre-change
         // behaviour for non-trailing thinking).
         val isLastBlockOverall: Boolean = false,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "thinking:$messageId:${block.id}"
+        override val key = FlatKeys.of(FlatKeys.KIND_THINKING, messageId, block.id) + keySuffix
         override val contentType = "thinking"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
     /** Collapsed thinking+tools header. Same decoration family as ThinkingBlock. */
@@ -192,9 +224,11 @@ internal sealed class FlatChatItem {
         val expanded: Boolean,
         val hasFailure: Boolean,
         val processTools: List<ProcessToolRef> = emptyList(),
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "process:$messageId"
+        override val key = FlatKeys.of(FlatKeys.KIND_PROCESS, messageId) + keySuffix
         override val contentType = "process"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
     data class AssistantToolUse(
@@ -203,27 +237,37 @@ internal sealed class FlatChatItem {
         val allToolBlocks: List<AssistantBlock>,
         /** True if this is the last cancelled tool in its message — only one Retry button per message. */
         val isLastCancelled: Boolean = false,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "tool:$messageId:${block.id}"
+        override val key = FlatKeys.of(FlatKeys.KIND_TOOL, messageId, block.id) + keySuffix
         override val contentType = "tool"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
     data class AssistantInfo(
         val messageId: String,
         val block: AssistantBlock,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "info:$messageId:${block.id}"
+        override val key = FlatKeys.of(FlatKeys.KIND_INFO, messageId, block.id) + keySuffix
         override val contentType = "info"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
-    data class AssistantTyping(val messageId: String) : FlatChatItem() {
-        override val key = "typing:$messageId"
+    data class AssistantTyping(val messageId: String, private val keySuffix: String = "") : FlatChatItem() {
+        override val key = FlatKeys.of(FlatKeys.KIND_TYPING, messageId) + keySuffix
         override val contentType = "typing"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
-    data class AssistantError(val messageId: String, val error: String) : FlatChatItem() {
-        override val key = "error:$messageId"
+    data class AssistantError(
+        val messageId: String,
+        val error: String,
+        private val keySuffix: String = "",
+    ) : FlatChatItem() {
+        override val key = FlatKeys.of(FlatKeys.KIND_ERROR, messageId) + keySuffix
         override val contentType = "error"
+        override fun withKeySuffix(suffix: String): FlatChatItem = copy(keySuffix = suffix)
     }
 
     /**
@@ -235,9 +279,12 @@ internal sealed class FlatChatItem {
         val isStreaming: Boolean,
         /** Same as content here (no separate text-block markdown for legacy rows). */
         val messageMarkdown: String = content,
+        private val keySuffix: String = "",
     ) : FlatChatItem() {
-        override val key = "legacy:$messageId"
+        override val key = FlatKeys.of(FlatKeys.KIND_LEGACY, messageId) + keySuffix
         override val contentType = "legacy"
+        override fun withKeySuffix(suffix: String): FlatChatItem =
+            AssistantLegacyContent(messageId, content, isStreaming, messageMarkdown, suffix)
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is AssistantLegacyContent) return false
@@ -306,44 +353,14 @@ internal fun buildFlatChatItems(
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
     fun dedupe(item: FlatChatItem): FlatChatItem {
         // Defensive: duplicated keys crash LazyColumn. If any slip through, suffix
-        // a counter until unique. This should never fire if upstream dedup is correct.
+        // a counter until unique. This should never fire if upstream dedup is
+        // correct. The suffix is appended to the KEY only — never to
+        // message.id / messageId (that used to desync every key consumer; see
+        // FlatKeys KDoc).
         if (usedKeys.add(item.key)) return item
         var n = 2
-        while (!usedKeys.add("${item.key}#$n")) n++
-        return when (item) {
-            is FlatChatItem.UserBubble -> FlatChatItem.UserBubble(item.message.copy(id = "${item.message.id}#$n"), item.precededByUser)
-            is FlatChatItem.AssistantHeader -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantText -> FlatChatItem.AssistantText(
-                messageId = "${item.messageId}#$n",
-                block = item.block,
-                isStreaming = item.isStreaming,
-                messageMarkdown = item.messageMarkdown,
-            )
-            is FlatChatItem.AssistantMarkdownBlock -> FlatChatItem.AssistantMarkdownBlock(
-                messageId = "${item.messageId}#$n",
-                parentBlockId = item.parentBlockId,
-                rawText = item.rawText,
-                blockIndex = item.blockIndex,
-                isLastBlockOfMessage = item.isLastBlockOfMessage,
-                messageIsStreaming = item.messageIsStreaming,
-                messageMarkdown = item.messageMarkdown,
-                showTranslate = item.showTranslate,
-                segmentText = item.segmentText,
-                translateWholeReply = item.translateWholeReply,
-            )
-            is FlatChatItem.AssistantThinking -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantProcessSummary -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantToolUse -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantInfo -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantTyping -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantError -> item.copy(messageId = "${item.messageId}#$n")
-            is FlatChatItem.AssistantLegacyContent -> FlatChatItem.AssistantLegacyContent(
-                messageId = "${item.messageId}#$n",
-                content = item.content,
-                isStreaming = item.isStreaming,
-                messageMarkdown = item.messageMarkdown,
-            )
-        }
+        while (!usedKeys.add(item.key + "#$n")) n++
+        return item.withKeySuffix("#$n")
     }
     for (idx in fromIndex until messages.size) {
         val rawMessage = messages[idx]

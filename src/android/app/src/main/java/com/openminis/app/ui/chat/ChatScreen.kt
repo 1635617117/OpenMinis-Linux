@@ -1431,15 +1431,10 @@ fun ChatScreen(
         // "back" direction — is what produced the wrong anchor in the previous
         // implementation.
         val topKey = visible.minByOrNull { it.index }?.key as? String
-        // Map the top row back to its position in `messages`. Row keys are
-        // "<kind>:<messageId>[:extra]", and some kinds append their own suffix
-        // after the id (e.g. "mdblock:<id>:text_<id>_0:1"), so the id is the
-        // segment between the FIRST and SECOND colon — not everything after the
-        // first one.
-        val topMessageId = topKey
-            ?.split(':')
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotEmpty() }
+        // Map the top row back to its position in `messages`. Key format and
+        // parsing live in FlatKeys (kind:messageId[:extra], plus a defensive
+        // "#n" dedupe suffix that never reaches the id itself).
+        val topMessageId = topKey?.let { FlatKeys.parse(it)?.messageId }
         // `messages` is a TAIL WINDOW (ChatViewModel.uiMessages + loadOlderMessages),
         // so the visible top row can belong to a message that is not loaded yet.
         // The top of the viewport is the OLDEST content on screen, so when it
@@ -1505,13 +1500,10 @@ fun ChatScreen(
         val viewportBottom = info.viewportEndOffset
         val fullyVisibleUserIds: Set<String> = visible
             .asSequence()
-            .filter { item ->
-                val k = item.key as? String ?: return@filter false
-                k.startsWith("user:") &&
-                    item.offset >= viewportTop &&
-                    item.offset + item.size <= viewportBottom
-            }
-            .mapNotNull { (it.key as? String)?.removePrefix("user:")?.takeIf { id -> id.isNotEmpty() } }
+            .filter { item -> item.offset >= viewportTop && item.offset + item.size <= viewportBottom }
+            .mapNotNull { item -> (item.key as? String)?.let(FlatKeys::parse) }
+            .filter { it.kind == FlatKeys.KIND_USER }
+            .map { it.messageId }
             .toSet()
 
         val target = if (steppedTarget in fullyVisibleUserIds) {
@@ -1542,7 +1534,7 @@ fun ChatScreen(
         //     to scroll further; if the target still isn't found we must
         //     RESTORE the original position rather than strand the user at the
         //     top of the transcript.
-        val targetKey = "user:$target"
+        val targetKey = FlatKeys.of(FlatKeys.KIND_USER, target)
         fun indexOfTargetKey(): Int? =
             listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == targetKey }?.index
 
@@ -3843,25 +3835,24 @@ fun ChatScreen(
                 // messageId → isCompactedHistory map. Used to fade entire
                 // assistant-row clusters (header + text + tool pills) at
                 // render time — mirrors iOS isCompactedHistory opacity(0.5).
-                // The lookup uses the underlying message id stripped of any
-                // dedupe suffix (`id#2`) added by buildFlatChatItems.
+                // message.id / flat messageId fields are clean ids (the
+                // dedupe suffix lives only in the row key, see FlatKeys), so
+                // the lookup is direct.
                 val grayedMap = remember(messages) {
                     messages.associate { it.id to it.isCompactedHistory }
                 }
-                fun originalMessageId(id: String): String =
-                    id.substringBefore('#')
                 fun FlatChatItem.isCompacted(): Boolean = when (this) {
-                    is FlatChatItem.UserBubble -> grayedMap[originalMessageId(message.id)] == true
-                    is FlatChatItem.AssistantHeader -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantText -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantMarkdownBlock -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantThinking -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantProcessSummary -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantToolUse -> grayedMap[originalMessageId(messageId)] == true
+                    is FlatChatItem.UserBubble -> grayedMap[message.id] == true
+                    is FlatChatItem.AssistantHeader -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantText -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantMarkdownBlock -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantThinking -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantProcessSummary -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantToolUse -> grayedMap[messageId] == true
                     is FlatChatItem.AssistantInfo -> false  // system rows never grayed
                     is FlatChatItem.AssistantTyping -> false
-                    is FlatChatItem.AssistantError -> grayedMap[originalMessageId(messageId)] == true
-                    is FlatChatItem.AssistantLegacyContent -> grayedMap[originalMessageId(messageId)] == true
+                    is FlatChatItem.AssistantError -> grayedMap[messageId] == true
+                    is FlatChatItem.AssistantLegacyContent -> grayedMap[messageId] == true
                 }
                 // SelectionContainer must wrap the WHOLE LazyColumn — placing
                 // it per-item breaks long-press because items get disposed
@@ -4458,7 +4449,7 @@ fun ChatScreen(
                                 expanded = item.expanded,
                                 hasFailure = item.hasFailure,
                                 onToggle = {
-                                    val id = originalMessageId(item.messageId)
+                                    val id = item.messageId
                                     expandedProcessIds = if (id in expandedProcessIds) {
                                         expandedProcessIds - id
                                     } else {
