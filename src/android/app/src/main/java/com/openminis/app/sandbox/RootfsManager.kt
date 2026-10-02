@@ -3,6 +3,7 @@ package com.openminis.app.sandbox
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.LinkProperties
+import android.os.SystemClock
 import android.util.Base64
 import android.util.Log
 import java.security.KeyStore
@@ -302,56 +303,85 @@ class RootfsManager private constructor(private val context: Context) {
 
     /**
      * Read system DNS servers and search domains from ConnectivityManager,
-     * then write resolv.conf into the Alpine rootfs.
+     * then write resolv.conf into the guest rootfs.
      * Mirrors iOS ISHKernel.configureDns / refreshDns.
-     * Falls back to 8.8.8.8 / 8.8.4.4 if no system DNS available.
+     *
+     * Public fallback nameservers are always appended after the system ones
+     * (see [composeResolvConf]); that is what keeps the guest resolving when a
+     * reported server stops being reachable.
      */
     fun refreshDns() {
         if (!rootfsDir.exists()) return
+        val (domains, servers) = readSystemDns()
+        val content = composeResolvConf(domains, servers)
+        try {
+            val file = File(rootfsDir, "etc/resolv.conf")
+            file.parentFile?.mkdirs()
+            file.writeText(content)
+            Log.i(TAG, "[DNS] resolv.conf updated:\n$content")
+        } catch (e: Exception) {
+            Log.e(TAG, "[DNS] Failed to write resolv.conf: ${e.message}")
+        }
+    }
 
-        val resolvConf = StringBuilder()
-
+    /**
+     * What the active network currently reports: search domains plus the
+     * nameserver addresses, in the order Android lists them.
+     */
+    private fun readSystemDns(): Pair<String?, List<String>> {
+        val servers = mutableListOf<String>()
+        var domains: String? = null
         try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             val network = cm?.activeNetwork
             val linkProps: LinkProperties? = if (network != null) cm.getLinkProperties(network) else null
 
             if (linkProps != null) {
-                // Search domains
-                val domains = linkProps.domains
-                if (!domains.isNullOrBlank()) {
-                    resolvConf.append("search $domains\n")
-                    Log.i(TAG, "[DNS] search domains: $domains")
-                }
+                domains = linkProps.domains?.takeIf { it.isNotBlank() }
+                if (domains != null) Log.i(TAG, "[DNS] search domains: $domains")
 
-                // Nameservers
-                val dnsServers = linkProps.dnsServers
-                if (dnsServers.isNotEmpty()) {
-                    for (server in dnsServers) {
-                        val addr = server.hostAddress ?: continue
-                        resolvConf.append("nameserver $addr\n")
-                        Log.i(TAG, "[DNS] system server: $addr")
-                    }
+                for (server in linkProps.dnsServers) {
+                    val addr = server.hostAddress ?: continue
+                    servers += addr
+                    Log.i(TAG, "[DNS] system server: $addr")
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "[DNS] Failed to read system DNS: ${e.message}")
         }
+        return domains to servers
+    }
 
-        // Fallback to public DNS if no system servers were found
-        if (!resolvConf.contains("nameserver")) {
-            Log.i(TAG, "[DNS] no system DNS — using fallback: 8.8.8.8, 8.8.4.4")
-            resolvConf.append("nameserver 8.8.8.8\n")
-            resolvConf.append("nameserver 8.8.4.4\n")
-        }
+    @Volatile private var lastDnsConsistencyCheckMs = 0L
+    private val dnsConsistencyLock = Any()
 
-        try {
-            val file = File(rootfsDir, "etc/resolv.conf")
-            file.parentFile?.mkdirs()
-            file.writeText(resolvConf.toString())
-            Log.i(TAG, "[DNS] resolv.conf updated:\n$resolvConf")
-        } catch (e: Exception) {
-            Log.e(TAG, "[DNS] Failed to write resolv.conf: ${e.message}")
+    /**
+     * resolv.conf is rewritten on NetworkCallback events and at process start,
+     * and that is the only freshness guarantee it has. A change Android reports
+     * while no callback lands — a VPN toggling, a fast Wi-Fi hop, the app being
+     * recreated — leaves the file naming servers that are no longer reachable,
+     * and the guest then fails every lookup until the next callback. Field
+     * evidence: a resolv.conf still naming the gateways of two Wi-Fi networks
+     * the phone had left, while it sat on a third.
+     *
+     * Every guest command is spawned through [prootLoaderEnv], so piggy-back a
+     * throttled consistency check there: compare what the system reports now
+     * with what is on disk and rewrite only when they disagree.
+     */
+    internal fun ensureResolvConfCurrent() {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastDnsConsistencyCheckMs < DNS_CONSISTENCY_CHECK_INTERVAL_MS) return
+        synchronized(dnsConsistencyLock) {
+            if (now - lastDnsConsistencyCheckMs < DNS_CONSISTENCY_CHECK_INTERVAL_MS) return
+            lastDnsConsistencyCheckMs = now
+            if (!rootfsDir.exists()) return
+            val onDisk = runCatching { File(rootfsDir, "etc/resolv.conf").readText() }.getOrNull()
+                ?: return
+            val (domains, servers) = readSystemDns()
+            if (onDisk != composeResolvConf(domains, servers)) {
+                Log.i(TAG, "[DNS] resolv.conf no longer matches system DNS — rewriting")
+                refreshDns()
+            }
         }
     }
 
@@ -1721,6 +1751,7 @@ class RootfsManager private constructor(private val context: Context) {
     }
 
     private fun prootLoaderEnv(): Map<String, String> {
+        ensureResolvConfCurrent()
         val env = mutableMapOf(
             "PATH" to guestPath(),
             "PROOT_TMP_DIR" to PRootKernel.getProotTmpDir(context).absolutePath,
@@ -1809,6 +1840,57 @@ class RootfsManager private constructor(private val context: Context) {
 
     companion object {
         private const val TAG = "RootfsManager"
+
+        /**
+         * resolv.conf's nameserver contract (MAXNS in musl and glibc alike) is
+         * three; a fourth line is silently ignored, so appending without a cap
+         * would quietly drop entries.
+         */
+        internal const val MAX_NAMESERVERS = 3
+
+        /**
+         * Appended after whatever the active network reported. One CN-reachable
+         * and one global resolver: the fallback only matters once the primary
+         * is unreachable, and two servers from the same region or anycast would
+         * tend to fail together.
+         */
+        internal val DNS_FALLBACK_SERVERS = listOf("223.5.5.5", "8.8.8.8")
+
+        /** Throttle for [ensureResolvConfCurrent]; see its KDoc. */
+        internal const val DNS_CONSISTENCY_CHECK_INTERVAL_MS = 30_000L
+
+        /**
+         * Compose resolv.conf from what the system reported.
+         *
+         * System servers keep their order and come first — they are the fast,
+         * topology-correct ones (a router gateway on the LAN, a VPN's resolver)
+         * — and [DNS_FALLBACK_SERVERS] fill the remaining slots. Duplicates are
+         * dropped keeping the first occurrence, so a network that already hands
+         * out a fallback does not waste a slot on it.
+         *
+         * The fallbacks are unconditional, not an empty-case special: before
+         * this, a single unreachable nameserver — the gateway of a Wi-Fi the
+         * phone had left, a dead VPN TUN address — meant every lookup in the
+         * guest failed. musl walks the list in order and moves past a server
+         * that errors or times out, so with a fallback the same event degrades
+         * to "the first entry is skipped".
+         *
+         * Pure on purpose: ordering, dedup and the cap are the rules worth
+         * testing, and none of them need a Context.
+         */
+        internal fun composeResolvConf(searchDomains: String?, systemServers: List<String>): String {
+            val sb = StringBuilder()
+            if (!searchDomains.isNullOrBlank()) {
+                sb.append("search ").append(searchDomains.trim()).append('\n')
+            }
+            val picked = LinkedHashSet<String>()
+            for (server in systemServers) if (server.isNotBlank()) picked += server
+            for (server in DNS_FALLBACK_SERVERS) picked += server
+            for (server in picked.take(MAX_NAMESERVERS)) {
+                sb.append("nameserver ").append(server).append('\n')
+            }
+            return sb.toString()
+        }
         private val CA_ENV_KEYS = setOf(
             "SSL_CERT_FILE",
             "SSL_CERT_DIR",
