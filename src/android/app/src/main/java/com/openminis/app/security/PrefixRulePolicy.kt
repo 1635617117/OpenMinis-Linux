@@ -49,7 +49,12 @@ object PrefixRulePolicy {
                 else -> continue
             }
             if (!toolFilterMatches(r.toolFilter, toolName)) continue
-            val patTokens = r.pattern.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+            // [T-prefixrule-pattern-tokenize] Tokenize the pattern with the
+            // SAME quote-aware tokenizer used for the command. The old naive
+            // whitespace split kept literal quotes (`-m "x"` → token `"x"`),
+            // which can never equal the command's unquoted `x` — the rule
+            // silently never matched while the user believed it did.
+            val patTokens = tokenizeCommand(r.pattern)
             if (patTokens.isEmpty()) continue
             val hit = riskUnits(command).any { unit -> matchesPrefix(patTokens, tokenizeCommand(unit)) }
             if (!hit) continue

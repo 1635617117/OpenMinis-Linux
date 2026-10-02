@@ -211,12 +211,24 @@ fun ProviderDetailScreen(
                             keyVisible = false
                         },
                         onSave = {
-                            providerRepository.saveApiKey(instanceId, editKeyValue)
-                            // [T-android-provider-apikey-save-stale] Reflect the
-                            // just-saved value in UI state immediately rather than
-                            // re-reading the async-written prefs on recomposition.
-                            storedKey = editKeyValue
-                            AppLogger.info(TAG, "Saved API key for ${instance.id}")
+                            // [T-key-clear-entry] A blank save now DELETES the key
+                            // (the button is enabled whenever a stored key exists).
+                            // This is the same UX dead-end aaafd51 fixed for key
+                            // pools: save was disabled on blank text, so a
+                            // misconfigured non-OAuth credential could never be
+                            // cleared, only re-typed.
+                            if (editKeyValue.isBlank()) {
+                                providerRepository.deleteApiKey(instanceId)
+                                storedKey = ""
+                                AppLogger.info(TAG, "Cleared API key for ${instance.id}")
+                            } else {
+                                providerRepository.saveApiKey(instanceId, editKeyValue)
+                                // [T-android-provider-apikey-save-stale] Reflect the
+                                // just-saved value in UI state immediately rather than
+                                // re-reading the async-written prefs on recomposition.
+                                storedKey = editKeyValue
+                                AppLogger.info(TAG, "Saved API key for ${instance.id}")
+                            }
                             isEditingKey = false
                             editKeyValue = ""
                             keyVisible = false
@@ -981,8 +993,15 @@ private fun ApiKeyCredentialBlock(
                 Text(stringResource(R.string.common_cancel))
             }
             Spacer(modifier = Modifier.width(8.dp))
-            MinisSmallButton(onClick = onSave, enabled = editValue.isNotBlank()) {
-                Text(stringResource(R.string.provider_detail_save_key))
+            // [T-key-clear-entry] Enabled when the edit text is non-blank
+            // (save) OR a stored key exists (clear with blank text).
+            MinisSmallButton(onClick = onSave, enabled = editValue.isNotBlank() || storedKey.isNotBlank()) {
+                Text(
+                    stringResource(
+                        if (editValue.isBlank() && storedKey.isNotBlank()) R.string.common_delete
+                        else R.string.provider_detail_save_key
+                    )
+                )
             }
         }
     } else {

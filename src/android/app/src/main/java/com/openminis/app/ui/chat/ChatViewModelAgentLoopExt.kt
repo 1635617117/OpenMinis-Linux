@@ -52,6 +52,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
     // 成功时 finish(DONE)；失败路径不落 FINISH，留 RUNNING 由
     // GenerationRunStore.abandoned() 在下次启动扫描时标记。
     val generationRunId = com.openminis.app.agent.GenerationRunStore.start(
+        context,
         activeSessionId,
         provider.model.displayName,
     )
@@ -956,7 +957,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 lastFileToolInputMs = 0L
                 lastOtherToolInputMs = 0L
                 collectDone = true
-                com.openminis.app.agent.GenerationRunStore.finish(generationRunId, ok = true)
+                com.openminis.app.agent.GenerationRunStore.finish(context, generationRunId, ok = true)
                 // Stream completed without error — clear any lingering retry UI state.
                 if (_autoRetryAttempt.value != 0 || _autoRetryCountdown.value != 0) {
                     _autoRetryAttempt.value = 0
@@ -977,10 +978,23 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // Auto-retry on transient network/5xx/transient errors on the SAME provider
                 // Same-provider retry for network / 5xx / 429 (honour Retry-After),
                 // then fall back to the next group member.
+                // [T-llm-error-timeout-phase] Timeout now participates in
+                // same-provider retry ONLY for CONNECT-phase (the request
+                // never landed — pure local/connectivity issue; falling back
+                // to another model cannot help). READ/TTFB timeouts skip
+                // straight to fallback (isFallbackable already includes
+                // Timeout), so the main loop no longer diverges from the
+                // sub-agent loop (which keys off isRetryable). NOTE: with the
+                // breaker removed (5b9aa6f), a dead-but-not-429 key is now
+                // retried through the full backoff budget before fallback —
+                // the accepted cost of removing the breaker, not a
+                // classification defect.
+                val isTimeoutConnect = actual is com.openminis.app.data.model.LLMError.Timeout &&
+                    actual.phase == com.openminis.app.data.model.LLMError.Timeout.TimeoutPhase.CONNECT
                 val isTransient = (actual is com.openminis.app.data.model.LLMError.NetworkError ||
                     actual is com.openminis.app.data.model.LLMError.TransientError ||
                     actual is com.openminis.app.data.model.LLMError.RateLimited ||
-                    is5xx) && !isPermanentCapacity
+                    is5xx || isTimeoutConnect) && !isPermanentCapacity
                 val maxRetries = effectiveMaxRetries()
                 // 429 with another group member: switch endpoints instead of
                 // hammering the same key through 1/2/4/8/16s (inside a typical

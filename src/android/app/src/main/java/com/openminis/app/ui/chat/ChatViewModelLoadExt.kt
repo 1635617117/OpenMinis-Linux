@@ -229,7 +229,7 @@ internal fun ChatViewModel.loadSession() {
         // is shorter than the tail.
         val windowedRows = minOf(messages.size, ChatViewModel.INITIAL_LLM_HISTORY_ROW_CAP)
         llmHistoryStartOffset = (loaded.totalMessages - windowedRows).coerceAtLeast(0)
-        loadingOlderMessages = false
+        loadingOlderFlag.set(false)
         _isLoadingHistory.value = false
         val tHangDiagAfterLoad = tHangDiagBeforeLoad + loaded.loadMs
         val tHangDiagAfterTransform = tHangDiagAfterLoad + loaded.transformMs

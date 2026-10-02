@@ -62,40 +62,79 @@ object ToolOutputPolicy {
         runCatching {
             val node = org.json.JSONTokener(text).nextValue()
             if (node is org.json.JSONObject || node is org.json.JSONArray) {
-                return redactNode(node, sensitive).toString()
+                return redactNode(node, sensitive, depth = 0).toString()
             }
         }
         // 非 JSON 输出：退回纯文本替换。
         var out = text
         for (v in sensitive) {
-            if (out.contains(v)) out = out.replace(v, REDACTED)
+            if (out.contains(v)) out = redactInText(out, v)
         }
         return out
     }
 
-    private fun redactNode(node: Any?, sensitive: List<String>): Any? = when (node) {
-        is org.json.JSONObject -> {
-            val out = org.json.JSONObject()
-            node.keys().forEach { k ->
-                runCatching { out.put(k, redactNode(node.get(k), sensitive)) }
-            }
-            out
+    /**
+     * [T-redact-boundary] Whole-substring `replace` rewrote ANY text that
+     * happened to contain a sensitive value — `5up3r` inside `s5up3rhouse`,
+     * a token-shaped string embedded in an identifier. The replacement is
+     * boundary-aware: the value must not be glued to further alphanumerics
+     * (SQL `LIKE '%token%'`-style context still matches).
+     */
+    private fun redactInText(s: String, v: String): String =
+        Regex("(?<![A-Za-z0-9])" + Regex.escape(v) + "(?![A-Za-z0-9])").replace(s, REDACTED)
+
+    /** [T-redact-depth] Hard recursion bound; a hostile deep-nested JSON must
+     *  not be able to StackOverflow the redactor (the caller's `runCatching`
+     *  around parsing does not cover a throw from inside redactNode's tree
+     *  walk — and a StackOverflowError is an Error, not an Exception).
+     *  Past the cap the subtree is FLATTENED to text and plain-text redacted
+     *  (fail-closed): the previous version returned the raw node, so a
+     *  sensitive string nested one level past the cap reached the model
+     *  unredacted — the depth bound must not double as a leak channel. */
+    private const val MAX_REDACT_DEPTH = 32
+
+    private fun redactString(s0: String, sensitive: List<String>): String {
+        var s = s0
+        for (v in sensitive) {
+            if (s.contains(v)) s = redactInText(s, v)
         }
-        is org.json.JSONArray -> {
-            val out = org.json.JSONArray()
-            for (i in 0 until node.length()) {
-                runCatching { out.put(redactNode(node.get(i), sensitive)) }
-            }
-            out
+        return s
+    }
+
+    private fun redactNode(node: Any?, sensitive: List<String>, depth: Int): Any? {
+        if (depth > MAX_REDACT_DEPTH) {
+            val flat = runCatching { node.toString() }.getOrDefault(REDACTED)
+            return redactString(flat, sensitive)
         }
-        is String -> {
-            var s: String = node
-            for (v in sensitive) {
-                if (s.contains(v)) s = s.replace(v, REDACTED)
+        return when (node) {
+            is org.json.JSONObject -> {
+                val out = org.json.JSONObject()
+                node.keys().forEach { k ->
+                    // [T-redact-no-drop] The old runCatching { put } silently
+                    // dropped a key whose transformed value was rejected by
+                    // JSONObject (e.g. NaN) — the model saw quietly pruned
+                    // JSON. On failure, fall back to the ORIGINAL value; the
+                    // redaction pass is lossless with respect to structure.
+                    val redacted = runCatching { redactNode(node.get(k), sensitive, depth + 1) }
+                        .getOrElse { node.get(k) }
+                    runCatching { out.put(k, redacted) }
+                        .onFailure { runCatching { out.put(k, node.get(k)) } }
+                }
+                out
             }
-            s
+            is org.json.JSONArray -> {
+                val out = org.json.JSONArray()
+                for (i in 0 until node.length()) {
+                    val redacted = runCatching { redactNode(node.get(i), sensitive, depth + 1) }
+                        .getOrElse { node.get(i) }
+                    runCatching { out.put(redacted) }
+                        .onFailure { runCatching { out.put(node.get(i)) } }
+                }
+                out
+            }
+            is String -> redactString(node, sensitive)
+            else -> node
         }
-        else -> node
     }
 
     /**

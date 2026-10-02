@@ -55,42 +55,16 @@ internal class ThinkPrefixStreamParser {
     private val heldWhitespace = StringBuilder()
 
     private companion object {
-        // [T-universal-think-tag] Universal reasoning-tag prefix set. Different
-        // providers spell the reasoning wrapper differently; every one of these
-        // has been observed in a production stream leaking into `content`:
-        //   <think>            MiniMax M3, Qwen-QwQ, DeepSeek-R1 distills
-        //   <thinking>         Kimi K2/K3/K4 (Moonshot)
-        //   <reasoning>        some OpenRouter/OpenAI-compatible routers
-        //   <analysis>         Gemini / Ollama variant deployments
-        //   <antThinking>      Claude→OpenAI bridge deployments
-        //   <inner_thought>    GLM-5 family preview builds
-        //   <scratchpad>       older self-hosted CoT wrappers
-        //   <|thinking|>       GLM/ChatGLM special-token form
-        //   <思考>             Chinese-localized wrappers
+        // [T-universal-think-tag] Universal reasoning-tag prefix set, built
+        // from the SHARED table (com.openminis.app.text.ReasoningTagVariants)
+        // — the history stripper and this parser carried two diverging copies
+        // once (6 vs 9 spellings), so paired blocks of the missing spellings
+        // survived history replay while the live stream stripped them. Each
+        // vendor spelling is documented there.
         // Longest-first so e.g. "<thinking>" wins over "<think>" when both could
         // prefix-match the same incoming bytes ("<thinkin…").
-        val OPEN_VARIANTS = listOf(
-            "<inner_thought>",
-            "<scratchpad>",
-            "<antThinking>",
-            "<reasoning>",
-            "<thinking>",
-            "<analysis>",
-            "<|thinking|>",
-            "<think>",
-            "<思考>",
-        )
-        val CLOSE_VARIANTS = listOf(
-            "</inner_thought>",
-            "</scratchpad>",
-            "</antThinking>",
-            "</reasoning>",
-            "</thinking>",
-            "</analysis>",
-            "<|/thinking|>",
-            "</think>",
-            "</思考>",
-        )
+        val OPEN_VARIANTS: List<String> = com.openminis.app.text.ReasoningTagVariants.OPEN_TAGS
+        val CLOSE_VARIANTS: List<String> = com.openminis.app.text.ReasoningTagVariants.CLOSE_TAGS
         init {
             require(OPEN_VARIANTS.size == CLOSE_VARIANTS.size) { "tag variant table must stay aligned" }
         }
@@ -120,7 +94,9 @@ internal class ThinkPrefixStreamParser {
                     when {
                         // Full match → enter THINKING with that variant's close tag.
                         matched > 0 -> {
-                            val idx = OPEN_VARIANTS.indexOfFirst { it.length == matched && rest.startsWith(it) }
+                            val idx = OPEN_VARIANTS.indexOfFirst {
+                                it.length == matched && rest.startsWith(it, ignoreCase = true)
+                            }
                             check(idx >= 0) { "matchOpenVariant returned length of unknown variant" }
                             state = State.THINKING
                             activeOpen = OPEN_VARIANTS[idx]
@@ -137,7 +113,10 @@ internal class ThinkPrefixStreamParser {
                 State.THINKING -> {
                     val close = activeClose
                         ?: error("THINKING without an active variant — impossible via matchOpenVariant")
-                    val closeIdx = pending.indexOf(close)
+                    // [T-think-tag-case] Case-insensitive: the history stripper
+                    // is IGNORE_CASE, so `<THINKING>` must not leak to the body
+                    // live and then vanish after a reload.
+                    val closeIdx = pending.indexOfIgnoreCase(close)
                     if (closeIdx < 0) {
                         val safe = safeEmitLength(pending, close)
                         if (safe <= 0) break@loop
@@ -223,13 +202,16 @@ internal class ThinkPrefixStreamParser {
     private fun matchOpenVariant(rest: String): Int {
         if (rest.isEmpty()) return -1  // nothing yet — could still become a tag
         // Longest full match first (table is already longest-first).
+        // [T-think-tag-case] Case-insensitive — `<THINKING>` / `<antthinking>`
+        // are the same tag with different casing; the history stripper treats
+        // them IGNORE_CASE, so the live split must too.
         for (variant in OPEN_VARIANTS) {
-            if (rest.startsWith(variant)) return variant.length
+            if (rest.startsWith(variant, ignoreCase = true)) return variant.length
         }
         // Partial: rest shorter than a variant and equal to its head.
         if (rest.length < MAX_OPEN_LEN) {
             for (variant in OPEN_VARIANTS) {
-                if (rest.length < variant.length && variant.startsWith(rest)) return -1
+                if (rest.length < variant.length && variant.startsWith(rest, ignoreCase = true)) return -1
             }
         }
         return 0
@@ -238,7 +220,7 @@ internal class ThinkPrefixStreamParser {
     /**
      * How many chars are safe to emit without splitting a potential [tag]
      * occurrence. Keeps the longest suffix of [buf] that is a proper prefix of
-     * [tag] buffered.
+     * [tag] buffered. Comparison is case-insensitive, matching [matchOpenVariant].
      */
     private fun safeEmitLength(buf: StringBuilder, tag: String): Int {
         val maxKeep = minOf(tag.length - 1, buf.length)
@@ -246,11 +228,28 @@ internal class ThinkPrefixStreamParser {
             val suffixStart = buf.length - keep
             var matches = true
             for (k in 0 until keep) {
-                if (buf[suffixStart + k] != tag[k]) { matches = false; break }
+                if (!buf[suffixStart + k].equals(tag[k], ignoreCase = true)) { matches = false; break }
             }
             if (matches) return suffixStart
         }
         return buf.length
+    }
+
+    /** Case-insensitive [indexOf] against this buffer (chars compared lowercased). */
+    private fun StringBuilder.indexOfIgnoreCase(other: String, from: Int = 0): Int {
+        val last = length - other.length
+        for (i in from..last) {
+            if (regionMatchesIgnoreCase(i, other)) return i
+        }
+        return -1
+    }
+
+    private fun StringBuilder.regionMatchesIgnoreCase(offset: Int, other: String): Boolean {
+        if (offset < 0 || offset + other.length > length) return false
+        for (k in other.indices) {
+            if (!this[offset + k].equals(other[k], ignoreCase = true)) return false
+        }
+        return true
     }
 }
 

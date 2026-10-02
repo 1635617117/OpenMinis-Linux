@@ -51,6 +51,12 @@ object FileWriteTool {
             WritePathGuard.denyReason(path)?.let { msg ->
                 return ToolExecutionResult(msg, false, toolTitle = toolTitle)
             }
+            // [T-memory-poison-guard] Same daily quota as memory_write and the
+            // shell gate — without it a refused loop just switches tools and
+            // keeps appending to /var/minis/memory through this path.
+            com.openminis.app.data.repository.MemoryRepository
+                .fileToolQuotaRefusal(context.filesDir, sessionId, path)
+                ?.let { msg -> return ToolExecutionResult(msg, false, toolTitle = toolTitle) }
 
             // T123: per-session resolver so /var/minis/workspace/...,
             // /var/minis/attachments/..., /var/minis/offloads/...,

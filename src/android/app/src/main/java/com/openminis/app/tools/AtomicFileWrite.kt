@@ -83,8 +83,33 @@ object AtomicFileWrite {
      */
     private val locks = ConcurrentHashMap<String, ReentrantLock>()
 
-    private fun lockFor(file: File): ReentrantLock =
-        locks.getOrPut(file.canonicalPath) { ReentrantLock() }
+    // [T-fileedit-size-cap] readModifyWrite + verify each read the whole
+    // file; without a cap, `file_edit` on a multi-GB log doubles resident
+    // memory and can OOM. 2 MB covers every legitimate source edit.
+    internal const val MAX_EDIT_BYTES = 2 * 1024 * 1024
+
+    /** [T-fileedit-locks-bounded] Idle-eviction threshold for [locks]. */
+    internal const val MAX_LOCK_ENTRIES = 256
+
+    private fun lockFor(file: File): ReentrantLock {
+        // [T-fileedit-locks-bounded] A per-process map keyed by absolute path
+        // has no natural end on long sessions. The earlier cap policy was a
+        // blanket clear() — which is exactly wrong for a MUTEX table: dropping
+        // a lock another writer is holding (or queued on) lets a concurrent
+        // writer of the SAME path take a fresh lock object and interleave
+        // its read-modify-write. Evict IDLE locks only (unlocked, no waiters);
+        // if every entry is contended the map temporarily exceeds the cap
+        // instead — overshoot bounded by concurrently-edited file count.
+        val path = file.canonicalPath
+        if (locks.size >= MAX_LOCK_ENTRIES && !locks.containsKey(path)) {
+            val iter = locks.entries.iterator()
+            while (iter.hasNext() && locks.size > MAX_LOCK_ENTRIES / 2) {
+                val e = iter.next()
+                if (e.key != path && !e.value.isLocked && !e.value.hasQueuedThreads()) iter.remove()
+            }
+        }
+        return locks.getOrPut(path) { ReentrantLock() }
+    }
 
     /**
      * Overwrite [file] with [content], atomically and verified.
@@ -212,14 +237,55 @@ object AtomicFileWrite {
         val lock = lockFor(file)
         lock.lock()
         try {
-            val current = try {
-                if (file.exists()) file.readText() else ""
+            // [T-fileedit-binary-guard] Read BYTES and decode strictly. The
+            // old `file.readText()` silently replaced malformed sequences
+            // with U+FFFD and then wrote the CORRUPTED text back to disk;
+            // verify() compared against the already-corrupted string and was
+            // blind to the damage. NUL bytes and invalid UTF-8 are refused.
+            // [T-fileedit-size-cap] The length check runs BEFORE readBytes:
+            // checking after the read loaded a multi-GB file fully into
+            // memory before refusing it — the cap existed to prevent exactly
+            // that. The post-read `raw.size` check stays as a race guard
+            // (the file can grow between length() and readBytes()).
+            if (file.exists() && file.length() > MAX_EDIT_BYTES) {
+                AppLogger.error(TAG, "file_edit refused: ${file.name} is ${file.length()} bytes (cap $MAX_EDIT_BYTES)")
+                return null
+            }
+            val raw = try {
+                if (file.exists()) file.readBytes() else ByteArray(0)
             } catch (e: IOException) {
                 AppLogger.error(TAG, "read failed for ${file.name}: ${e.message}")
                 return null
             }
+            if (raw.size > MAX_EDIT_BYTES) {
+                AppLogger.error(TAG, "file_edit refused: ${file.name} is ${raw.size} bytes (cap $MAX_EDIT_BYTES)")
+                return null
+            }
+            if (raw.contains(0.toByte())) {
+                AppLogger.error(TAG, "file_edit refused: ${file.name} looks binary (NUL byte)")
+                return null
+            }
+            val hadBom = raw.size >= 3 && raw[0] == 0xEF.toByte() && raw[1] == 0xBB.toByte() && raw[2] == 0xBF.toByte()
+            val current = try {
+                java.nio.ByteBuffer.wrap(raw).let { buf ->
+                    kotlin.text.Charsets.UTF_8.newDecoder()
+                        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                        .decode(buf).toString()
+                }
+            } catch (e: java.nio.charset.CharacterCodingException) {
+                AppLogger.error(TAG, "file_edit refused: ${file.name} is not valid UTF-8 (${e.message})")
+                return null
+            }.removePrefix("\uFEFF")
 
             val result = transform(current)
+
+            // [T-fileedit-bom] A BOM was stripped before matching (an
+            // old_string written without one used to fail all three match
+            // tiers against a BOM-prefixed file); restore it on write so the
+            // file's original encoding convention survives the edit.
+            fun withBom(text: String): String =
+                if (hadBom) "﻿" + text else text
 
             return when (result) {
                 // A String payload is the plain "new content" shape; a Pair is
@@ -227,14 +293,14 @@ object AtomicFileWrite {
                 // alongside the text. Both are written; anything else is passed
                 // through untouched (the caller ran the transform for its own
                 // reasons and there is nothing to persist).
-                is String -> writeLocked(file, result, append = false)?.let { result }
+                is String -> writeLocked(file, withBom(result), append = false)?.let { result }
                 is Pair<*, *> -> {
                     val text = result.first as? String
                     if (text == null) {
                         AppLogger.error(TAG, "readModifyWrite: pair without a String payload")
                         null
                     } else {
-                        writeLocked(file, text, append = false)?.let { result }
+                        writeLocked(file, withBom(text), append = false)?.let { result }
                     }
                 }
                 is HasPersistableText -> {
@@ -243,7 +309,7 @@ object AtomicFileWrite {
                         AppLogger.info(TAG, "readModifyWrite: payload declined persist, nothing written")
                         result
                     } else {
-                        writeLocked(file, text, append = false)?.let { result }
+                        writeLocked(file, withBom(text), append = false)?.let { result }
                     }
                 }
                 else -> {

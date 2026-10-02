@@ -116,7 +116,11 @@ sealed class LLMError(message: String, cause: Throwable? = null) : Exception(mes
      */
     val actionableHint: String
         get() = when (this) {
-            is InvalidApiKey -> "Check your API key in Settings → Providers, or regenerate it at your provider's dashboard."
+            is InvalidApiKey -> when {
+                detail.contains("403", ignoreCase = true) || detail.contains("forbidden", ignoreCase = true) ->
+                    "The credential was accepted but access was denied (403): this model or region may not be allowed on your plan. Check the provider's model access settings."
+                else -> "Check your API key in Settings → Providers, or regenerate it at your provider's dashboard."
+            }
             is NetworkError -> "Check your internet connection and try again."
             is Timeout -> when (phase) {
                 Timeout.TimeoutPhase.CONNECT -> "The server didn't respond — check your network or try a different provider."

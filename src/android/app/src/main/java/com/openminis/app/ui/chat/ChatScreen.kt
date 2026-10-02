@@ -54,6 +54,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.background
@@ -547,7 +548,7 @@ fun ChatScreen(
 
     // [T-generation-run] 崩溃恢复提示：上次进程死亡时本会话有中断的生成。
     LaunchedEffect(sessionId) {
-        val broken = com.openminis.app.agent.GenerationRunStore.recentlyAbandonedFor(sessionId)
+        val broken = com.openminis.app.agent.GenerationRunStore.recentlyAbandonedFor(context, sessionId)
         if (broken.isNotEmpty()) {
             val r = broken.last()
             val whenStr = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US)
@@ -1097,21 +1098,32 @@ fun ChatScreen(
     // position. Kept as named lambdas so re-enabling per-call telemetry
     // (during a scroll-positioning regression) is a one-line edit here
     // instead of changing 20+ call sites. Currently silent.
+    // T-android-jank-profile: gate verbose scroll telemetry behind a constant
+    // so every snapshotFlow / derivedStateOf body in this file can cheaply
+    // skip the AppLogger.debug call (which builds a long format string and
+    // writes a daily log file). Flip locally when debugging scroll behavior.
+    // [T-android-scroll-telemetry-gate] Declared BEFORE the traced wrappers so
+    // their (previously unconditional) per-call logging can be gated too —
+    // the old TEMP ScrollSrc log built a long string on every programmatic
+    // scroll in production.
+    val verboseScrollLogs = false
     val tracedScrollToItem: suspend (source: String, idx: Int, off: Int) -> Unit = { source, idx, off ->
-        // [T-android-top-drag-jump] TEMP: log every programmatic scroll's source
-        // so we can see which one fights the user near the top. Remove after fix.
-        AppLogger.debug(
-            "ScrollSrc",
-            "scrollToItem src=$source idx=$idx off=$off canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset} inProgress=${listState.isScrollInProgress}",
-        )
+        if (verboseScrollLogs) {
+            AppLogger.debug(
+                "ScrollSrc",
+                "scrollToItem src=$source idx=$idx off=$off canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset} inProgress=${listState.isScrollInProgress}",
+            )
+        }
         runCatching { listState.scrollToItem(idx, off) }
         Unit
     }
     val tracedScrollBy: suspend (source: String, delta: Float) -> Unit = { source, delta ->
-        AppLogger.debug(
-            "ScrollSrc",
-            "scrollBy src=$source delta=$delta canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
-        )
+        if (verboseScrollLogs) {
+            AppLogger.debug(
+                "ScrollSrc",
+                "scrollBy src=$source delta=$delta canBwd=${listState.canScrollBackward} firstIdx=${listState.firstVisibleItemIndex} firstOff=${listState.firstVisibleItemScrollOffset}",
+            )
+        }
         runCatching { listState.scrollBy(delta) }
         Unit
     }
@@ -1120,19 +1132,16 @@ fun ChatScreen(
     // (highest lazy index under reverseLayout, ignoring synthetic __ rows).
     // Captured when the user stops dragging away from the bottom or starts a
     // deliberate browse, so the mode transition records where they went to
-    // read. Pure bookkeeping — no scroll is issued from it.
+    // read. Pure bookkeeping — no scroll is issued from it. Selection goes
+    // through ChatHistoryWindow.visibleTopRow — the single visual-top
+    // definition (T-android-visual-top).
     fun visibleTopAnchor(): Pair<String, Int>? {
-        val top = listState.layoutInfo.visibleItemsInfo
-            .filter { (it.key as? String)?.startsWith("__") != true }
-            .maxByOrNull { it.index } ?: return null
-        val key = top.key as? String ?: return null
-        return key to top.offset
+        val rows = listState.layoutInfo.visibleItemsInfo.map {
+            ChatHistoryWindow.VisibleRow(it.index, it.key as? String ?: "", it.offset, it.size)
+        }
+        val top = ChatHistoryWindow.visibleTopRow(rows) ?: return null
+        return top.key to top.offset
     }
-    // T-android-jank-profile: gate verbose scroll telemetry behind a constant
-    // so every snapshotFlow / derivedStateOf body in this file can cheaply
-    // skip the AppLogger.debug call (which builds a long format string and
-    // writes a daily log file). Flip locally when debugging scroll behavior.
-    val verboseScrollLogs = false
 
     // ─── T120: scroll-follow rewrite (supersedes T66 / T92 / T99 / T100 / T101 / T112) ───
     //
@@ -1384,7 +1393,10 @@ fun ChatScreen(
     // [T-android-upbtn-single-flight] One walk in flight; extra taps queue
     // exactly one continuation instead of stacking concurrent scroll jobs.
     var upWalkJob by remember(sessionId) { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    var upWalkQueued by remember(sessionId) { mutableStateOf(false) }
+    // Backlog of taps that arrived while a walk was in flight, capped at 2:
+    // N rapid taps used to collapse to ONE continuation ("按钮吞点击"); two
+    // queued walks keep the response responsive without unbounded chasing.
+    var upWalkQueuedCount by remember(sessionId) { mutableStateOf(0) }
 
     // [T-android-scroll-fab-reversed] TEMP diagnostic — capture BOTH FABs'
     // gates so we can verify the matrix (bottom=none, middle=both, top=down
@@ -1774,6 +1786,26 @@ fun ChatScreen(
                     scrollPolicy.rearmIfDraggedAway(anchor?.first, anchor?.second ?: 0)
                 }
             }
+    }
+    // [T-android-scroll-drift-observer] Observation, never intervention. The
+    // Reading mode bets the viewport's position stability on Compose's native
+    // key anchoring (the stale-snapshot restore effect was deleted as a bug
+    // source). This recorder makes that bet falsifiable: with
+    // verboseScrollLogs flipped on, any drift between the Reading anchor's
+    // recorded offset and the anchor row's live offset leaves a line in the
+    // log — evidence on the device instead of a user report of
+    // "翻历史时跳屏" with nothing to grep.
+    LaunchedEffect(listState) {
+        if (!verboseScrollLogs) return@LaunchedEffect
+        snapshotFlow {
+            val reading = scrollMode as? ScrollMode.Reading ?: return@snapshotFlow null
+            val anchorKey = reading.anchorKey ?: return@snapshotFlow null
+            val row = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.key == anchorKey }
+                ?: return@snapshotFlow "anchor=$anchorKey OFF-SCREEN"
+            "anchor=$anchorKey drift=${row.offset - reading.anchorOffset}px"
+        }.collect { drift ->
+            if (drift != null) AppLogger.debug("ScrollDrift", drift)
+        }
     }
 
     // Reply-end focus preference must be declared before the streaming→idle
@@ -3036,26 +3068,28 @@ fun ChatScreen(
             tracedScrollToItem("FAB-UP/no-user-turns", (info.totalItemsCount - 1).coerceAtLeast(0), 0)
             return@scrollToPreviousUserTurn
         }
-        // Top row = LOWEST visible index (orientation measured on device:
-        // under reverseLayout, offset ascends with index). Synthetic __ rows
-        // (load-older pill, resume banner) never anchor the walk.
-        val topKey = visible
-            .filter { (it.key as? String)?.startsWith("__") != true }
-            .minByOrNull { it.index }?.key as? String
+        // [T-android-visual-top] The visual top of a reverseLayout list is
+        // the HIGHEST lazy index (index 0 paints at the bottom). The old
+        // minByOrNull selector here — with a "measured on device" comment
+        // whose own dump shows offset ascending with index, i.e. away from
+        // the bottom start — resolved the first-tap anchor against the
+        // NEWEST visible row. Both call sites now share
+        // ChatHistoryWindow.visibleTopRow / fullyVisibleUserIds so the two
+        // definitions can never diverge again.
+        val rowRefs = visible.map {
+            ChatHistoryWindow.VisibleRow(it.index, it.key as? String ?: "", it.offset, it.size)
+        }
+        val topKey = ChatHistoryWindow.visibleTopRow(rowRefs)?.key
         val topMessageId = topKey?.let { FlatKeys.parse(it)?.messageId }
         // Visibility is read from the pre-jump layout on purpose (see
         // previousUserTurnTarget KDoc): the jump mutates the viewport, so
         // anything derived afterwards would describe where the search
         // happened to stop, not where the user was.
-        val viewportTop = info.viewportStartOffset
-        val viewportBottom = info.viewportEndOffset
-        val fullyVisibleUserIds: Set<String> = visible
-            .asSequence()
-            .filter { item -> item.offset >= viewportTop && item.offset + item.size <= viewportBottom }
-            .mapNotNull { item -> (item.key as? String)?.let(FlatKeys::parse) }
-            .filter { it.kind == FlatKeys.KIND_USER }
-            .map { it.messageId }
-            .toSet()
+        val fullyVisibleUserIds: Set<String> = ChatHistoryWindow.fullyVisibleUserIds(
+            rowRefs,
+            info.viewportStartOffset,
+            info.viewportEndOffset,
+        )
 
         // [T-android-upbtn-window-edge] The walk floor is the oldest LOADED
         // turn. When a tap steps onto that floor and older history exists,
@@ -3083,6 +3117,21 @@ fun ChatScreen(
         }
         if (target == null) return@scrollToPreviousUserTurn
         val targetKey = FlatKeys.of(FlatKeys.KIND_USER, target)
+        // [T-android-upbtn-fresh-state] A page loaded inside the walk above
+        // lands in `messages` and `flatItems` ASYNCHRONOUSLY (flatten runs on
+        // Dispatchers.Default and publishes between frames). Without this
+        // wait, the index resolution below read the stale pre-load flat list,
+        // missed the freshly loaded target row, and hopped to the OLD oldest
+        // row — the data arrived but the viewport never crossed the window
+        // edge in the same tap. One frame + a bounded snapshotFlow wait
+        // synchronizes with the publisher; on timeout we fall through to the
+        // defensive hop below (self-limiting, as before).
+        withFrameNanos { }
+        withTimeoutOrNull(500) {
+            snapshotFlow { flatItems }.first { list -> list.any { it.key == targetKey } }
+        }
+        // Re-capture layoutInfo: `info` is from before any page load.
+        val jumpInfo = listState.layoutInfo
         // Direct index resolution — no scanning. flatItems is oldest-first;
         // the LazyColumn declares compact/resume items BEFORE the message
         // items and the pill after, so a flat index mirrors into a lazy index
@@ -3108,7 +3157,7 @@ fun ChatScreen(
             // Defensive: the target produced no row (upstream anomaly). One
             // bounded hop to the oldest row instead of a scan.
             AppLogger.warning("ChatUpBtn", "target $target has no flat row — hopping to oldest")
-            (info.totalItemsCount - 1).coerceAtLeast(0)
+            (jumpInfo.totalItemsCount - 1).coerceAtLeast(0)
         }
         lastJumpedUserId = target
         // Land the user bubble's TOP edge just under the header — iOS's
@@ -4505,13 +4554,14 @@ fun ChatScreen(
                             scrollPolicy.landReading(anchor?.first, anchor?.second ?: 0)
                             val job = upWalkJob
                             if (job != null && job.isActive) {
-                                upWalkQueued = true
+                                upWalkQueuedCount = (upWalkQueuedCount + 1).coerceAtMost(2)
                             } else {
                                 upWalkJob = coroutineScope.launch {
-                                    do {
-                                        upWalkQueued = false
+                                    scrollToPreviousUserTurn()
+                                    while (upWalkQueuedCount > 0) {
+                                        upWalkQueuedCount--
                                         scrollToPreviousUserTurn()
-                                    } while (upWalkQueued)
+                                    }
                                 }
                             }
                         },

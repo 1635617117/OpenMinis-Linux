@@ -27,21 +27,73 @@ object ProviderFactory {
      */
     private val cache = java.util.concurrent.ConcurrentHashMap<String, LLMProvider>()
 
+    // [T-provider-factory-race] Bump on every invalidation. The old
+    // check-then-act (cache miss → slow build → put) could interleave with
+    // invalidateAll(): thread A misses, a config write clears the map, A
+    // publishes a provider built on the PRE-invalidation credential — and it
+    // lives forever after. The put now only lands when the generation is
+    // unchanged; a stale build is returned to its caller but never cached.
+    private val generation = java.util.concurrent.atomic.AtomicLong(0L)
+
     private const val CACHE_CAP = 64
 
     fun create(instance: ProviderInstance, apiKey: String, model: LLMModel, context: Context? = null): LLMProvider {
         val key = instance.id + "|" + model.hashCode() + "|" +
             ProviderKeyGate.fingerprint(apiKey) + "|" + instance.hashCode()
         cache[key]?.let { return it }
+        val genAtEntry = generation.get()
         val built = createUncached(instance, apiKey, model, context)
-        if (cache.size >= CACHE_CAP) cache.clear()
-        cache[key] = built
+        // Build runs OUTSIDE the lock (OkHttpClient construction is slow); the
+        // generation re-check + cap + put run INSIDE it, and every invalidator
+        // bumps the generation under the same lock. Without that, a check-then-put
+        // straddling invalidateAll() could still publish a stale provider: check
+        // passes (gen unchanged), invalidation lands, put resurrects the entry
+        // the invalidation was meant to kill.
+        synchronized(cache) {
+            if (generation.get() != genAtEntry) return built
+            if (cache.size >= CACHE_CAP) cache.clear()
+            cache[key] = built
+        }
         return built
     }
 
-    /** Drop every memoized provider. Called on any provider-config write. */
+    /** Drop every memoized provider. Called on config writes with no narrower key. */
     fun invalidateAll() {
-        cache.clear()
+        synchronized(cache) {
+            generation.incrementAndGet()
+            cache.clear()
+        }
+    }
+
+    /**
+     * Drop only one instance's memoized providers. Keys start with the
+     * instance id followed by `|`, so the prefix match cannot bleed into
+     * another instance (ids are UUID-shaped; the delimiter ends the match).
+     * [T-provider-factory-race] Coarse [invalidateAll] on every config write
+     * — including per-image-generation `setImageEndpointResolved` — churned
+     * all 64 entries and rebuilt every OkHttpClient; instance-scoped
+     * invalidation keeps unrelated instances warm.
+     */
+    fun invalidateInstance(instanceId: String) {
+        if (instanceId.isBlank()) return
+        val prefix = instanceId + "|"
+        synchronized(cache) {
+            generation.incrementAndGet()
+            cache.keys.removeAll { it.startsWith(prefix) }
+        }
+    }
+
+    /**
+     * Remove entries whose instance is no longer in [liveInstanceIds] —
+     * the config-persist counterpart of [invalidateInstance]: a RESHAPED
+     * instance already lands on a new key (the key carries the full
+     * instance hashCode), so only deletions need explicit cleanup.
+     */
+    fun pruneToLive(liveInstanceIds: Set<String>) {
+        synchronized(cache) {
+            generation.incrementAndGet()
+            cache.keys.removeAll { key -> key.substringBefore('|') !in liveInstanceIds }
+        }
     }
 
     /**

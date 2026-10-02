@@ -54,7 +54,16 @@ fun containsShellExpansionSyntax(raw: String): Boolean {
     return false
 }
 
-/** Split on `;`, `|`, `&`, and newlines, but not inside quotes. */
+/**
+ * Split on `;`, `|`, `&`, newlines, and — [T-prefixrule-substitution] — on
+ * command-substitution boundaries (a backtick, or `$(`). The old splitter
+ * only saw the outer operator, so `echo $(rm -rf /x)` was ONE segment with
+ * argv[0] == "echo" and the prefix-rule layer never saw the `rm` token
+ * inside the substitution. Splitting at every substitution opener hands the
+ * inner command its own segment, where prefix matching can see it. Nesting
+ * is not balanced (each `$(` opens a cut); the innermost real command token
+ * still surfaces as a segment head.
+ */
 fun shellSegments(raw: String): List<String> {
     val out = mutableListOf<String>()
     val cur = StringBuilder()
@@ -79,6 +88,13 @@ fun shellSegments(raw: String): List<String> {
             i++
             continue
         }
+        if (c == '`' || (c == '$' && i + 1 < raw.length && raw[i + 1] == '(')) {
+            val seg = cur.toString().trim()
+            if (seg.isNotEmpty()) out.add(seg)
+            cur.clear()
+            i += if (c == '$') 2 else 1
+            continue
+        }
         if (c == '\n' || c == '\r' || c == ';' || c == '|' || c == '&') {
             val sepLen = if ((c == '|' || c == '&') && i + 1 < raw.length && raw[i + 1] == c) 2 else 1
             val seg = cur.toString().trim()
@@ -98,20 +114,89 @@ fun shellSegments(raw: String): List<String> {
 /**
  * Units that must be classified on their own. A `su -c` / `sh -c` payload is
  * split further so `rm /tmp; ls /data/...` is not one fatal string.
+ *
+ * [T-prefixrule-wrapper-unwrap] The same holds for argv[0] WRAPPERS: the old
+ * version only unwrapped `su`/`sh`/`bash`, so `env X=1 rm -rf /`,
+ * `xargs rm -rf /`, `find . -exec rm -rf {} \;`, `nice -n 19 rm -rf /`,
+ * `timeout 5 rm -rf /`, `busybox rm -rf /` and friends all presented a
+ * wrapper as argv[0] and the prefix-rule layer never saw the real program
+ * token — several wrappers even sit in SAFE_COMMANDS and auto-ran. Every
+ * wrapper head now recursively yields an extra unit that starts at the
+ * wrapped program, and `find -exec` payloads are lifted into their own
+ * units. Over-unwrapping is safe by construction: this layer only tightens.
  */
+private val WRAPPER_HEADS = setOf(
+    "env", "nice", "timeout", "xargs", "stdbuf", "setsid",
+    "nohup", "sudo", "busybox", "strace", "script",
+)
+
+/** Index of the wrapped program inside [argv] when [argv] starts with a wrapper. */
+private fun wrappedProgramIndex(argv: List<String>): Int {
+    val head = argv.firstOrNull()?.substringAfterLast('/') ?: return -1
+    var i = 1
+    val valueOptions = when (head) {
+        "env" -> setOf("-u", "--unset", "-C", "--chdir", "-S", "--split-string")
+        "sudo" -> setOf("-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-C", "--close-from")
+        "nice" -> setOf("-n", "--adjustment")
+        "timeout" -> setOf("-k", "--kill-after", "-s", "--signal")
+        "stdbuf" -> setOf("-i", "-o", "-e")
+        "xargs" -> setOf("-n", "--max-args", "-P", "--max-procs", "-s", "--max-chars", "-I", "--replace", "-L", "--max-lines", "-E", "--eof", "-d", "--delimiter", "-a", "--arg-file")
+        else -> emptySet()
+    }
+    if (head in setOf("env", "sudo", "nice", "timeout", "stdbuf", "xargs")) {
+        while (i < argv.size) {
+            val arg = argv[i]
+            if (arg == "--") { i++; break }
+            if (arg in valueOptions) {
+                i += 2
+                continue
+            }
+            if (arg.startsWith("-") && arg != "-") { i++; continue }
+            if (head == "env" && arg.contains('=')) { i++; continue }
+            if (head == "nice" && arg.toIntOrNull() != null) { i++; continue }
+            break
+        }
+    }
+    if (head == "timeout" && i < argv.size) i++ // mandatory duration, regardless of spelling
+    return if (i < argv.size) i else -1
+}
+
 fun riskUnits(command: String): List<String> {
     val units = mutableListOf<String>()
     for (segment in shellSegments(command)) {
-        val argv = tokenizeCommand(segment)
-        val head = argv.firstOrNull()?.substringAfterLast('/')
-        val cIdx = argv.indexOf("-c")
-        if (cIdx >= 0 && cIdx + 1 < argv.size &&
-            (head == "su" || head == "android-su" || head == "sh" || head == "bash")
-        ) {
-            units += shellSegments(argv[cIdx + 1])
-            continue
-        }
-        units += segment
+        collectRiskUnits(segment, 0, units)
     }
     return units
+}
+
+private const val MAX_UNWRAP_DEPTH = 4
+
+private fun collectRiskUnits(segment: String, depth: Int, units: MutableList<String>) {
+    val argv = tokenizeCommand(segment)
+    val head = argv.firstOrNull()?.substringAfterLast('/')
+    val cIdx = argv.indexOf("-c")
+    if (cIdx >= 0 && cIdx + 1 < argv.size &&
+        (head == "su" || head == "android-su" || head == "sh" || head == "bash" ||
+            head == "ash" || head == "dash" || head == "zsh" || head == "ksh")
+    ) {
+        for (inner in shellSegments(argv[cIdx + 1])) collectRiskUnits(inner, depth, units)
+    }
+    if (depth < MAX_UNWRAP_DEPTH) {
+        if (head in WRAPPER_HEADS) {
+            val programIdx = wrappedProgramIndex(argv)
+            if (programIdx > 0 && programIdx < argv.size) {
+                collectRiskUnits(argv.drop(programIdx).joinToString(" "), depth + 1, units)
+            }
+        }
+        // `find … -exec cmd … {} ;` / `-execdir` — the embedded command gets
+        // its own unit so `rm -rf` style prefixes match inside it.
+        val execIdx = argv.indexOfFirst { it == "-exec" || it == "-execdir" }
+        if (execIdx >= 0 && execIdx + 1 < argv.size) {
+            val embedded = argv.drop(execIdx + 1)
+                .takeWhile { it != "{}" && it != ";" && it != "\\;" }
+                .joinToString(" ")
+            if (embedded.isNotBlank()) collectRiskUnits(embedded, depth + 1, units)
+        }
+    }
+    units += segment
 }

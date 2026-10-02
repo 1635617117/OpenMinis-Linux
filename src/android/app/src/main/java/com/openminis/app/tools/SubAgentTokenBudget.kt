@@ -68,6 +68,12 @@ class SubAgentTokenBudget(
         const val PREFILL_WEIGHT_MILLI = 100L
 
         /** Only used when the model explicitly requests a cap. */
+        // [T-subagent-budget-constant-role] This is the CEILING applied to a
+        // requested cap (and the value substituted for a malformed one) — NOT
+        // a dispatch default. Dispatch stays opt-in by design: when no lane
+        // passes token_budget there is deliberately NO shared cap, because a
+        // silent default cut long-running workers off mid-task with a
+        // partial report (see the ChatViewModelSubAgentExt dispatch site).
         const val DEFAULT_LIMIT_TOKENS = 400_000L
 
         /** Hard ceiling the coordinator may request (keeps runaway briefs bounded). */

@@ -47,9 +47,15 @@ internal suspend fun ProviderRepository.persistToDbAndMirror(config: ProviderCon
     // data is not lost.
     val mirrorWritten = prefs.edit().putString("config", mirrorStr).commit()
     // [T-android-provider-memo] Any persisted config change can reshape
-    // instances/entries (baseURL, UA, azure flags, useResponsesAPI…), so
-    // drop the provider memo — next create() rebuilds from fresh state.
-    com.openminis.app.provider.ProviderFactory.invalidateAll()
+    // instances/entries (baseURL, UA, azure flags, useResponsesAPI…). The
+    // memo key already carries the full instance hashCode + credential
+    // fingerprint, so a reshaped instance produces a fresh entry naturally;
+    // [T-provider-factory-race] we only prune entries of DELETED instances —
+    // a blanket clear here ran after every image generation
+    // (setImageEndpointResolved persists too) and rebuilt every OkHttpClient.
+    com.openminis.app.provider.ProviderFactory.pruneToLive(
+        config.instances.map { it.id }.toSet()
+    )
     if (!mirrorWritten) {
         android.util.Log.w(
             "ProviderRepo",

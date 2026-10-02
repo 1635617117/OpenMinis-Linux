@@ -137,14 +137,30 @@ class ProviderRepository(private val context: Context) {
         // [T-key-cache-invalidate] 模型刷新后旧 ProviderFactory 的 memo
         // 缓存必须作废 —— 否则已构造的 provider 带着旧 key/旧配置继续
         // 存活，表现为“刷新了模型但发送用的还是旧 key”。
-        com.openminis.app.provider.ProviderFactory.invalidateAll()
+        // [T-provider-factory-race] 只清本实例：invalidateAll 会连坐清掉
+        // 无关实例、反复重建整组 OkHttpClient。
+        com.openminis.app.provider.ProviderFactory.invalidateInstance(instanceId)
     }
 
     private val encryptedPrefs: SharedPreferences by lazy {
         // T-android-keystore-aead-fail: route through the self-healing
         // factory so a corrupted master key on Samsung One UI / Android
         // 16 doesn't crash the app at first read.
-        com.openminis.app.util.EncryptedPrefsFactory.safeCreate(context, "provider_secrets")
+        val prefs = com.openminis.app.util.EncryptedPrefsFactory.safeCreate(context, "provider_secrets")
+        // [T-keypool-orphan-cleanup] Key pools shipped in v2.0.20 and were
+        // removed in 5b9aa6f; the pool-preferring read path went with them,
+        // but the persisted `keypool_<instanceId>` blobs stayed in
+        // provider_secrets forever — and an APK rolled BACK to v2.0.20
+        // would happily read them again. No code reads these keys any
+        // more; sweep them once per process (no-op after the first run).
+        runCatching {
+            val orphans = prefs.all.keys.filter { it.startsWith("keypool_") }
+            if (orphans.isNotEmpty()) {
+                prefs.edit().also { e -> orphans.forEach { e.remove(it) } }.apply()
+                android.util.Log.i("ProviderRepo", "swept " + orphans.size + " orphan keypool_* entries")
+            }
+        }
+        prefs
     }
 
     // [T-android-startup-config-stall] #753: loadConfig() does a synchronous
@@ -536,6 +552,7 @@ class ProviderRepository(private val context: Context) {
         ensureConfigLoaded()
         invalidateModelCache(instanceId)
         val config = workingCopy()
+        val removedInstance = config.instances.find { it.id == instanceId }
         val removedEntryIds = config.modelEntries
             .filter { it.providerInstanceId == instanceId }
             .map { it.id }
@@ -558,6 +575,21 @@ class ProviderRepository(private val context: Context) {
 
         saveConfig(config)
         deleteApiKey(instanceId)
+        // [T-remove-instance-cleanup] deleteApiKey only removes apikey_<id>.
+        // OAuth tokens (oauth_tokens_<id>) and manual bearer tokens survived
+        // the instance, so OAuthManager.isAuthenticated() kept answering
+        // "logged in" for a provider that no longer exists — plus the
+        // voiceShadowDisabled flag and a possibly dangling
+        // lastUsedModelEntryId. Clean everything in one place.
+        if (removedInstance != null) {
+            runCatching {
+                com.openminis.app.auth.OAuthManager.forInstance(context, removedInstance)?.logout()
+            }
+            prefs.edit().remove("voiceShadowDisabled.$instanceId").apply()
+        }
+        if (prefs.getString(KEY_LAST_USED_ENTRY, null) in removedEntryIds) {
+            prefs.edit().remove(KEY_LAST_USED_ENTRY).apply()
+        }
         // [T-android-thinking-rules-phase2] The instance is gone — drop its custom
         // rules from Room and the resolver cache (they can never fire again).
         runCatching {
@@ -2321,9 +2353,10 @@ class ProviderRepository(private val context: Context) {
     fun saveApiKey(instanceId: String, key: String) {
         encryptedPrefs.edit().putString("apikey_$instanceId", key).apply()
         // [T-android-provider-memo] The memo keys on the credential fingerprint;
-        // a rotated token already yields a new entry, but drop everything so
-        // stale-keyed providers can't linger past the cap.
-        com.openminis.app.provider.ProviderFactory.invalidateAll()
+        // a rotated token already yields a new entry. Drop this instance's
+        // entries so stale-keyed providers can't linger past the cap —
+        // [T-provider-factory-race] without touching unrelated instances.
+        com.openminis.app.provider.ProviderFactory.invalidateInstance(instanceId)
     }
 
     fun loadApiKey(instanceId: String): String? {
@@ -2339,7 +2372,10 @@ class ProviderRepository(private val context: Context) {
      * call sites keep their skip semantics for everything else (notably OAuth
      * instances without a token, which must stay unauthenticated).
      */
-    fun usableApiKey(instance: ProviderInstance, modelId: String = ""): String? =
+    // [T-usable-apikey-no-dead-param] The old `modelId: String = ""` was
+    // never used — call sites kept passing it and readers assumed per-model
+    // bucketing that does not exist.
+    fun usableApiKey(instance: ProviderInstance): String? =
         loadApiKey(instance.id)
             ?: if (instance.allowsEmptyAPIKey) "" else null
 
@@ -2348,7 +2384,7 @@ class ProviderRepository(private val context: Context) {
         // [T-key-cache-invalidate] 删 key 同样要让 ProviderFactory 的
         // memo 缓存失效 —— 否则已构造的 provider 继续用旧 key 存活，
         // 删 key 后重加同实例仍是旧 key 生效。
-        com.openminis.app.provider.ProviderFactory.invalidateAll()
+        com.openminis.app.provider.ProviderFactory.invalidateInstance(instanceId)
     }
 
     private val backupCoordinator by lazy {

@@ -166,4 +166,33 @@ class ToolOutputPolicyTest {
         )
         assertEquals("""{"cmd":"echo \"[REDACTED]\" > /tmp/x"}""", out3)
     }
+
+    @Test
+    fun depthCapFlattensAndStillRedacts() {
+        // [T-redact-depth] Past MAX_REDACT_DEPTH the subtree is flattened to
+        // text and plain-text redacted. The first cut returned the raw node
+        // past the cap, so a secret nested one level too deep reached the
+        // model unredacted — a depth bound must not double as a leak channel.
+        var json = """{"k":"sk-Ab12Cd34Ef56Gh78"}"""
+        repeat(40) { json = """{"n":$json}""" }
+        val out = ToolOutputPolicy.redactWith(json, sensitive)
+        assert(!out.contains("sk-Ab12Cd34Ef56Gh78")) { "secret leaked past the depth cap" }
+        assert(out.contains("[REDACTED]")) { "flattened subtree was not redacted" }
+    }
+
+    @Test
+    fun boundaryAwareRedactionSparesIdentifiers() {
+        // [T-redact-boundary] Whole-substring replace rewrote ANY text that
+        // happened to contain the value — a token-shaped string glued inside
+        // a longer identifier is not the secret and must survive verbatim.
+        assertEquals(
+            "mysk-Ab12Cd34Ef56Gh78var",
+            ToolOutputPolicy.redactWith("mysk-Ab12Cd34Ef56Gh78var", sensitive),
+        )
+        // Delimited occurrences still redact (punctuation boundaries count).
+        assertEquals(
+            "key=[REDACTED];done",
+            ToolOutputPolicy.redactWith("key=sk-Ab12Cd34Ef56Gh78;done", sensitive),
+        )
+    }
 }

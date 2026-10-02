@@ -169,4 +169,54 @@ class AtomicFileWriteTest {
         assertEquals("v2", AtomicFileWrite.read(f))
         assertNotNull(AtomicFileWrite.read(File(tmp.root, "missing.txt")))
     }
+
+    // ── [T-fileedit-binary-guard] / [T-fileedit-size-cap] / [T-fileedit-bom] ──
+
+    @Test
+    fun readModifyWriteRejectsBinaryContentWithoutTouchingTheFile() {
+        // The old readText() path replaced the NUL with U+FFFD and wrote the
+        // corrupted text back; verify() compared against the same corrupted
+        // string and saw nothing wrong.
+        val f = File(tmp.root, "bin.dat")
+        val bytes = byteArrayOf(0x68, 0x69, 0x00, 0x62)
+        f.writeBytes(bytes)
+        val out = AtomicFileWrite.readModifyWrite(f) { "transform must not run: $it" }
+        assertNull("binary file must be refused", out)
+        assertTrue("file bytes must survive untouched", bytes.contentEquals(f.readBytes()))
+    }
+
+    @Test
+    fun readModifyWriteRejectsInvalidUtf8WithoutTouchingTheFile() {
+        val f = File(tmp.root, "invalid.txt")
+        val bytes = byteArrayOf(0x68, 0xC3.toByte(), 0x28) // 0xC3 expects a continuation byte
+        f.writeBytes(bytes)
+        assertNull(AtomicFileWrite.readModifyWrite(f) { "x" })
+        assertTrue(bytes.contentEquals(f.readBytes()))
+    }
+
+    @Test
+    fun readModifyWriteRejectsOversizedFileBeforeReadingItIntoMemory() {
+        val f = File(tmp.root, "big.txt")
+        f.writeBytes(ByteArray(AtomicFileWrite.MAX_EDIT_BYTES + 1) { 'a'.code.toByte() })
+        assertNull(AtomicFileWrite.readModifyWrite(f) { "x" })
+        assertEquals(AtomicFileWrite.MAX_EDIT_BYTES + 1L, f.length())
+    }
+
+    @Test
+    fun readModifyWriteStripsBomForMatchingAndRestoresItOnWrite() {
+        // A BOM-prefixed file used to fail all three match tiers because the
+        // old_string (written without a BOM) never matched the U+FEFF head.
+        val f = File(tmp.root, "bom.txt")
+        f.writeBytes(byteArrayOf(0xEF.toByte(), 0xBB.toByte(), 0xBF.toByte()) + "hello world".toByteArray(Charsets.UTF_8))
+        val out = AtomicFileWrite.readModifyWrite(f) { current ->
+            assertEquals("transform sees BOM-stripped text", "hello world", current)
+            current.replace("hello", "goodbye")
+        }
+        assertEquals("goodbye world", out)
+        val onDisk = f.readBytes()
+        assertEquals(0xEF.toByte(), onDisk[0])
+        assertEquals(0xBB.toByte(), onDisk[1])
+        assertEquals(0xBF.toByte(), onDisk[2])
+        assertEquals("\uFEFFgoodbye world", String(onDisk, Charsets.UTF_8))
+    }
 }

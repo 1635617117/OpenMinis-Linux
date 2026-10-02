@@ -28,6 +28,9 @@ import kotlin.coroutines.coroutineContext
 object ProviderKeyGate {
     const val DEFAULT_PERMITS = 1
 
+    /** [T-provider-keygate-bounded] Cap on live rate-limit buckets. */
+    private const val MAX_GATES = 256
+
     private val gates = ConcurrentHashMap<String, Semaphore>()
 
     private class HeldKeys(val keys: Set<String>) : AbstractCoroutineContextElement(HeldKeys) {
@@ -66,10 +69,43 @@ object ProviderKeyGate {
         }
     }
 
+    /**
+     * Run [block] with this bucket's single permit.
+     *
+     * Reentrancy: a nested call on the SAME coroutine and key passes through
+     * (tracked via [HeldKeys]). CONSTRAINT: do not `launch` a child coroutine
+     * inside [block] that acquires the same key — children do not inherit
+     * [HeldKeys], so the child would wait on a permit the suspended parent
+     * never releases, and acquisition has deliberately no timeout (a stream
+     * can legitimately hold the permit for minutes).
+     */
     suspend fun <T> withPermit(key: String, block: suspend () -> T): T {
         if (key.isBlank()) return block()
         val held = coroutineContext[HeldKeys]?.keys
         if (held != null && key in held) return block()
+        // [T-provider-keygate-bounded] Bucket keys contain the credential
+        // fingerprint, and every OAuth silent refresh mints a new token → a
+        // new fingerprint → a fresh batch of host×model buckets. Without a
+        // bound, the map grew monotonically for the life of the process.
+        //
+        // Eviction removes IDLE buckets only (full permits, no queue): a
+        // blanket clear() while permits are held would hand a concurrent
+        // same-bucket caller a fresh semaphore and bypass the serialization
+        // this gate exists for. If every bucket is busy the map temporarily
+        // exceeds the cap instead — that overshoot is bounded by the number
+        // of concurrently in-flight requests, and the next call reclaims the
+        // idle entries.
+        if (gates.size >= MAX_GATES) {
+            val iter = gates.entries.iterator()
+            while (iter.hasNext() && gates.size > MAX_GATES / 2) {
+                val e = iter.next()
+                // Idle = every permit available. The kotlinx Semaphore exposes
+                // no waiter count, but with permits=1 a released permit is
+                // handed straight to a queued waiter, so full availability
+                // means no holder and no queue.
+                if (e.key != key && e.value.availablePermits >= DEFAULT_PERMITS) iter.remove()
+            }
+        }
         val sem = gates.getOrPut(key) { Semaphore(DEFAULT_PERMITS) }
         return sem.withPermit {
             withContext(HeldKeys((held ?: emptySet()) + key)) {
@@ -77,6 +113,4 @@ object ProviderKeyGate {
             }
         }
     }
-
-    
 }

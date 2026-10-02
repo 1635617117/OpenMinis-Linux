@@ -221,6 +221,16 @@ object ShellExecutor {
                                 }
                             }
                             if (!room || !sink.canRead()) {
+                                // [T-output-cap-vs-backpressure] Two distinct
+                                // brakes downstream, deliberately different:
+                                // the rate brake above (`wait > 0` → delay and
+                                // keep reading) is backpressure; THIS break is
+                                // the output CAP — a terminal condition where
+                                // the read loop ends for this command, the
+                                // guest blocks in write, and the full accepted
+                                // buffer is still returned via
+                                // StreamSink.snapshot(). Not a bug to "fix"
+                                // into a wait.
                                 Log.w(TAG, "output cap hit; stopping read so the guest blocks")
                                 break
                             }

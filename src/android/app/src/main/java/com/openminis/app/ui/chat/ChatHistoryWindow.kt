@@ -151,16 +151,51 @@ internal object ChatHistoryWindow {
     }
 
     /**
-     * reverseLayout paints index 0 at the visual bottom. [flatItems] is
-     * oldest-first, then reversed into the list. Prepending older rows adds
-     * items after the visible ones, so their lazy indices do not move.
-     * Appending newer rows inserts items before them and must be compensated
-     * by [insertedBeforeAnchor].
+     * [T-android-scroll-policy] With the anchor-restore effect deleted, the
+     * viewport under appends is held by Compose's native key anchoring —
+     * no manual index compensation exists (or is needed) any more. The old
+     * [compensatedLazyIndex] had zero callers left and a KDoc describing a
+     * mechanism that no longer runs; it is gone.
      */
-    fun compensatedLazyIndex(previousLazyIndex: Int, insertedBeforeAnchor: Int): Int {
-        if (previousLazyIndex < 0) return previousLazyIndex
-        return previousLazyIndex + insertedBeforeAnchor.coerceAtLeast(0)
-    }
+
+    /**
+     * Compose-free snapshot of one visible LazyColumn row, so the visual-top
+     * selection below is unit-testable.
+     */
+    data class VisibleRow(val index: Int, val key: String, val offset: Int, val size: Int)
+
+    /**
+     * The visual-TOP row of the reverseLayout chat list: the HIGHEST lazy
+     * index among visible, non-synthetic rows.
+     *
+     * [T-android-visual-top] Under `reverseLayout=true` with
+     * `items(flatItems.asReversed())`, index 0 is the NEWEST row and paints
+     * at the visual BOTTOM (ChatHistoryWindow KDoc), so index ascends upward
+     * and the oldest visible row — the one at the top of the screen — has
+     * the highest index. The up-button's old selector used `minByOrNull`
+     * with a "measured on device" comment whose own dump (offset ASCENDS
+     * with index) proves the opposite; the two "visual top" definitions in
+     * the file contradicted each other and the min one made the first tap
+     * resolve the anchor against the NEWEST visible row. Both call sites
+     * now go through this single function.
+     *
+     * Synthetic `__` rows (load-older pill, resume banner) never anchor
+     * anything.
+     */
+    fun visibleTopRow(rows: List<VisibleRow>): VisibleRow? =
+        rows.filter { !it.key.startsWith("__") }.maxByOrNull { it.index }
+
+    /**
+     * User-turn ids whose bubbles are FULLY on screen (already seen by the
+     * reader; a turn scrolled half off the top edge is still unread).
+     */
+    fun fullyVisibleUserIds(rows: List<VisibleRow>, viewportStart: Int, viewportEnd: Int): Set<String> =
+        rows.asSequence()
+            .filter { it.offset >= viewportStart && it.offset + it.size <= viewportEnd }
+            .mapNotNull { FlatKeys.parse(it.key) }
+            .filter { it.kind == FlatKeys.KIND_USER }
+            .map { it.messageId }
+            .toSet()
 
     fun lazyIndexOfOldestFirstKey(
         oldestFirstCount: Int,

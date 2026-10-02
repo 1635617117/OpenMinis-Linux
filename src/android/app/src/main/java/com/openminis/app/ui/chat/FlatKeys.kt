@@ -32,10 +32,20 @@ internal object FlatKeys {
     const val KIND_ERROR = "error"
     const val KIND_LEGACY = "legacy"
 
-    fun of(kind: String, messageId: String, vararg extras: Any?): String = buildString {
-        append(kind).append(':').append(messageId)
-        for (extra in extras) {
-            append(':').append(extra)
+    fun of(kind: String, messageId: String, vararg extras: Any?): String {
+        // [T-flatkeys-invariants] parse() recovers the id as the segment
+        // between the first two ':' with a trailing '#...' dedupe suffix
+        // stripped. An id containing ':' or '#' would break that contract —
+        // fail fast at the construction site instead of degrading key
+        // consumers far away (the up-button walk once depended on it).
+        require(messageId.isNotEmpty() && !messageId.contains(':') && !messageId.contains('#')) {
+            "FlatKeys messageId must be non-empty and ':'/'#'-free: $messageId"
+        }
+        return buildString {
+            append(kind).append(':').append(messageId)
+            for (extra in extras) {
+                append(':').append(extra)
+            }
         }
     }
 

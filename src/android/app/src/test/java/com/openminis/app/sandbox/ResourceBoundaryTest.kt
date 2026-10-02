@@ -26,28 +26,23 @@ class ResourceBoundaryTest {
      * an app-side `ulimit -H -v` could only raise a limit it is not allowed
      * to raise: EPERM, and with `exit 1` a dead shell.
      *
-     * [T-as-soft-probe] added a safe in-shell probe: `(ulimit -S -v unlimited
-     * && ulimit -H -v unlimited) || true`. The subshell-with-true pattern
-     * means EPERM on a clamped device does not propagate — the shell never
-     * dies. This test now verifies both halves of that contract:
-     * 1. No `|| exit 1` anywhere (the original fatal-rlimit guard).
-     * 2. The probe IS present (we set address space now), but every
-     *    occurrence of `ulimit -v` is wrapped in the non-fatal pattern.
+     * Restored contract from 887d48c (the coverage was dropped in 2b0bb78 to
+     * accommodate the T-as-soft-probe no-op, which is deleted again):
+     * 1. The app NEVER sets the address space — no `ulimit -S -v` / `-H -v`
+     *    may appear in any generated script. This per-match regex assertion
+     *    replaces a whole-script `contains("|| true")` that other ulimit
+     *    lines satisfied anyway (a vacuous check).
+     * 2. No rlimit may be fatal: no `|| exit 1` anywhere.
      */
     @Test
     fun the_app_never_sets_the_address_space_and_never_exits_on_a_failed_rlimit() {
+        val asLimit = Regex("""ulimit\s+(-[A-Za-z]+\s+)*-v""")
         for (command in listOf("true", "ls -la", "apt install -y curl", "sleep 100 &")) {
             val wrapped = GuestLimits.wrap(command)
+            // The address space is the host's decision — full stop.
+            assertFalse("address space set for: $command", asLimit.containsMatchIn(wrapped))
             // No rlimit may be fatal — this is the invariant.
             assertFalse("fatal rlimit for: $command", wrapped.contains("|| exit 1"))
-            // AS probe is present (new with T-as-soft-probe) — but safe.
-            val hasProbe = wrapped.contains("ulimit -S -v") || wrapped.contains("ulimit -H -v")
-            if (hasProbe) {
-                assertTrue(
-                    "AS probe present but NOT in non-fatal subshell for: $command",
-                    wrapped.contains("|| true")
-                )
-            }
         }
     }
 

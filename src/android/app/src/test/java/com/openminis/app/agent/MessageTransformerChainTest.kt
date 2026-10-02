@@ -135,4 +135,27 @@ class MessageTransformerChainTest {
         // apply() 只跑 assistant 清洗，不做时间注入。
         assertEquals(text, MessageTransformerChain.apply(text))
     }
+
+    @Test
+    fun reApplicationOverAlreadyEnrichedTextIsANoop() {
+        // [T-user-transformers-wired] retry / rerun / reload 会在已注入过的
+        // 文本上重跑 applyUser；哨兵必须阻止第二份（跨小时还会互相矛盾的）
+        // 时间戳和第二层 <system-note> 嵌套包装。
+        val ctx = UserTransformContext(
+            nowMillis = java.time.LocalDateTime.of(2026, 10, 1, 14, 30)
+                .atZone(TimeZone.getDefault().toZoneId())
+                .toInstant().toEpochMilli(),
+            workspaceHint = "/var/minis/workspace",
+        )
+        val once = MessageTransformerChain.applyUser("现在几点了？", ctx)
+        val twice = MessageTransformerChain.applyUser(once, ctx)
+        assertEquals(once, twice)
+        assertEquals(1, Regex("<system-note>当前时间").findAll(twice).count())
+        assertEquals(1, Regex("<system-note>工作目录").findAll(twice).count())
+
+        val linkOnce = MessageTransformerChain.expandResourceReferences("看 minis://workspace/a.csv")
+        val linkTwice = MessageTransformerChain.expandResourceReferences(linkOnce)
+        assertEquals(linkOnce, linkTwice)
+        assertEquals(1, Regex("<system-note>消息中引用了文件").findAll(linkTwice).count())
+    }
 }

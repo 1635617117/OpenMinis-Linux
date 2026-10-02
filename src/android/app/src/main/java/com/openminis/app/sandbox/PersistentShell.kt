@@ -469,7 +469,13 @@ class PersistentShell(
         Log.i(TAG, "Persistent shell process exited")
     }
 
-    private val lineBudget = TokenBucket(ratePerSec = 20.0, burst = 40)
+    // [T-line-budget-sync] The byte budget was raised 64→512 KiB/s
+    // (61a2d77) but this line bucket stayed at 20 lines/s, so build logs'
+    // REAL-TIME progress was still throttled ~25x below the byte budget
+    // (final tool output is unaffected — StreamSink.snapshot() keeps the
+    // full buffer to its cap). 250 lines/s ≈ 200 KiB/s of typical log text,
+    // inside the byte budget, with burst headroom for progress meters.
+    private val lineBudget = TokenBucket(ratePerSec = 250.0, burst = 500)
 
     private fun feedLines(text: String, callback: (String) -> Unit) {
         if (!lineBudget.tryTake(System.currentTimeMillis())) return

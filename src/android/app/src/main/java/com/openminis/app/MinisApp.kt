@@ -377,8 +377,8 @@ class MinisApp : Application(), ImageLoaderFactory {
         // [T-generation-run] 启动扫描：上一次进程死亡时半途而废的生成轮次
         // 标记为 ABANDONED 并留日志，让"崩溃时在跑哪条回复"可追溯。
         runCatching {
-            com.openminis.app.agent.GenerationRunStore.abandoned().forEach { run ->
-                com.openminis.app.agent.GenerationRunStore.markAbandoned(run.runId)
+            com.openminis.app.agent.GenerationRunStore.abandoned(this).forEach { run ->
+                com.openminis.app.agent.GenerationRunStore.markAbandoned(this, run.runId)
                 Log.w(
                     "MinisApp",
                     "[GenerationRun] abandoned run recovered: session=${run.sessionId} " +

@@ -114,9 +114,45 @@ class MemoryRepository(private val memoryDir: File) {
         // what the provider sees over the wire).
         private const val MAX_OUTPUT_BYTES = 30 * 1024  // 30 KB
 
-        // [T-memory-poison-guard] 写入侧毒窗断路器——单条记忆上限 + 当日写入条数上限
-        private const val MAX_ENTRY_CHARS = 8 * 1024       // 8 KB
-        private const val MAX_DAILY_ENTRIES = 30
+        // [T-memory-poison-guard] 写入侧静态配额——单条记忆字节上限 + 当日写入
+        // 条数上限。诚实命名：这不是时间窗也不是断路器，只是两条硬上限；防的
+        // 是失控 agent loop 用 memory_write 灌爆当日日志。字节数按 UTF-8 计
+        // （与发给 provider 的线上体积一致）。沙箱侧对 /var/minis/memory 的
+        // 直接 shell 写语法由 GuestWorkloadPolicy.memoryQuotaRefusal 按同一
+        // 配额拒绝——若配额只站在工具路径上，改用 shell/file_edit 写同一个
+        // bind 目录即可绕过，那恰好是本防护声称要拦的场景。
+        private val MAX_ENTRY_BYTES = 8 * 1024      // 8 KB UTF-8
+        const val MAX_DAILY_ENTRIES = 30
+
+        /** writeMemory 的落盘格式：行首时间戳标记 + 正文 + 空行。行首锚定计数，
+         *  正文里出现同形字符串不会被误计为一条记忆。 */
+        private val ENTRY_MARK = Regex(
+            "(?m)^<!-- \\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2} -->\\s*$"
+        )
+
+        /** 当日日志里已有的条目数（供沙箱侧配额闸门复用）。 */
+        fun dailyEntryCount(dir: File): Int {
+            val file = File(dir, IsoTime.formatLocalDate() + ".md")
+            if (!file.exists()) return 0
+            return runCatching { ENTRY_MARK.findAll(file.readText()).count() }.getOrDefault(0)
+        }
+
+        /**
+         * [T-memory-poison-guard] 文件工具侧的同一配额。shell 侧闸门在
+         * GuestWorkloadPolicy.memoryQuotaRefusal（ExecutionCoordinator 接线）；
+         * 没有这一份，被 memory_write 上限拦住的失控循环改走 file_write /
+         * file_edit / multi_edit 写同一个 bind 目录即可继续灌——恰是配额声称
+         * 要拦的场景。multi_edit 逐条委托 FileEditTool，因此两个接入点覆盖
+         * 全部三个工具。返回拒绝消息，或 null 放行。
+         */
+        fun fileToolQuotaRefusal(filesDir: File, sessionId: String, guestPath: String): String? {
+            if (!guestPath.startsWith("/var/minis/memory/")) return null
+            val dir = com.openminis.app.sandbox.SessionWorkspace.memoryDir(filesDir, sessionId)
+            if (dailyEntryCount(dir) < MAX_DAILY_ENTRIES) return null
+            return "Error: 今日记忆日志已达 $MAX_DAILY_ENTRIES 条上限，对 /var/minis/memory 的写入已暂停" +
+                "（memory_write / file_write / file_edit / shell 共用同一配额）。" +
+                "旧的按日归档，明日自动开始新日志。"
+        }
     }
 
     init {
@@ -139,8 +175,9 @@ class MemoryRepository(private val memoryDir: File) {
         // [T-memory-poison-guard] 写入侧毒窗防护（镜像 Kelivo poison-window
         // breaker 精神）：单条超限 + 单日条目超限。失控的 agent loop 反复写
         // memory_write 时，坏窗口不允许永久毒化当日日志。
-        if (content.length > MAX_ENTRY_CHARS) {
-            return "Error: 记忆条目过长（${content.length} 字符，上限 $MAX_ENTRY_CHARS）。请精简为要点再写。"
+        val contentBytes = content.toByteArray(Charsets.UTF_8).size
+        if (contentBytes > MAX_ENTRY_BYTES) {
+            return "Error: 记忆条目过长（$contentBytes 字节，上限 $MAX_ENTRY_BYTES）。请精简为要点再写。"
         }
         val fileName = "${IsoTime.formatLocalDate()}.md"
         val file = File(memoryDir, fileName)
@@ -155,7 +192,7 @@ class MemoryRepository(private val memoryDir: File) {
                 return "Error: MEMORY_CONFLICT — 日志文件已被并发更新（期望 revision $expectedRevision，实际 ${actual.take(16)}…）。请先 memory_get 重新读取后再写。"
             }
         }
-        val entryCount = Regex("""<!-- \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} -->""").findAll(existing).count()
+        val entryCount = ENTRY_MARK.findAll(existing).count()
         if (entryCount >= MAX_DAILY_ENTRIES) {
             return "Error: 今日记忆已达上限（$MAX_DAILY_ENTRIES 条）。旧的按日归档，明日自动开始新日志；请精简而不是继续追加。"
         }

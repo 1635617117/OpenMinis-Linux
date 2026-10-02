@@ -94,16 +94,6 @@ class ChatHistoryWindowTest {
     }
 
     @Test
-    fun prependCompensationDoesNotMoveTheVisibleIndex() {
-        assertEquals(4, ChatHistoryWindow.compensatedLazyIndex(4, insertedBeforeAnchor = 0))
-    }
-
-    @Test
-    fun appendCompensationShiftsByTheInsertedPrefix() {
-        assertEquals(7, ChatHistoryWindow.compensatedLazyIndex(4, insertedBeforeAnchor = 3))
-    }
-
-    @Test
     fun shortListThatShowsBothEdgesDoesNotAutoPage() {
         val request = ChatHistoryWindow.historyEdgeAction(
             hasOlder = true,

@@ -826,7 +826,11 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
             // pulls the user back unconditionally — but that fights every
             // touch on Compose's smaller pause-threshold scroller, so we
             // honor the user's drag the way the outer chat list does.
-            var userScrolledAway by remember(block.id) { mutableStateOf(false) }
+            // [T-android-scroll-policy] Renamed from `userScrolledAway` — same
+            // name, unrelated concept: this is the auto-follow switch of the
+            // thinking block's OWN inner scroll container, not the timeline's
+            // reading state (which lives in ChatScrollPolicy).
+            var innerAutoFollowPaused by remember(block.id) { mutableStateOf(false) }
             LaunchedEffect(scrollState, block.id) {
                 snapshotFlow {
                     Triple(
@@ -841,8 +845,8 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                     // up briefly without ping-ponging.
                     val gap = (max - v).coerceAtLeast(0)
                     when {
-                        dragging && gap > 4 -> userScrolledAway = true
-                        gap <= 4 -> userScrolledAway = false
+                        dragging && gap > 4 -> innerAutoFollowPaused = true
+                        gap <= 4 -> innerAutoFollowPaused = false
                     }
                 }
             }
@@ -853,7 +857,7 @@ internal fun ThinkingBlock(block: AssistantBlock, isStreaming: Boolean, isLast: 
                 if (!isStreaming) return@LaunchedEffect
                 snapshotFlow { block.content.length }
                     .collect {
-                        if (userScrolledAway) return@collect
+                        if (innerAutoFollowPaused) return@collect
                         // scrollTo (not animateScrollTo) — animating fights
                         // back-to-back token ticks; iOS uses a 0.15s linear
                         // animation, but Compose's animateScrollTo cancels

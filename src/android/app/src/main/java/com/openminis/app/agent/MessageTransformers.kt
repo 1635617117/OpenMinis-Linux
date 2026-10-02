@@ -54,11 +54,20 @@ object MessageTransformerChain {
      * Enrich a user message before send. Returns the original text when no
      * transformer has anything to add — the empty-append case must not
      * grow the payload.
+     *
+     * [T-user-transformers-wired] Wired into the send path
+     * (ChatViewModelSendExt.modelBody). The enrichments are REQUEST-side
+     * only — never persisted — so every rebuild (retry, rerun, reload)
+     * re-injects exactly once against a clean base. Per-transformer sentinels
+     * still guard re-application when a caller hands us an already-enriched
+     * text (see each transformer's skip marker).
      */
     fun applyUser(text: String, context: UserTransformContext): String {
-        val additions = userTransformers.mapNotNull { it.transformUser(text, context) }
-        if (additions.isEmpty()) return text
-        return text + "\n\n" + additions.joinToString("\n\n")
+        val expanded = expandResourceReferences(text)
+        val additions = userTransformers.mapNotNull { it.transformUser(expanded, context) }
+        if (expanded == text && additions.isEmpty()) return text
+        if (additions.isEmpty()) return expanded
+        return expanded + "\n\n" + additions.joinToString("\n\n")
     }
 
     /**
@@ -66,16 +75,32 @@ object MessageTransformerChain {
      * visible answer body (QwQ/DeepSeek/Gemini variants): paired
      * `<thinking>…</thinking>` / `<思考>…</思考>` / special-token
      * `<|thinking|>…<|/thinking|>` forms, case-insensitive, across newlines.
+     *
+     * [T-universal-think-tag-history] The variant list comes from the shared
+     * [com.openminis.app.text.ReasoningTagVariants] table — the stripper and
+     * the stream parser once carried two diverging copies, and paired blocks
+     * spelled `<antThinking>`/`<inner_thought>`/`<scratchpad>` survived the
+     * history path while the live stream stripped them ("刷新后思考块原文重现").
+     *
+     * [T-think-tag-code-fence] Matching is fenced: the transform runs only on
+     * prose, never inside ``` / ~~~ fences or inline-code spans. Without
+     * this, a reply that merely *explains* the tag — "Use the `<think>` tag
+     * to mark reasoning" — had its prose deleted BEFORE replay to the model
+     * (the exact defect the stream parser's start-anchored design fixed; the
+     * history path kept committing it because regexes have no anchoring).
      */
     private object ReasoningTagStripper : MessageTransformer {
         override val id = "reasoning-tag-strip"
 
+        private val names = com.openminis.app.text.ReasoningTagVariants.ALTERNATION
+
         private val namedBlocks = Regex(
-            """(?s)<\s*(thinking|think|reasoning|analysis|分析|思考)\s*>(.*?)</\s*\1\s*>""",
+            """(?s)<\s*($names)\s*>(.*?)</\s*\1\s*>""",
             RegexOption.IGNORE_CASE,
         )
+        private val specialNames = com.openminis.app.text.ReasoningTagVariants.SPECIAL_NAMES.joinToString("|")
         private val specialTokenBlocks = Regex(
-            """(?s)<\|(thinking|think|reasoning)\|>(.*?)<\|/\1\|>""",
+            """(?s)<\|($specialNames)\|>(.*?)<\|/\1\|>""",
             RegexOption.IGNORE_CASE,
         )
 
@@ -85,21 +110,101 @@ object MessageTransformerChain {
         // unclosed opener to end-of-text so the tail reasoning never renders in
         // the bubble. This mirrors the stream parser's "unterminated = thinking"
         // rule, applied to persisted/replayed text the parser can't reach.
+        // `.*$` (not `[^<]*$`): the negative lookahead already proved no close
+        // tag follows, so greedy-to-end is safe — `[^<]` bailed on the first
+        // `<` (a comparison, a code snippet) and leaked the whole reasoning
+        // tail back into the body.
         private val unterminatedOpen = Regex(
-            """(?s)<\s*(thinking|think|reasoning|analysis|antThinking|inner_thought|scratchpad|分析|思考)\s*>(?!.*?</\s*\1\s*>)[^<]*$""",
+            """(?s)<\s*($names)\s*>(?!.*?</\s*\1\s*>).*$""",
             RegexOption.IGNORE_CASE,
         )
         private val unterminatedSpecial = Regex(
-            """(?s)<\|(thinking|think|reasoning)\|>(?!.*<\|/\1\|>)[^<]*$""",
+            """(?s)<\|($specialNames)\|>(?!.*<\|/\1\|>).*$""",
             RegexOption.IGNORE_CASE,
         )
 
-        override fun transform(text: String): String {
-            var out = specialTokenBlocks.replace(namedBlocks.replace(text, ""), "")
-            // Second pass only needed when a lone opener survived — cheap check.
-            if (out.contains('<')) {
-                out = unterminatedSpecial.replace(unterminatedOpen.replace(out, ""), "")
+        override fun transform(text: String): String =
+            transformProtectingCode(text) { chunk ->
+                var out = specialTokenBlocks.replace(namedBlocks.replace(chunk, ""), "")
+                // Second pass only needed when a lone opener survived — cheap check.
+                if (out.contains('<')) {
+                    out = unterminatedSpecial.replace(unterminatedOpen.replace(out, ""), "")
+                }
+                out
             }
+
+        /** Marker-wrapped index used to mask inline-code spans during matching.
+ *  Private-use control chars (U+E000/U+E001) never appear in ordinary
+ *  model output, and are written here as escapes, never raw. */
+        private const val MASK_OPEN = '\uE000'
+        private const val MASK_CLOSE = '\uE001'
+
+        private val inlineCode = Regex("`+[^`]*`+")
+        private val maskMarker = Regex("${MASK_OPEN}\\d+${MASK_CLOSE}")
+
+        /**
+         * Splits [text] into fenced / prose chunks (indices into the original,
+         * so untouched content round-trips byte-identical), masks inline-code
+         * spans inside prose, runs [transform] per prose chunk, and restores
+         * the masked spans afterwards.
+         */
+        private fun transformProtectingCode(text: String, transform: (String) -> String): String {
+            val sb = StringBuilder(text.length)
+            var from = 0
+            for ((range, isCode) in fenceSegments(text)) {
+                if (from < range.first) sb.append(text, from, range.first)
+                val chunk = text.substring(range)
+                sb.append(if (isCode) chunk else transformMasked(chunk, transform))
+                from = range.last + 1
+            }
+            if (from < text.length) sb.append(text, from, text.length)
+            return sb.toString()
+        }
+
+        private fun transformMasked(chunk: String, transform: (String) -> String): String {
+            if (!chunk.contains('`')) return transform(chunk)
+            val spans = mutableListOf<String>()
+            val masked = inlineCode.replace(chunk) { m ->
+                spans.add(m.value)
+                "$MASK_OPEN${spans.size - 1}$MASK_CLOSE"
+            }
+            val transformed = transform(masked)
+            if (spans.isEmpty()) return transformed
+            return maskMarker.replace(transformed) { m ->
+                spans.getOrNull(m.value.substring(1, m.value.length - 1).toInt()) ?: m.value
+            }
+        }
+
+        /** Contiguous (range, isCode) segments of [text]. */
+        private fun fenceSegments(text: String): List<Pair<IntRange, Boolean>> {
+            val out = mutableListOf<Pair<IntRange, Boolean>>()
+            var inFence = false
+            var fenceMark = ""
+            var segStart = 0
+            var searchFrom = 0
+            while (true) {
+                val nl = text.indexOf('\n', searchFrom)
+                val lineEnd = if (nl >= 0) nl else text.length
+                val line = text.substring(searchFrom, lineEnd)
+                val trimmed = line.trimStart()
+                if (!inFence && trimmed.startsWith("```") || !inFence && trimmed.startsWith("~~~")) {
+                    inFence = true
+                    fenceMark = trimmed.take(3)
+                } else if (inFence && trimmed.startsWith(fenceMark) &&
+                    trimmed.length == fenceMark.length
+                ) {
+                    out += segStart until lineEnd + 1 to true
+                    segStart = lineEnd + 1
+                    inFence = false
+                }
+                if (nl < 0) break
+                searchFrom = nl + 1
+            }
+            if (inFence && segStart < text.length) {
+                out += segStart until text.length to true
+                segStart = text.length
+            }
+            if (segStart < text.length) out += segStart until text.length to false
             return out
         }
     }
@@ -119,6 +224,10 @@ object MessageTransformerChain {
         private val format = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
 
         override fun transformUser(text: String, context: UserTransformContext): String? {
+            // [T-user-transformers-wired] Idempotency sentinel: already stamped
+            // once this request — never stamp twice (cross-hour retries would
+            // otherwise accumulate conflicting timestamps).
+            if (text.contains("<system-note>当前时间")) return null
             // Skip for messages that clearly aren't time-sensitive
             // (pure code/file operations don't benefit from a clock stamp).
             val needsTime = TIME_SENSITIVE_HINTS.any { hint -> text.contains(hint, ignoreCase = true) }
@@ -144,6 +253,8 @@ object MessageTransformerChain {
         override val id = "workspace-reminder"
 
         override fun transformUser(text: String, context: UserTransformContext): String? {
+            // [T-user-transformers-wired] Idempotency sentinel (see TimeReminder).
+            if (text.contains("<system-note>工作目录")) return null
             val hint = context.workspaceHint ?: return null
             return "<system-note>工作目录: $hint — 读取和写入用户文件时优先使用该目录。</system-note>"
         }
@@ -160,6 +271,9 @@ object MessageTransformerChain {
     fun expandResourceReferences(text: String): String {
         val resourceLinks = Regex("""minis://(workspace|shared|attachments|offloads)/([A-Za-z0-9._%+/\-]+)""")
         val matches = resourceLinks.findAll(text).toList()
+        // [T-user-transformers-wired] Idempotency sentinel: a second pass over
+        // already-expanded text must not nest a second <system-note> wrapper.
+        if (text.contains("<system-note>消息中引用了文件")) return text
         if (matches.isEmpty()) return text
         val sb = StringBuilder()
         val additions = StringBuilder()

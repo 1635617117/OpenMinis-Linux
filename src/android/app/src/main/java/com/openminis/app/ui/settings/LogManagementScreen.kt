@@ -263,7 +263,7 @@ private fun LogsBody(
         }
 
         if (showStreamTraces) {
-            val tracesDir = java.io.File(com.openminis.app.provider.StreamTraceRecorder.DIR)
+            val tracesDir = com.openminis.app.provider.StreamTraceRecorder.dir(context)
             val traceFiles = remember(showStreamTraces) {
                 tracesDir.listFiles()?.sortedByDescending { it.lastModified() }?.take(30) ?: emptyList()
             }

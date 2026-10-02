@@ -797,7 +797,20 @@ class ChatViewModel(
     // live in [TimelineWindow] (single owner — see its KDoc for what the old
     // scattered-vars shape used to break).
     internal val timeline = TimelineWindow()
-    internal var loadingOlderMessages = false
+    // [T-window-flag-cas] Single-flight for loadOlderPage. A plain Boolean
+    // check-then-set here is only safe on the main thread — and loadOlderPage
+    // is internal suspend, so any future caller from another dispatcher would
+    // silently break the guard. CAS makes the invariant machine-enforced.
+    internal val loadingOlderFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+    internal val loadingOlderMessages: Boolean get() = loadingOlderFlag.get()
+
+    /** CAS single-flight; true when this caller won the right to load. */
+    internal fun claimOlderLoad(): Boolean = loadingOlderFlag.compareAndSet(false, true)
+
+    /** Tail-attach scheduling flags below are MAIN-THREAD ONLY (all writers
+     *  run on viewModelScope Main.immediate); they gate scheduling, while the
+     *  ledger mutex serializes the actual window mutation. */
+
     // Tail-attach scheduling flags. Serialization itself is the ledger's
     // mutationMutex — these only decide whether a drain is already running
     // and whether one more pass is owed after it.
@@ -918,7 +931,9 @@ class ChatViewModel(
      * point). See [loadOlderPage] for the single-page contract.
      */
     fun loadOlderMessages() {
-        if (loadingOlderMessages || _isStreaming.value) return
+        if (_isStreaming.value) return
+        if (!claimOlderLoad()) return
+        loadingOlderFlag.set(false)
         viewModelScope.launch { loadOlderPage() }
     }
 
@@ -939,8 +954,7 @@ class ChatViewModel(
      */
     internal suspend fun loadOlderPage(): Boolean {
         if (_isStreaming.value) return false
-        if (loadingOlderMessages) return false
-        loadingOlderMessages = true
+        if (!claimOlderLoad()) return false
         _isLoadingHistory.value = true
         try {
             var added = false
@@ -1037,7 +1051,7 @@ class ChatViewModel(
             }
             return added
         } finally {
-            loadingOlderMessages = false
+            loadingOlderFlag.set(false)
             _isLoadingHistory.value = false
         }
     }
@@ -3657,7 +3671,7 @@ class ChatViewModel(
         val entry = providerRepository.config.value.modelEntries.find { it.id == entryId } ?: return false
         val instance = providerRepository.instance(entry.providerInstanceId) ?: return false
         if (!providerRepository.hasAnyCredential(instance)) return false
-        val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
+        val apiKey = providerRepository.usableApiKey(instance) ?: ""
         currentModel = entry.model
         _modelName.value = entry.model.displayName
         _providerName.value = instance.label.ifEmpty { entry.model.provider }
@@ -3793,7 +3807,7 @@ class ChatViewModel(
         // an OAuth instance too — otherwise this tier set the model name in the
         // UI but left currentProvider null, and the first send failed.
         if (providerRepository.hasAnyCredential(instance)) {
-            val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
+            val apiKey = providerRepository.usableApiKey(instance) ?: ""
             currentProvider = ProviderFactory.create(instance, apiKey, entry.model, context)
         }
         return true
@@ -3808,7 +3822,7 @@ class ChatViewModel(
         // tapped this model; refusing it because the API-key slot is empty
         // made OAuth models unselectable from the picker.
         if (!providerRepository.hasAnyCredential(instance)) return
-        val apiKey = providerRepository.usableApiKey(instance, entry.model.displayName) ?: ""
+        val apiKey = providerRepository.usableApiKey(instance) ?: ""
 
         currentModel = entry.model
         _modelName.value = entry.model.displayName

@@ -170,4 +170,57 @@ class GuestWorkloadPolicyTest {
         assertFalse(exact.truncated)
         assertEquals("abcdef", exact.toString())
     }
+
+    /**
+     * [T-nproc-alignment] RLIMIT_NPROC counts per UID and includes the app's
+     * own processes — the old batch/service/setup value of 4096 let a guest
+     * `make -j$(nproc)` starve the host app's forks (EAGAIN in the very
+     * watcher meant to clean up). The rlimit now stays under a UID-safe
+     * ceiling, and the SandboxWorkload watchdog tripwire (PROCESS_LIMIT)
+     * sits BELOW the build-class rlimits so the kill path fires first.
+     */
+    @Test
+    fun nprocBudgetsStayUnderTheUidSafeCeiling() {
+        val budgets = mapOf(
+            "interactive" to BudgetClassifier.interactive(),
+            "normal" to BudgetClassifier.normal(),
+            "batch" to BudgetClassifier.batch(),
+            "service" to BudgetClassifier.service(),
+            "setup" to BudgetClassifier.setup(),
+        )
+        for ((name, b) in budgets) {
+            assertTrue("$name nproc ${b.nproc} exceeds the UID-safe ceiling", b.nproc <= 1024)
+        }
+        assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.batch().nproc)
+        assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.service().nproc)
+        assertTrue(GuestWorkloadPolicy.PROCESS_LIMIT < BudgetClassifier.setup().nproc)
+    }
+
+    /** [T-memory-poison-guard] The sandbox-side quota gate: pure decision. */
+    @Test
+    fun memoryQuotaRefusalBlocksWriteSyntaxOnlyOnceSpent() {
+        val max = 30
+        // Under quota: direct write syntax passes.
+        assertNull(
+            GuestWorkloadPolicy.memoryQuotaRefusal(
+                "echo x >> /var/minis/memory/2026-10-02.md", max - 1, max,
+            ),
+        )
+        // At quota: every direct write shape is refused.
+        for (cmd in listOf(
+            "echo x >> /var/minis/memory/2026-10-02.md",
+            "echo x > /var/minis/memory/2026-10-02.md",
+            "tee -a /var/minis/memory/today.md",
+            "rm /var/minis/memory/today.md",
+            "sed -i s/a/b/ /var/minis/memory/today.md",
+            "truncate -s 0 /var/minis/memory/today.md",
+        )) {
+            assertNotNull("quota spent must refuse: $cmd", GuestWorkloadPolicy.memoryQuotaRefusal(cmd, max, max))
+        }
+        // Reads stay available so the agent can see why it was refused.
+        assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("cat /var/minis/memory/today.md", max, max))
+        assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("grep x /var/minis/memory/today.md", max, max))
+        // Unrelated paths are untouched.
+        assertNull(GuestWorkloadPolicy.memoryQuotaRefusal("echo x >> /var/minis/workspace/a.md", max, max))
+    }
 }

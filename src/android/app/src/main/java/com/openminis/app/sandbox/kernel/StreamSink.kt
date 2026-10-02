@@ -13,7 +13,6 @@ class StreamSink(
 ) {
     private val highWater = minOf(8 * 1024 * 1024L, maxOf(64 * 1024L, capBytes / 4)).toInt()
     private val memory = StringBuilder()
-    private val pending = StringBuilder()
     private var accepted = 0L
     private var dropped = 0L
     private var stop = false
@@ -63,23 +62,18 @@ class StreamSink(
                 return false
             }
             memory.append(chars, i, room)
-            pending.append(chars, i, room)
             accepted += room
             i += room
         }
         return !stop
     }
 
-    @Synchronized
-    fun pollLine(nowMs: Long = clock()): String? {
-        if (!takeDelivery(nowMs, 1)) return null
-        val nl = pending.indexOf('\n')
-        if (nl < 0) return null
-        val line = pending.substring(0, nl).replace("\r", "")
-        pending.delete(0, nl + 1)
-        takeDelivery(nowMs, line.length.coerceAtLeast(1))
-        return line
-    }
+    // [T-streamsink-dead-delivery] pollLine/takeDelivery had zero callers —
+    // the delivery-side "permit" they metered never existed, so keeping
+    // them suggested a double brake (byte brake + line brake) that was not
+    // there. The only rate brake is writeWaitMs, which the reader consults
+    // between reads; it owns the window bookkeeping takeDelivery used to
+    // split with it.
 
     @Synchronized
     fun snapshot(): String = buildString {
@@ -91,16 +85,5 @@ class StreamSink(
             append(accepted)
             append("]")
         }
-    }
-
-    private fun takeDelivery(nowMs: Long, bytes: Int): Boolean {
-        if (rateBytesPerSec <= 0L) return true
-        if (windowStart == 0L || nowMs - windowStart >= 1000L) {
-            windowStart = nowMs
-            windowUsed = 0L
-        }
-        if (windowUsed >= rateBytesPerSec) return false
-        windowUsed += bytes
-        return true
     }
 }

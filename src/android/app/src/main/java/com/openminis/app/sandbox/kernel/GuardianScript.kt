@@ -102,9 +102,11 @@ object GuardianScript {
         append("ulimit -H -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
         append("ulimit -S -f ").append(budget.fileBlocks()).append(" 2>/dev/null || true; ")
         append("ulimit -H -c 0 2>/dev/null || true; ")
-        // [T-as-soft-probe] probe host AS soft-limit; HyperOS clamps hard limit,
-        // so (ulimit -S -v unlimited && ulimit -H -v unlimited) runs in a safe
-        // subshell that never kills the shell.
-        append("( ulimit -S -v unlimited 2>/dev/null && ulimit -H -v unlimited 2>/dev/null ) || true; ")
+        // [T-as-soft-probe-removed] A previous cut probed/raised the address
+        // space here: `( ulimit -S -v unlimited && ulimit -H -v unlimited ) || true`.
+        // rlimit is a per-process attribute — the subshell's setrlimit died with
+        // it, the parent shell and every exec'd process were unaffected, and
+        // nothing consumed the result. A pure no-op that contradicted the
+        // "the app never sets RLIMIT_AS" contract (887d48c); deleted.
     }
 }

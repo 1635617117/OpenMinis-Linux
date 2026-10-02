@@ -108,6 +108,41 @@ internal object GuestWorkloadPolicy {
 
     fun exceedsProcessCap(ownedPids: Int): Boolean = ownedPids > PROCESS_LIMIT
 
+    /**
+     * [T-memory-poison-guard] Sandbox-side quota gate for the memory bind.
+     *
+     * The daily-entry quota in MemoryRepository only guards the memory_write
+     * TOOL path — but `/var/minis/memory` is bind-mounted read-write, so the
+     * same runaway loop can reach the identical file through the shell. This
+     * check refuses direct shell WRITE syntax against the memory path once
+     * the day's quota is spent, closing the cheap bypasses (echo >>, tee,
+     * rm/truncate of the log, sed -i).
+     *
+     * Honest limits: reads stay available (the agent must still see why), and
+     * writes from inside an interpreter (`python -c ...`) are not statically
+     * recognizable — the tool path plus these direct-syntax refusals is the
+     * practical boundary, not a sandbox invariant.
+     *
+     * Pure: the caller resolves today's entry count.
+     */
+    fun memoryQuotaRefusal(command: String, dailyEntryCount: Int, maxDailyEntries: Int): String? {
+        if (dailyEntryCount < maxDailyEntries) return null
+        if (!command.contains("/var/minis/memory")) return null
+        if (!hasMemoryWriteSyntax(command)) return null
+        return "命令未启动（exit 126）：今日记忆日志已达到 $maxDailyEntries 条上限。" +
+            "memory_write 与对 /var/minis/memory 的直接写入都已暂停；" +
+            "旧的按日归档，明日自动开始新日志。"
+    }
+
+    private fun hasMemoryWriteSyntax(command: String): Boolean {
+        val stripped = command.replace(Regex(""""[^"]*"|'[^']*'"""), " ")
+        if (Regex("""(^|[^>])>>?(?![>&])""").containsMatchIn(stripped)) return true
+        val writeWords = setOf("tee", "rm", "mv", "truncate", "dd", "sed", "perl", "shred", "unlink")
+        return stripped.split(Regex("""\s+""")).any { raw ->
+            raw.substringAfterLast('/').lowercase() in writeWords
+        }
+    }
+
     fun isObviouslyReadOnly(command: String): Boolean {
         if (command.isBlank()) return true
         if (hasWriteSyntax(command)) return false

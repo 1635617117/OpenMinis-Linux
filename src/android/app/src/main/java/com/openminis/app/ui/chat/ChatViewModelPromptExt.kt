@@ -306,6 +306,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         com.openminis.app.agent.ContextAssemblySnapshot.capture(
             toString(),
             sessionId,
+            context,
         )
     }
 }

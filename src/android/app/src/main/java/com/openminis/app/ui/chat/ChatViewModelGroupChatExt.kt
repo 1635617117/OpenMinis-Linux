@@ -18,12 +18,25 @@ import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.ToolExecutionResult
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
+
+/**
+ * [T-groupchat-host-deadline] The host is supposed to only open and close the
+ * discussion (e817cc1), but neither call had a deadline of its own: a host
+ * model stuck on a stalled network kept runGroupChat suspended forever, the
+ * UI parked on the summary state, and "群聊关不掉" (the exact bug aac4d26
+ * fixed) came back through the time-out door instead. Members are wrapped by
+ * the same deadline inside speakMembers' error handling; the host paths now
+ * share one explicit budget.
+ */
+private const val GROUP_CHAT_HOST_TIMEOUT_MS = 3L * 60_000L
 
 internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: Boolean) {
     if (closing) groupChatCloseRequested = true
@@ -122,17 +135,25 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
         if (savedOpening != null) {
             spoken.add(0, GroupChat.Line(hostName, savedOpening))
         } else {
-            val opening = speakVisible(
-                speaker = hostName,
-                vendor = hostVendor,
-                snapshot = hostSnapshot,
-                provider = provider,
-                system = GroupChat.OPENING_SYSTEM,
-                user = GroupChat.openingPrompt(userText, contextText),
-                tools = emptyList(),
-                placeholder = analyzing,
-                maxTokens = hostMember.maxTokens,
-            )
+            val opening = try {
+                withTimeout(GROUP_CHAT_HOST_TIMEOUT_MS) {
+                    speakVisible(
+                        speaker = hostName,
+                        vendor = hostVendor,
+                        snapshot = hostSnapshot,
+                        provider = provider,
+                        system = GroupChat.OPENING_SYSTEM,
+                        user = GroupChat.openingPrompt(userText, contextText),
+                        tools = emptyList(),
+                        placeholder = analyzing,
+                        maxTokens = hostMember.maxTokens,
+                    )
+                }
+            } catch (e: TimeoutCancellationException) {
+                // Deadline miss: the discussion continues without a host
+                // opening rather than hanging the whole round.
+                ""
+            }
             if (opening.isNotBlank()) {
                 rememberHostOpening(opening)
                 spoken.add(0, GroupChat.Line(hostName, opening))
@@ -181,18 +202,28 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
     }
 
     if (wantsClose || groupChatCloseRequested) {
-        val summary = speakVisible(
-            speaker = hostName,
-            vendor = hostVendor,
-            snapshot = hostSnapshot,
-            provider = provider,
-            system = GroupChat.HOST_SYSTEM,
-            user = GroupChat.summaryPrompt(userText, GroupChat.transcript(spoken)),
-            tools = emptyList(),
-            placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
-            maxTokens = hostMember.maxTokens,
-        )
-        if (summary.isNotBlank()) {
+        val summary = try {
+            withTimeout(GROUP_CHAT_HOST_TIMEOUT_MS) {
+                speakVisible(
+                    speaker = hostName,
+                    vendor = hostVendor,
+                    snapshot = hostSnapshot,
+                    provider = provider,
+                    system = GroupChat.HOST_SYSTEM,
+                    user = GroupChat.summaryPrompt(userText, GroupChat.transcript(spoken)),
+                    tools = emptyList(),
+                    placeholder = context.getString(com.openminis.app.R.string.group_chat_summarizing),
+                    maxTokens = hostMember.maxTokens,
+                )
+            }
+        } catch (e: TimeoutCancellationException) {
+            // [T-groupchat-host-deadline] A stalled summary must not wedge the
+            // close flow — fall into the failure branch below, which now also
+            // force-disables the group chat so the session is never stuck
+            // "closing" with the request flag held true.
+            null
+        }
+        if (!summary.isNullOrBlank()) {
             _messages.value.lastOrNull { it.speakerName == hostName }?.let { closed ->
                 groupChatClosedAfterId = stableGroupMessageId(closed)
                 groupChatPrefs().edit().putString(closedKey(), groupChatClosedAfterId).apply()
@@ -204,6 +235,11 @@ internal suspend fun ChatViewModel.runGroupChat(provider: LLMProvider, closing: 
             setGroupChatEnabled(false)
         } else {
             publishGroupNotice(context.getString(com.openminis.app.R.string.group_chat_summary_failed))
+            withContext(Dispatchers.Main) {
+                _promptQueue.value = emptyList()
+                _messages.value = _messages.value.filterNot { it.isQueued }
+            }
+            setGroupChatEnabled(false)
         }
     }
     groupChatCloseRequested = false

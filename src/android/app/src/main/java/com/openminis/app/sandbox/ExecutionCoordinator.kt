@@ -137,6 +137,20 @@ object ExecutionCoordinator {
         lastIdle.remove(sessionId)
         try {
         val refused = GuestWorkloadPolicy.hostRefusal(command) ?: DiskPressure.refusal(appContext, command)
+            ?: run {
+                // [T-memory-poison-guard] 工具路径之外的同一配额：/var/minis/memory
+                // bind 的宿主目录就是本会话的 memory 目录，直接 shell 写语法在
+                // 当日配额耗尽后一并拒绝（详见 GuestWorkloadPolicy KDoc）。
+                val memoryHost = com.openminis.app.sandbox.SessionWorkspace.memoryDir(
+                    appContext.filesDir,
+                    ownerSessionId(sessionId),
+                )
+                GuestWorkloadPolicy.memoryQuotaRefusal(
+                    command,
+                    com.openminis.app.data.repository.MemoryRepository.dailyEntryCount(memoryHost),
+                    com.openminis.app.data.repository.MemoryRepository.MAX_DAILY_ENTRIES,
+                )
+            }
         if (refused != null) {
             Log.w(TAG, "[$sessionId] refused before start: $refused")
             lineCallback?.invoke(refused)

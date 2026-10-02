@@ -113,22 +113,31 @@ object BudgetClassifier {
         wallMs = ShellTimeoutPolicy.BATCH_WALL_MS,
         cpuSeconds = 600,
         fileSizeBytes = 4L * GIB,
-        nproc = 4096,
+        // [T-nproc-alignment] 1024, not 4096: RLIMIT_NPROC counts per UID and
+        // includes the app's own processes — a `make -j4096` at 4096 could
+        // starve the host app itself (fork EAGAIN in the very watcher meant
+        // to clean up). 1024 leaves Gradle/aapt2's 300-500 processes ample
+        // headroom while keeping real margin below the UID ceiling, and sits
+        // above GuestWorkloadPolicy.PROCESS_LIMIT (the earlier watchdog
+        // tripwire) so the kill path still fires before the rlimit does.
+        nproc = 1024,
         outputCapBytes = 64L * MIB,
         outputRateBytesPerSec = 8L * MIB,
     )
 
     /**
-     * Ordinary long-running services. Output rate is 64 KiB/s, not the 1 MiB/s
-     * in the design draft: a service that can write a megabyte a second is the
-     * incident's resource type.
+     * Ordinary long-running services. Output rate is 512 KiB/s
+     * ([ShellTimeoutPolicy.SERVICE_RATE_BPS] — 61a2d77 raised it from the
+     * original 64 KiB/s for build workloads; this KDoc trailed the constant
+     * until it was resynced). A service that can write whole megabytes per
+     * second is still the incident's resource type.
      */
     fun service(): ProcessBudget = ProcessBudget(
         workClass = WorkClass.SERVICE,
         wallMs = ShellTimeoutPolicy.SERVICE_WALL_MS,
         cpuSeconds = 0,
         fileSizeBytes = 4L * GIB,
-        nproc = 4096,
+        nproc = 1024,
         outputCapBytes = 16L * MIB,
         outputRateBytesPerSec = ShellTimeoutPolicy.SERVICE_RATE_BPS,
     )
@@ -136,15 +145,15 @@ object BudgetClassifier {
     /**
      * Named setup scripts only. Same wall as a service, but a separate class
      * so nothing else inherits the window. FSIZE is 8 GiB because an SDK zip
-     * is one file; the output rate stays 64 KiB/s so the install cannot flood
-     * the UI pipe.
+     * is one file; the output rate is the shared 512 KiB/s budget so the
+     * install cannot flood the UI pipe.
      */
     fun setup(): ProcessBudget = ProcessBudget(
         workClass = WorkClass.SETUP,
         wallMs = ShellTimeoutPolicy.SETUP_WALL_MS,
         cpuSeconds = 0,
         fileSizeBytes = ShellTimeoutPolicy.SETUP_FSIZE_BYTES,
-        nproc = 4096,
+        nproc = 1024,
         outputCapBytes = 16L * MIB,
         outputRateBytesPerSec = ShellTimeoutPolicy.SETUP_RATE_BPS,
     )

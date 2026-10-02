@@ -233,7 +233,20 @@ internal fun ChatViewModel.sendMessage(
         // On later turns the same expansion is rebuilt from disk by
         // toLLMMessage's mediaRef branch, so history replay (retry, rerun,
         // session reload, compaction) sees the identical text.
-        val modelBody = pasted?.modelText ?: trimmed
+        val modelBodyRaw = pasted?.modelText ?: trimmed
+        // [T-user-transformers-wired] The user-transformer chain actually runs
+        // here (the 257faf1 commit message claimed this wiring; the code never
+        // had it). Enrichment is request-side only — the bubble and the DB row
+        // keep the raw text — so retries/reloads re-inject exactly once.
+        val workspaceHint = runCatching {
+            val dir = com.openminis.app.sandbox.SessionWorkspace
+                .hostDir(context.filesDir, activeSessionId, "workspace")
+            dir.absolutePath.takeIf { dir.isDirectory }
+        }.getOrNull()
+        val modelBody = com.openminis.app.agent.MessageTransformerChain.applyUser(
+            modelBodyRaw,
+            com.openminis.app.agent.UserTransformContext(workspaceHint = workspaceHint),
+        )
 
         val userContentParts = mutableListOf<AgentContentPart>()
         if (modelBody.isNotEmpty()) userContentParts.add(AgentContentPart.Text(modelBody))

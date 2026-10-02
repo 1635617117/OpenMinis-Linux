@@ -7,7 +7,11 @@ package com.openminis.app.sandbox.kernel
  * cannot swallow the turn boundary.
  */
 object UIBus {
-    private val bucket = TokenBucket(ratePerSec = 20.0, burst = 40)
+    // [T-line-budget-sync] Matched to PersistentShell's raised line budget —
+    // 20 lines/s dropped whole output blocks while the byte budget allowed
+    // 512 KiB/s. Dropped blocks still reach the final result via
+    // StreamSink.snapshot(); only the live feed was starved.
+    private val bucket = TokenBucket(ratePerSec = 250.0, burst = 500)
     private val critical = TokenBucket(ratePerSec = 4.0, burst = 4)
 
     fun admit(nowMs: Long, criticalEvent: Boolean): Boolean =

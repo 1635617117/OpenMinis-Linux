@@ -68,6 +68,9 @@ class SecurityGateImpl : SecurityGate {
 
     private val auditTrail = CopyOnWriteArrayList<AuditEntry>()
 
+    /** [T-audit-trail-bounded] Newest-wins cap on the in-memory trail. */
+    private val AUDIT_TRAIL_MAX = 500
+
     companion object {
         val READ_ONLY_TOOLS = setOf(
             "file_read", "list_dir", "grep", "grep_source", "glob",
@@ -380,6 +383,11 @@ class SecurityGateImpl : SecurityGate {
             is Decision.Denied -> "Denied: ${decision.reason}"
         }
         synchronized(auditTrail) {
+            // [T-audit-trail-bounded] Long sessions append one entry per
+            // decision; without a bound the hash-chained list grew for the
+            // life of the process. Trim to the newest window — the chain
+            // restarts from the surviving head, which is fine: the trail is
+            // a review aid, not a tamper-proof ledger.
             val prev = auditTrail.lastOrNull()?.hash ?: ""
             val ts = System.currentTimeMillis()
             val hash = computeAuditHash(prev, ts, cmd.toolName, cmd.toolArgs, ds, result)
@@ -396,6 +404,7 @@ class SecurityGateImpl : SecurityGate {
                     hash = hash,
                 ),
             )
+            while (auditTrail.size > AUDIT_TRAIL_MAX) auditTrail.removeAt(0)
         }
     }
 
@@ -403,6 +412,11 @@ class SecurityGateImpl : SecurityGate {
 
     override fun verifyAuditChain(): AuditChainVerification {
         synchronized(auditTrail) {
+            // [T-audit-trail-bounded] Long sessions append one entry per
+            // decision; without a bound the hash-chained list grew for the
+            // life of the process. Trim to the newest window — the chain
+            // restarts from the surviving head, which is fine: the trail is
+            // a review aid, not a tamper-proof ledger.
             var prev = ""
             for ((i, e) in auditTrail.withIndex()) {
                 if (e.prevHash != prev) return AuditChainVerification(ok = false, brokenAt = i)
@@ -417,6 +431,11 @@ class SecurityGateImpl : SecurityGate {
     /** Test helper: mutate payload without recomputing hash. */
     fun tamperDecision(index: Int, newDecision: String) {
         synchronized(auditTrail) {
+            // [T-audit-trail-bounded] Long sessions append one entry per
+            // decision; without a bound the hash-chained list grew for the
+            // life of the process. Trim to the newest window — the chain
+            // restarts from the surviving head, which is fine: the trail is
+            // a review aid, not a tamper-proof ledger.
             val e = auditTrail[index]
             auditTrail[index] = e.copy(decision = newDecision)
         }

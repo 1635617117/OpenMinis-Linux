@@ -56,6 +56,11 @@ object FileEditTool {
             WritePathGuard.denyReason(path)?.let { msg ->
                 return ToolExecutionResult(msg, false, toolTitle = toolTitle)
             }
+            // [T-memory-poison-guard] Same daily quota as memory_write and the
+            // shell gate — see FileWriteTool.
+            com.openminis.app.data.repository.MemoryRepository
+                .fileToolQuotaRefusal(context.filesDir, sessionId, path)
+                ?.let { msg -> return ToolExecutionResult(msg, false, toolTitle = toolTitle) }
 
             // T123: per-session resolver — see FileWriteTool for rationale.
             val file = PRootKernel.resolveSessionHostPath(sessionId, path, context)
