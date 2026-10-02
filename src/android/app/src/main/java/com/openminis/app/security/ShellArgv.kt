@@ -72,6 +72,45 @@ fun shellSegments(raw: String): List<String> {
     while (i < raw.length) {
         val c = raw[i]
         if (quote != '\u0000') {
+            // [T-prefixrule-quoted-substitution] Inside DOUBLE quotes bash still
+            // performs command substitution — `echo "$(cmd)"` runs cmd — so the
+            // opener must cut a segment here too. Inside SINGLE quotes nothing is
+            // special and `$(…)` is literal text, so appending verbatim stays
+            // correct there.
+            //
+            // This was the half the first substitution fix missed: it cut on
+            // `$(`/backtick only in the unquoted branch below, so the QUOTED
+            // spelling — the idiomatic one, quoted precisely to preserve
+            // whitespace — stayed a single `echo` unit and the prefix-rule layer
+            // never saw the inner program token. Verified forms that were blind
+            // before: `echo "$(cmd)"`, `X="$(cmd)"`, ``echo "`cmd`"``.
+            //
+            // Known limitation, unchanged from the unquoted path: the
+            // substitution's closing `)` is not tracked, so it stays glued to
+            // the last token of the inner segment (`… /x)`). Harmless for
+            // realistic prefixes (`rm -rf` matches on argv[0..1]); a rule whose
+            // LAST token sits under that `)` would miss. Balancing parens would
+            // have to interact with nested quoting, which costs more than the
+            // gap is worth in a tighten-only layer where over-splitting is safe.
+            if (quote == '"') {
+                // Backslash escapes `$`, backtick, `"`, `\` and newline inside
+                // double quotes — an escaped opener is literal text.
+                if (c == '\\' && i + 1 < raw.length) {
+                    cur.append(c).append(raw[i + 1])
+                    i += 2
+                    continue
+                }
+                if (c == '`' || (c == '$' && i + 1 < raw.length && raw[i + 1] == '(')) {
+                    val seg = cur.toString().trim()
+                    if (seg.isNotEmpty()) out.add(seg)
+                    cur.clear()
+                    i += if (c == '$') 2 else 1
+                    // `quote` stays '"': the closing quote is still ahead, and
+                    // the substitution's own text must keep being appended
+                    // verbatim until it arrives.
+                    continue
+                }
+            }
             cur.append(c)
             if (c == quote) quote = '\u0000'
             i++

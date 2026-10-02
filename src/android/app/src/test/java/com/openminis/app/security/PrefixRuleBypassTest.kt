@@ -76,6 +76,49 @@ class PrefixRuleBypassTest {
         assertNotNull(forbidden("echo $(rm -rf /tmp/x)"))
     }
 
+    /**
+     * [T-prefixrule-quoted-substitution] The QUOTED spelling is the idiomatic
+     * one — you quote a substitution precisely to preserve its whitespace — and
+     * it was the half the first substitution fix missed. bash performs command
+     * substitution inside DOUBLE quotes, so `echo "$(cmd)"` really runs cmd,
+     * but the splitter's quote branch appended everything verbatim and the whole
+     * command stayed a single `echo` unit that no rule could match.
+     *
+     * Verified blind before the fix (tokenizer ported and run over 14 forms):
+     * the unquoted, `env`/`xargs`/`find -exec` and `bash -c` forms all matched,
+     * while all four double-quoted forms below did not.
+     */
+    @Test
+    fun `substitution inside double quotes is still seen`() {
+        val forms = listOf(
+            "echo \"$(rm -rf /tmp/x)\"",           // quoted substitution
+            "X=\"$(rm -rf /tmp/x)\"",              // assignment rhs, quoted
+            "echo \"`rm -rf /tmp/x`\"",            // quoted backtick
+            "echo \"$(env X=1 rm -rf /tmp/x)\"",   // wrapper inside a quoted substitution
+        )
+        for (cmd in forms) {
+            val units = riskUnits(cmd)
+            assertTrue(
+                "expected a unit starting with rm for <$cmd>, got: $units",
+                units.any { it.startsWith("rm ") },
+            )
+            assertNotNull("rule missed <$cmd>", forbidden(cmd))
+        }
+    }
+
+    /**
+     * The other half of the same property: where bash does NOT expand, the
+     * splitter must NOT see a command either. Without these, "fix the quoted
+     * case" degenerates into "split on every `$(`", which would flag ordinary
+     * quoted prose. Single quotes make everything literal, and a backslash
+     * escapes `$` inside double quotes.
+     */
+    @Test
+    fun `substitution that bash would not expand must not match`() {
+        assertNull(forbidden("echo '$(rm -rf /tmp/x)'"))       // single quotes: literal
+        assertNull(forbidden("echo \"\\$(rm -rf /tmp/x)\""))   // escaped opener: literal
+    }
+
     @Test
     fun `pattern tokenization is quote-aware`() {
         // [T-prefixrule-pattern-tokenize] The old naive split kept the literal
