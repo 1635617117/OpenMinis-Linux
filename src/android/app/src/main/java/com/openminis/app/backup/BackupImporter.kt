@@ -857,7 +857,11 @@ class BackupImporter(
      */
     // `inline` so the callback can suspend: every caller writes each record to
     // the DAO as it arrives, which is the whole point of streaming.
-    private inline fun readJsonl(dataDir: File, baseName: String, onRecord: (Envelope) -> Unit) {
+    private suspend inline fun readJsonl(
+        dataDir: File,
+        baseName: String,
+        crossinline onRecord: suspend (Envelope) -> Unit,
+    ) {
         val shards = (dataDir.listFiles() ?: emptyArray())
             .filter { it.isFile && (it.name == "$baseName.jsonl" ||
                 (it.name.startsWith("$baseName-") && it.name.endsWith(".jsonl"))) }
@@ -901,7 +905,7 @@ class BackupImporter(
      * before giving up. Nothing needed the list: every caller was a `for` loop
      * that used each record once and dropped it, so the peak was pure waste.
      */
-    private fun readJsonlList(dataDir: File, baseName: String): List<Envelope> =
+    private suspend fun readJsonlList(dataDir: File, baseName: String): List<Envelope> =
         mutableListOf<Envelope>().also { out -> readJsonl(dataDir, baseName) { out.add(it) } }
 
     private class Envelope(val obj: JsonObject?)
