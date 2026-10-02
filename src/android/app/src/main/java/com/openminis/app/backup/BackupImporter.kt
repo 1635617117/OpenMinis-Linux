@@ -434,11 +434,13 @@ class BackupImporter(
         // importing so later keyset/range paging cannot loop over the same
         // sort_order and strand the middle of the transcript.
         val nextSortBySession = mutableMapOf<String, Int>()
-        val usedSortBySession = mutableMapOf<String, MutableSet<Int>>()
+        // Snapshot existing cursors before entering the synchronous JSONL reader;
+        // the per-record callback must remain non-suspending.
+        val usedSortBySession = restoredSessionIds.associateWith { id ->
+            dao.sortOrders(id).toMutableSet()
+        }.toMutableMap()
         fun importedSortOrder(sessionId: String, raw: Int?): Int {
-            val used = usedSortBySession.getOrPut(sessionId) {
-                dao.sortOrders(sessionId).toMutableSet()
-            }
+            val used = usedSortBySession.getOrPut(sessionId) { mutableSetOf() }
             var next = nextSortBySession[sessionId] ?: ((used.maxOrNull() ?: -1) + 1)
             val candidate = raw?.takeIf { it >= 0 && it !in used } ?: next
             var assigned = candidate
@@ -857,11 +859,7 @@ class BackupImporter(
      */
     // `inline` so the callback can suspend: every caller writes each record to
     // the DAO as it arrives, which is the whole point of streaming.
-    private suspend inline fun readJsonl(
-        dataDir: File,
-        baseName: String,
-        crossinline onRecord: suspend (Envelope) -> Unit,
-    ) {
+    private inline fun readJsonl(dataDir: File, baseName: String, onRecord: (Envelope) -> Unit) {
         val shards = (dataDir.listFiles() ?: emptyArray())
             .filter { it.isFile && (it.name == "$baseName.jsonl" ||
                 (it.name.startsWith("$baseName-") && it.name.endsWith(".jsonl"))) }
@@ -905,7 +903,7 @@ class BackupImporter(
      * before giving up. Nothing needed the list: every caller was a `for` loop
      * that used each record once and dropped it, so the peak was pure waste.
      */
-    private suspend fun readJsonlList(dataDir: File, baseName: String): List<Envelope> =
+    private fun readJsonlList(dataDir: File, baseName: String): List<Envelope> =
         mutableListOf<Envelope>().also { out -> readJsonl(dataDir, baseName) { out.add(it) } }
 
     private class Envelope(val obj: JsonObject?)
