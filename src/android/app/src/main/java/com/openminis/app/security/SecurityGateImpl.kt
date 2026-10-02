@@ -225,10 +225,33 @@ class SecurityGateImpl : SecurityGate {
         // been bound. Both need the caller, which this method cannot see, so
         // [withCallerSession] supplies it — a null caller keeps the old
         // deny-anything-private behaviour instead of opening up.
+        //
+        // [T-supath-follows-mode] Reading the app's own private tree through the
+        // USER's host `su` is intended behaviour, not a hole: this is an open,
+        // geek-facing project and the person who granted Magisk/KernelSU and put
+        // the session in YOYO has already made that call. Refusing it here
+        // contradicted the mode they picked — the exact contradiction 2.0.10 had
+        // for bare `su` (see the requiresFreshConfirm comment below).
+        //
+        // The su-granted half of the precondition needs no app-side signal: with
+        // no su binary, or with elevation denied, the command cannot succeed
+        // whatever this gate decides. Gating on the mode alone therefore yields
+        // "YOYO AND host su ⇒ unrestricted" without a false-negative-prone
+        // HostSuManager probe.
+        //
+        // Blast radius stays narrow: sub-agent fences run in READ_ONLY / PLAN /
+        // DENY_ALL (PermissionMode KDoc), so a spawned or prompt-injected
+        // sub-agent still gets the full refusal. Only a session the user opened
+        // by hand is relaxed.
         if (cmd.toolName in SHELL_TOOLS) {
             val command = extractCommand(cmd)
-            SuPathPolicy.denial(command, callerSession.get())
-                ?.let { return Decision.Denied(it, hard = true) }
+            if (mode != PermissionMode.ALLOW_ALL) {
+                SuPathPolicy.denial(command, callerSession.get())
+                    ?.let { return Decision.Denied(it, hard = true) }
+            }
+            // Not mode-gated: this refusal is about CORRECTNESS, not permission.
+            // Guest /data is not the phone's /data, and `rm` of a missing path
+            // exits 0 — letting it through would report success for a no-op.
             // "Mounted" when nothing injected a provider: refusing commands that
             // name a mount we were never told about would break the shell for a
             // state this object cannot observe.

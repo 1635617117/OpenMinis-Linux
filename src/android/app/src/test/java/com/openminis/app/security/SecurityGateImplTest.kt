@@ -44,6 +44,45 @@ class SecurityGateImplTest {
         assertTrue(d is Decision.Denied)
     }
 
+    /**
+     * [T-supath-follows-mode] Reading the app's own private tree through the
+     * USER's host `su` is intended behaviour once the session is in YOYO: this
+     * is an open, geek-facing project, and the person who granted
+     * Magisk/KernelSU AND opened the gate has already made that call. Refusing
+     * it there contradicted the mode they picked — the same contradiction
+     * 2.0.10 had for bare `su`.
+     *
+     * The relaxation is scoped by mode, so the blast radius stays narrow:
+     * sub-agent fences run in READ_ONLY / PLAN / DENY_ALL (PermissionMode
+     * KDoc), which means a spawned or prompt-injected sub-agent still gets the
+     * full refusal. Only a session the user opened by hand is relaxed.
+     *
+     * The su-granted half of the precondition needs no app-side signal: with no
+     * su binary, or with elevation denied, the command cannot succeed whatever
+     * this gate decides.
+     *
+     * Asserted as "not Denied" rather than "is Allow" on the YOYO side: the
+     * contract this change owns is that the HARD refusal no longer fires. What
+     * the rest of decide() does with the command is other layers' business.
+     */
+    @Test
+    fun yoyoLetsHostSuIntoTheAppTreeButAskStillRefuses() {
+        val cmd = """{"command":"su -c 'ls /data/user/0/com.openminis.linux/files'"}"""
+
+        val ask = gate.decide(gate.classify("shell_execute", cmd), PermissionMode.ASK)
+        assertTrue("ASK must still refuse host su into the app tree: $ask", ask is Decision.Denied)
+
+        gate.setPermissionMode(PermissionMode.ALLOW_ALL)
+        val yoyo = gate.decide(gate.classify("shell_execute", cmd), PermissionMode.ALLOW_ALL)
+        assertFalse("YOYO must not hard-refuse host su into the app tree: $yoyo", yoyo is Decision.Denied)
+
+        // A sub-agent fence mode keeps the refusal — this is the part that
+        // stops the relaxation from leaking to spawned agents.
+        gate.setPermissionMode(PermissionMode.READ_ONLY)
+        val fenced = gate.decide(gate.classify("shell_execute", cmd), PermissionMode.READ_ONLY)
+        assertTrue("a fenced sub-agent must still be refused: $fenced", fenced is Decision.Denied)
+    }
+
     @Test
     fun fatalBansRmRfRoot() {
         assertEquals(RiskLevel.FATAL_BANNED, gate.classifyRisk("rm -rf /"))
