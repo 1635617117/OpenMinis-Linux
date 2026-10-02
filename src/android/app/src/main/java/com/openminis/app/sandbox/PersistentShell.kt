@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.openminis.app.sandbox.kernel.BudgetClassifier
 import com.openminis.app.sandbox.kernel.GuardianScript
+import com.openminis.app.sandbox.kernel.ProcessBudget
 import com.openminis.app.sandbox.kernel.TokenBucket
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.coroutineScope
@@ -543,9 +544,20 @@ class PersistentShell(
 
     suspend fun executeCommand(
         command: String,
-        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
+        // Ignored. Armed timeout comes from [callerBudget] (or, when absent,
+        // from BudgetClassifier.classify(command)).
         timeout: Long = 600_000L,
         lineCallback: ((String) -> Unit)? = null,
+        // [T-resource-class-threaded] The budget the CALLER already computed,
+        // including the tool's `resource_class`. Re-deriving it here from the
+        // command text alone used the 1-arg classify overload, whose
+        // `resourceClass` defaults to AUTO — so `heavy` was silently dropped,
+        // this layer armed the NORMAL wall, and because the tighter of two
+        // disagreeing layers is what actually fires, `resource_class = heavy`
+        // had no effect on the timeout at all. Two log lines per command
+        // recorded the disagreement ("caller timeout … ignored") from both
+        // sides. Defaulted to null so every existing caller still compiles.
+        callerBudget: ProcessBudget? = null,
     ): Pair<String, Int> {
         ensureStarted()
 
@@ -567,7 +579,7 @@ class PersistentShell(
             return Pair(detail, -1)
         }
 
-        val budget = BudgetClassifier.classify(command)
+        val budget = callerBudget ?: BudgetClassifier.classify(command)
         val armed = budget.wallMs
         if (timeout != armed) {
             Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")

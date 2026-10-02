@@ -202,6 +202,10 @@ object ExecutionCoordinator {
                 command = command,
                 timeout = armed,
                 lineCallback = lineCallback,
+                // [T-resource-class-honoured] Pass the budget this function
+                // already computed. Re-deriving it downstream from the command
+                // text alone silently dropped `resourceClass`.
+                callerBudget = budget,
             )
 
             val durationMs = System.currentTimeMillis() - startTime

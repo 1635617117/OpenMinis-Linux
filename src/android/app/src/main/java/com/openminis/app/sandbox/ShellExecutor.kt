@@ -40,22 +40,28 @@ object ShellExecutor {
      *
      * @param context Android context for resolving PROOT_TMP_DIR
      * @param command Shell command string to execute
-     * @param timeout Timeout in milliseconds (default 10 minutes)
+     * @param timeout Timeout in milliseconds (default 10 minutes). IGNORED —
+     *   the armed wall clock comes from [BudgetClassifier].
      * @param environment Additional environment variables
      * @param lineCallback Called for each line of output (on IO dispatcher)
+     * @param resourceClass Caller's `resource_class`. [T-resource-class-threaded]
+     *   Must be forwarded: the 1-arg `classify(command)` overload silently
+     *   degrades `heavy` to AUTO (the parameter has a default, so dropping it
+     *   compiles), and the tighter of two disagreeing layers is what actually
+     *   arms. See the matching note in ExecutionCoordinator.
      * @return ShellResult with combined stdout+stderr, exit code, and duration
      */
     suspend fun execute(
         context: Context,
         command: String,
-        // Ignored. Armed timeout is BudgetClassifier.classify(command).wallMs.
         timeout: Long = DEFAULT_TIMEOUT_MS,
         environment: Map<String, String> = emptyMap(),
-        lineCallback: ((String) -> Unit)? = null
+        lineCallback: ((String) -> Unit)? = null,
+        resourceClass: SandboxResourceGate.ResourceClass = SandboxResourceGate.ResourceClass.AUTO,
     ): ShellResult = withContext(Dispatchers.IO) {
         check(PRootKernel.isBooted) { "PRootKernel must be booted before executing commands" }
 
-        val budget = BudgetClassifier.classify(command)
+        val budget = BudgetClassifier.classify(command, resourceClass)
         val armed = budget.wallMs
         if (timeout != armed) {
             Log.w(TAG, "caller timeout ${timeout}ms ignored; armed ${armed}ms class=${budget.workClass}")
