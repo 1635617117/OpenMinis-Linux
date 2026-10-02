@@ -172,6 +172,61 @@ internal object ChatHistoryWindow {
     }
 
     fun probeLimit(): Int = ANCHOR_PROBE
+
+    /**
+     * Up-button turn-walk decision — which user turn a tap should land on.
+     * iOS `scrollToPreviousUserTurn` (dcdec3c5) semantics:
+     *
+     *  - First tap anchors on the turn the user is currently reading (the
+     *    nearest user message at or above the viewport's top row).
+     *  - Repeated taps chain through [lastJumpedUserId], stepping one turn
+     *    further back per tap.
+     *  - Every user turn already fully on screen counts as "seen" and is
+     *    skipped (a turn scrolled half off the top edge is still unread).
+     *  - The oldest loaded turn is the floor — no overscroll past it.
+     *
+     * [loaded] is the painted window, oldest → newest, as (messageId, isUser).
+     * [topMessageId] is the FlatKeys-parsed id of the viewport-top row, or
+     * null when the top row is synthetic/unloaded (the user is at/above the
+     * window's oldest edge — anchor on the oldest loaded turn).
+     *
+     * [T-android-upbtn-no-scan] The caller resolves the returned id to a row
+     * by key and jumps directly. The old implementation scanned the list
+     * viewport-by-viewport when the target key wasn't visible — one full
+     * layout pass per step, unbounded — which is what ANR'd repeated taps.
+     */
+    fun previousUserTurnTarget(
+        loaded: List<Pair<String, Boolean>>,
+        topMessageId: String?,
+        lastJumpedUserId: String?,
+        fullyVisibleUserIds: Set<String>,
+    ): String? {
+        val userIds = loaded.filter { it.second }.map { it.first }
+        if (userIds.isEmpty()) return null
+        val topMsgIdx = topMessageId
+            ?.let { id -> loaded.indexOfFirst { it.first == id } }
+            ?.takeIf { it >= 0 }
+            ?: 0
+        val currentAnchor = loaded.take(topMsgIdx + 1).lastOrNull { it.second }?.first
+            ?: userIds.first()
+        // Once a walk has started, continue from lastJumpedUserId: the
+        // viewport can no longer identify the current turn (the list clamps
+        // at its end, and top-aligning lands on a NEWER row than the target).
+        val walkFrom = lastJumpedUserId?.takeIf { it in userIds } ?: currentAnchor
+        val pos = userIds.indexOf(walkFrom)
+        val steppedTarget = if (lastJumpedUserId == walkFrom && pos > 0) {
+            userIds[pos - 1]
+        } else {
+            walkFrom
+        }
+        return if (steppedTarget in fullyVisibleUserIds) {
+            var i = userIds.indexOf(steppedTarget)
+            while (i > 0 && userIds[i] in fullyVisibleUserIds) i--
+            userIds[i]
+        } else {
+            steppedTarget
+        }
+    }
 }
 
 internal data class HistoryPageRequest(
