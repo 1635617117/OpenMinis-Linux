@@ -53,7 +53,6 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.sample
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.withFrameNanos
@@ -318,14 +317,6 @@ private const val ATTACHMENT_PICK_LIMIT = 50
  * make the live anchor transiently read "not at bottom").
  */
 private const val SEND_FOLLOW_GRACE_MS = 2_000L
-
-// [T-android-stream-end-arm-race] How long after streaming→idle the
-// position-driven userScrolledAway net stays suppressed, so the final
-// markdown reflow (which lands ~100-150 ms after _isStreaming clears and
-// changes row heights just like streaming growth did) cannot arm the flag
-// and neuter the stream-end re-pin. Comfortably covers the settle LE's own
-// 220 ms delay plus its 900 ms verification pass.
-private const val STREAM_END_ARM_GRACE_MS = 1_500L
 
 
 /**
@@ -778,10 +769,6 @@ fun ChatScreen(
     // separate from lastSendTimeMs above — that one also drives the 300ms
     // IME-residue suppression in the composer and must stay UI-send-only.
     var lastUserAppendMs by remember { mutableStateOf(0L) }
-    // [T-android-stream-end-arm-race] Timestamp of the last streaming→idle
-    // edge. Guards the position-driven userScrolledAway net against the final
-    // markdown reflow that lands just after _isStreaming clears.
-    var lastStreamEndMs by remember { mutableStateOf(0L) }
     androidx.compose.runtime.LaunchedEffect(inputText) {
         if (inputFieldValue.text != inputText) {
             // [T-android-slash-menu-align-ios-prepend] Honor a one-shot caret
@@ -1128,6 +1115,19 @@ fun ChatScreen(
         runCatching { listState.scrollBy(delta) }
         Unit
     }
+
+    // [T-android-scroll-policy] Reading-mode anchor = the OLDEST visible row
+    // (highest lazy index under reverseLayout, ignoring synthetic __ rows).
+    // Captured when the user stops dragging away from the bottom or starts a
+    // deliberate browse, so the mode transition records where they went to
+    // read. Pure bookkeeping — no scroll is issued from it.
+    fun visibleTopAnchor(): Pair<String, Int>? {
+        val top = listState.layoutInfo.visibleItemsInfo
+            .filter { (it.key as? String)?.startsWith("__") != true }
+            .maxByOrNull { it.index } ?: return null
+        val key = top.key as? String ?: return null
+        return key to top.offset
+    }
     // T-android-jank-profile: gate verbose scroll telemetry behind a constant
     // so every snapshotFlow / derivedStateOf body in this file can cheaply
     // skip the AppLogger.debug call (which builds a long format string and
@@ -1324,12 +1324,17 @@ fun ChatScreen(
     // streaming glide (LE(streaming-content)) still uses the running average to
     // size its per-frame steps.
 
-    // T138 phase 2 v3: separate "user scrolled away" intent from listState
-    // position. isNearBottom flips false during the transient window where
-    // new items are inserted at index 0 but listState still anchors on the
-    // previous item — that is NOT user intent. Drive auto-follow off
-    // `userScrolledAway` which only toggles on real user drags.
-    var userScrolledAway by remember { mutableStateOf(false) }
+    // [T-android-scroll-policy] Single scroll authority (ChatScrollPolicy KDoc
+    // has the full history). Pinned = the viewport follows the newest edge and
+    // content-driven scrolls are allowed. Reading = the user is reading
+    // history and NO content event may scroll. This replaces the old
+    // `userScrolledAway` boolean whose scattered mutation sites (pill never
+    // set it, force-scroll cleared it, drag-stop cleared it inside a 1.5 s
+    // window, an arm-net set it, an anchor-restore effect re-scrolled to stale
+    // snapshots) contradicted each other — the root of the
+    // "读历史时新消息到达导致跳屏" bug family.
+    val scrollPolicy = remember { ChatScrollPolicy() }
+    val scrollMode by scrollPolicy.mode.collectAsState()
     var pinRealLatest by remember(sessionId) { mutableStateOf(false) }
     var entryPinRequested by remember(sessionId) { mutableStateOf(false) }
 
@@ -1342,7 +1347,7 @@ fun ChatScreen(
     LaunchedEffect(sessionId, sessionLoaded, isStreaming, hasNewerMessages) {
         if (!sessionLoaded || !isStreaming || entryPinRequested) return@LaunchedEffect
         entryPinRequested = true
-        userScrolledAway = false
+        scrollPolicy.pin()
         viewModel.ensureSessionTailLoaded()
         // The initial tail load and any queued tail attach are asynchronous.
         // Waiting for the newest-edge flag here is what keeps long sessions
@@ -1384,9 +1389,9 @@ fun ChatScreen(
     //   - Repeated taps (no intervening drag / new message): each goes one
     //     turn further back.
     //   - Already at the first turn: stay put, no overscroll.
-    // A browse action — it must NOT clear `userScrolledAway`, so streaming
-    // doesn't yank the user back down after they jump up (same rationale as
-    // iOS leaving scrollMode untouched).
+    // [T-android-scroll-policy] A browse action: lands in Reading, so no
+    // content event can yank the user back down after they jump up (same
+    // rationale as iOS leaving scrollMode untouched).
     //
     // Index resolution goes through the LazyColumn's stable item KEYS
     // ("user:<id>", set in FlatChatItem.UserBubble) rather than arithmetic on
@@ -1626,6 +1631,10 @@ fun ChatScreen(
         val headerInset = listState.layoutInfo.beforeContentPadding
         val topOffset = rowSize - vpH + headerInset
         tracedScrollToItem("FAB-UP/turn-walk-top", landIndex, topOffset)
+        // [T-android-scroll-policy] The jump landed — the target bubble is the
+        // reading anchor now, so the down-FAB shows and no follower can move
+        // the viewport.
+        scrollPolicy.landReading(targetKey, topOffset)
     }
 
     // [T-android-scroll-fab-reversed] TEMP diagnostic — capture BOTH FABs'
@@ -1634,8 +1643,8 @@ fun ChatScreen(
     LaunchedEffect(listState) {
         snapshotFlow {
             val up = !isNearBottom.value && messages.isNotEmpty()
-            val down = userScrolledAway && contentOverflows.value && messages.isNotEmpty()
-            "FABs up=$up down=$down | nearBottom=${isNearBottom.value} lastJumped=${lastJumpedUserId?.take(8)} scrolledAway=$userScrolledAway overflow=${contentOverflows.value} canFwd=${listState.canScrollForward} canBwd=${listState.canScrollBackward}"
+            val down = scrollMode is ScrollMode.Reading && contentOverflows.value && messages.isNotEmpty()
+            "FABs up=$up down=$down | nearBottom=${isNearBottom.value} lastJumped=${lastJumpedUserId?.take(8)} mode=$scrollMode overflow=${contentOverflows.value} canFwd=${listState.canScrollForward} canBwd=${listState.canScrollBackward}"
         }.collect { AppLogger.debug("ScrollFAB2", it) }
     }
 
@@ -1704,7 +1713,7 @@ fun ChatScreen(
         releaseComposerAfterSend()
         viewModel.sendMessage(rawText)
         noteSendForInputModePref()
-        userScrolledAway = false
+        scrollPolicy.pin()
         coroutineScope.launch {
             tracedScrollToItem("SEND-PATH/initial", 0, 0)
             kotlinx.coroutines.delay(100)
@@ -1749,11 +1758,11 @@ fun ChatScreen(
                 is androidx.compose.foundation.interaction.DragInteraction.Stop -> {
                     isUserDragging = false
                     lastInterruptMs = System.currentTimeMillis()
-                    val nowAtBottom = isNearBottom.value
-                    val newScrolledAway = !nowAtBottom
-                    if (newScrolledAway != userScrolledAway) {
-                        userScrolledAway = newScrolledAway
-                    }
+                    // [T-android-scroll-policy] Finger lift decides ownership:
+                    // still at the bottom → keep following; anywhere else →
+                    // Reading anchored where the user stopped.
+                    val anchor = visibleTopAnchor()
+                    scrollPolicy.onDragStop(isNearBottom.value, anchor?.first, anchor?.second ?: 0)
                 }
                 is androidx.compose.foundation.interaction.DragInteraction.Cancel ->
                     isUserDragging = false
@@ -1761,46 +1770,19 @@ fun ChatScreen(
             }
         }
     }
-    // Re-engage follow whenever the user (manually or via FAB) returns
-    // the viewport to the bottom.
-    //
-    // [T-android-stream-end-anchor-jump] Gate the clear on RECENT USER
-    // INTERACTION. Without this, the final markdown re-render at the
-    // streaming→idle edge briefly collapses the last assistant row's height
-    // (large code blocks / tables / images finalizing their layout), which
-    // clamps firstVisibleItemScrollOffset within the nearBottomThreshold for
-    // one frame. isNearBottom flips true, this LE clears userScrolledAway,
-    // and the stream-end settle LE — whose live-anchor check sees the same
-    // bogus near-bottom offset — then scrollToItem()s the user back to
-    // wherever the layout collapse parked them (often the start of the
-    // current user message, because that's the "first content row" the
-    // settle LE pins on). Only accept the clear when the user actually
-    // dragged into this position recently — a real return-to-bottom gesture
-    // always trails a DragInteraction.Stop, which lastInterruptMs records.
-    // FAB taps also work because the FAB onClick path resets userScrolledAway
-    // directly (line 1124) and never relies on this LE.
-    LaunchedEffect(isNearBottom.value) {
-        if (isNearBottom.value && userScrolledAway) {
-            val sinceDragMs = System.currentTimeMillis() - lastInterruptMs
-            // KEEP userScrolledAway when no recent drag — the at-bottom
-            // reading came from a stream-end layout reflow, not a real
-            // return-to-bottom gesture.
-            if (sinceDragMs > 1500L) return@LaunchedEffect
-            userScrolledAway = false
-        }
-    }
+    // [T-android-scroll-policy] The old "re-engage follow when isNearBottom
+    // flips true" effect is gone: DragInteraction.Stop already decides
+    // ownership at finger lift, FAB-down / send pin explicitly, and the
+    // stream-end layout reflow (whose bogus one-frame near-bottom reading this
+    // effect used to guard against with a 1.5 s window) no longer owns any
+    // transition — mode changes only on gestures and deliberate jumps now.
     // T169 / T170: an IME show/hide animates the LazyColumn's content area,
-    // which can briefly register as a synthetic drag-stop and flip
-    // userScrolledAway=true even though the user never actually scrolled.
-    //
-    // T170: only force-reset when we're actually back at the bottom. Earlier
-    // behaviour of unconditionally clearing userScrolledAway hid the FAB on
-    // users who had scrolled up to read history and then opened the keyboard
-    // to send a follow-up — auto-follow then yanked them away from where
-    // they were reading.
+    // which can briefly register as a synthetic drag-stop. Only force-reset
+    // when we're actually back at the bottom — a user reading history who
+    // opens the keyboard must not be yanked to the bottom.
     val imeBottomPx = WindowInsets.ime.getBottom(LocalDensity.current)
     LaunchedEffect(imeBottomPx) {
-        if (userScrolledAway && isNearBottom.value) userScrolledAway = false
+        if (!scrollPolicy.isPinned && isNearBottom.value) scrollPolicy.pin()
     }
     // [T-android-tool-autoscroll] Start-of-turn edge from ViewModel: resume() /
     // retryLast() / retryFromMessage() / rerunFromToolBlock() emit Unit on
@@ -1810,9 +1792,13 @@ fun ChatScreen(
     // streamed token finally bumps the auto-follow tuple.
     LaunchedEffect(listState, viewModel) {
         viewModel.forceScrollToBottom.collect {
-            // Match the user-send path: clear any prior "scrolled away" flag
-            // so the streaming auto-follow stays active for the new turn.
-            userScrolledAway = false
+            // [T-android-scroll-policy] Only a PINNED viewport follows
+            // resume/retry/rerun. These emissions arrive unbidden (queued
+            // retries, auto-resume while the user is elsewhere) and used to
+            // unconditionally clear userScrolledAway + jump to the bottom —
+            // one of the three surviving jump paths of the reading-history
+            // bug. A reader keeps their place; the down-FAB is the way back.
+            if (!scrollPolicy.allowsContentScroll()) return@collect
             tracedScrollToItem("FORCE-SCROLL-TO-BOTTOM(resume/retry/rerun)", 0, 0)
         }
     }
@@ -1821,13 +1807,12 @@ fun ChatScreen(
     LaunchedEffect(messages.size) {
         val lastMsg = messages.lastOrNull() ?: return@LaunchedEffect
         if (lastMsg.role != "user") return@LaunchedEffect
-        // [T-android-scroll-away-retain] 发送按钮回调已在同步段清除
-        // userScrolledAway；此 LE 是兜底路径（enqueue-while-streaming 等），
-        // 只更新 lastUserAppendMs 供 sendGrace 窗口使用，不再无条件清
-        // userScrolledAway —— 用户正在向上翻看历史时，排队消息/新内容到达
-        // 不应把视口弹回底部。
+        // [T-android-scroll-away-retain] 发送按钮回调已显式 pin；此 LE 是
+        // 兜底路径（enqueue-while-streaming 等），只更新 lastUserAppendMs
+        // 供 sendGrace 窗口使用。用户正在读历史时，排队消息到达不应把
+        // 视口弹回底部 —— 只在 Pinned 时吸附。
         lastUserAppendMs = System.currentTimeMillis()
-        if (!userScrolledAway) {
+        if (scrollPolicy.isPinned) {
             tracedScrollToItem("LE(messages.size)USER-SEND-SNAP", 0, 0)
         }
     }
@@ -1864,7 +1849,7 @@ fun ChatScreen(
     // separate edge-triggered LE that fires once per stream END, not per
     // token — async self-sizing / image height settling needs the safety
     // net but not at 50ms cadence.
-    LaunchedEffect(listState, userScrolledAway) {
+    LaunchedEffect(listState, scrollMode) {
         // T-streaming-side-channel: combine the canonical messages flow
         // with streamingById so growth signals (content length, toolBlocks
         // count, awaiting flag) reflect the live stream — otherwise the
@@ -1922,7 +1907,10 @@ fun ChatScreen(
             .sample(120L)
             .collect {
                 if (!viewModel.isStreaming.value) return@collect
-                if (userScrolledAway) return@collect
+                // [T-android-scroll-policy] Reading owns the viewport: content
+                // growth during a stream is the newest end growing at index 0,
+                // and LazyListState's key anchoring holds the reader's row.
+                if (!scrollPolicy.isPinned) return@collect
                 if (listState.isScrollInProgress) return@collect
                 val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
                 if (sinceInterrupt < 1000L) return@collect
@@ -2000,227 +1988,41 @@ fun ChatScreen(
     // T-streaming-side-channel: derive streamingNowFlag from isStreaming
     // VM flow directly (turn-level signal) rather than reading per-token
     // assistant content, so this state doesn't tick during a stream.
+    //
+    // [T-android-scroll-policy] Rewritten: Pinned-only single re-pin. The
+    // Reading branch is a HARD NO-OP — versions v6..v17 of cross-key restore
+    // all made the symptom worse (commits cd08a334, 9873a3ed), and with
+    // stable keys (FlatKeys) LazyColumn holds the reader's position
+    // natively. The old LATE-REPIN second stage is gone: it existed to work
+    // around the arm-net fights that no longer exist.
     val streamingNowFlag = isStreaming
     LaunchedEffect(streamingNowFlag) {
         if (streamingNowFlag) return@LaunchedEffect  // edge fires only on streaming→idle
-        // [T-android-stream-end-arm-race] Stamp the edge BEFORE the 220 ms
-        // delay below: the final reflow that would otherwise arm
-        // userScrolledAway (and turn this very LE into a no-op) fires inside
-        // that window, so the grace has to already be open when it lands.
-        lastStreamEndMs = System.currentTimeMillis()
-        // [T-android-stream-end-reflow-flicker-v18] The user-was-reading
-        // branch is a HARD NO-OP. After the v18 ChatFlatItems fix (keep
-        // rawFragments on the last assistant turn regardless of
-        // isStreaming), the mdblock key set no longer changes across
-        // stream-end, so LazyColumn's key reconciliation preserves the
-        // user's visual position natively. Versions v6..v17 of this LE
-        // tried every cross-key restore strategy (exact, fuzzy, neighbor,
-        // numeric, totalItems-delta) and every one made the symptom
-        // worse — see commits cd08a334 and 9873a3ed for the analysis.
         kotlinx.coroutines.delay(220)
-        if (userScrolledAway || listState.isScrollInProgress) return@LaunchedEffect
-        val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
-        if (sinceInterrupt < 1000L) return@LaunchedEffect
-        // At-bottom settle: user was following the stream; re-pin to
-        // index 0 so async self-sizing (code blocks / tables / images)
-        // finishing after our last per-token scrollToItem still leaves
-        // the bottom item flush with the viewport bottom.
+        if (listState.isScrollInProgress) return@LaunchedEffect
+        if (!scrollPolicy.isPinned) return@LaunchedEffect
         tracedScrollToItem("stream-end/AT-BOTTOM-RE-PIN", 0, 0)
-        withFrameNanos { }
-        kotlinx.coroutines.delay(900)
-        if (userScrolledAway || listState.isScrollInProgress) return@LaunchedEffect
-        if (listState.firstVisibleItemIndex != 0) {
-            val sinceDrag = System.currentTimeMillis() - lastInterruptMs
-            if (sinceDrag > 1500L) tracedScrollToItem("stream-end/LATE-REPIN", 0, 0)
-        }
     }
-    // T170: layoutInfo-driven safety net. iOS pins via contentSize KVO on
-    // every height change; on Compose the equivalent is a snapshotFlow over
-    // layoutInfo. This catches:
-    //   - Async self-sizing that completes >1 frame after the streaming LE
-    //   - StreamingMarkdownText reflow when its width changes (orientation,
-    //     IME pad)
-    //   - Tool-block height changes (e.g. terminal preview expanding)
-    // Triggers ONLY when the bottom item is visible AND the user hasn't
-    // scrolled away — otherwise we'd fight the user's manual scroll.
-    LaunchedEffect(listState) {
-        snapshotFlow {
-            val info = listState.layoutInfo
-            val bottomItem = info.visibleItemsInfo.firstOrNull { it.index == 0 }
-            // Track (bottom-item-size, total-content-size, viewport-end) so
-            // any height change re-fires.
-            Triple(
-                bottomItem?.size ?: -1,
-                info.visibleItemsInfo.sumOf { it.size },
-                info.viewportEndOffset,
-            )
-        }.distinctUntilChanged().collectLatest { _ ->
-            if (userScrolledAway) return@collectLatest
-            if (listState.isScrollInProgress) return@collectLatest
-            if (!isNearBottom.value) return@collectLatest
-            // Pin only if the current offset has actually drifted from
-            // the bottom (avoid no-op scroll spam).
-            val info = listState.layoutInfo
-            val bottomItemNow = info.visibleItemsInfo.firstOrNull { it.index == 0 }
-            // T180/T181: in reverseLayout=true, the bottom item (index 0,
-            // newest) anchors to viewport bottom when its offset == 0.
-            // When NEW items are inserted at index 0 and the LazyList does
-            // NOT auto-shift older items, the bottom item ends up below
-            // the viewport (negative offset). That's the only drift we
-            // need to fix. Don't react to gap<0 — for a tall bottom item
-            // that's the correct anchored-at-bottom state.
-            val bottomOffsetNow = bottomItemNow?.offset ?: 0
-            if (bottomOffsetNow >= 0) return@collectLatest
-            tracedScrollToItem("LAYOUT-DRIFT-SNAP", 0, 0)
-            val infoAfter = listState.layoutInfo
-            val bottomNow = infoAfter.visibleItemsInfo.firstOrNull { it.index == 0 }
-            if (bottomNow != null && bottomNow.offset < 0) {
-                tracedScrollBy("LAYOUT-DRIFT-CLIP", bottomNow.offset.toFloat())
-            }
-        }
-    }
-    // T170: when a user-initiated drag ends near the bottom, give the
-    // streaming follow path one extra pin in case content grew during the
-    // drag (we suppressed the streaming LE while isScrollInProgress). This
-    // mirrors iOS settleAfterInteraction.
+    // T170: when a user-initiated drag or fling settles away from the bottom
+    // while still Pinned, flip into Reading. DragInteraction.Stop fires at
+    // finger lift — before the fling carries the viewport off-bottom — so
+    // the isScrollInProgress falling edge is the authoritative checkpoint.
+    //
+    // [T-android-scroll-policy] The old settle-after-interaction re-pin and
+    // the position-driven arm-net are gone: every programmatic jump now
+    // lands Reading/Pinned explicitly at its click site, so "jumped off-
+    // bottom and nothing knows" cannot happen; and content growth during a
+    // stream is not a gesture, so streaming is excluded here (the glide owns
+    // the pinned viewport mid-stream).
     LaunchedEffect(listState) {
         snapshotFlow { listState.isScrollInProgress }
             .distinctUntilChanged()
             .collect { inProgress ->
-                // [T-android-small-drag-snaps-back] Re-pin to bottom after a
-                // drag-end ONLY while actively STREAMING. T170's purpose is to
-                // catch content that grew during a drag we suppressed the
-                // streaming-follow LE for — that only matters mid-stream. When
-                // NOT streaming, a finger lift near the bottom must NOT yank the
-                // viewport back: that was the "small upward drag snaps back to
-                // bottom" bug (logged: settle-after-interaction firing with
-                // firstOff=27/34 right after a sub-threshold peek). The earlier
-                // bottom-item-offset<0 guard could not distinguish a user's
-                // upward peek from content drift — in reverseLayout BOTH push the
-                // bottom item's offset negative — so it never actually gated.
-                // isStreaming is the real discriminator. The streaming-content LE
-                // (gated by lastInterruptMs + isScrollInProgress) handles the
-                // follow itself; this is just the post-drag settle for it.
-                if (!inProgress && !userScrolledAway && isNearBottom.value &&
-                    viewModel.isStreaming.value
+                if (!inProgress && !isNearBottom.value &&
+                    !viewModel.isStreaming.value && scrollPolicy.isPinned
                 ) {
-                    tracedScrollToItem("settle-after-interaction", 0, 0)
-                }
-                // [T-android-scroll-fling-stale-userscrolledaway #49] Catch
-                // the stale-userScrolledAway window left by a fling-from-
-                // bottom: DragInteraction.Stop fires at finger lift while
-                // isNearBottom is still true, so the DragStop handler sets
-                // userScrolledAway=false; the fling then carries the
-                // viewport off-bottom. Use the isScrollInProgress→false
-                // edge (past drag AND fling settle) as the authoritative
-                // checkpoint and re-arm userScrolledAway.
-                if (!inProgress && !isNearBottom.value && !userScrolledAway) {
-                    userScrolledAway = true
-                }
-            }
-    }
-
-    // [T-android-updown-fab-asymmetry] Position-driven safety net for the
-    // down-button's gate.
-    //
-    // The re-arm above keys on the `isScrollInProgress` FALLING EDGE, so it only
-    // covers viewport movement that Compose reports as a scroll — drags and
-    // flings. `listState.scrollToItem` (used by every programmatic jump here,
-    // including the up-button's turn-walk) moves the viewport WITHOUT ever
-    // setting that flag, so no edge arrives and `userScrolledAway` stays false
-    // while the user is nowhere near the bottom. The down-button is then hidden
-    // and the only way back is a manual drag — the reported bug.
-    //
-    // Keying on the position itself closes that hole for ALL movers, present and
-    // future, instead of patching each call site. Deliberately one-directional:
-    // this only ARMS the flag. Clearing stays with the existing handlers (drag
-    // stop, jump-to-bottom, send, session switch), because "we drifted near the
-    // bottom" must not be mistaken for "the user chose to follow again" — that
-    // conflation is what T138/T170 were fixed for.
-    //
-    // [T-android-stream-follow-dies-after-first-paragraph] The arm must NOT
-    // fire on content growth. `isNearBottom` goes false for two very different
-    // reasons: (a) the user moved the viewport away, and (b) the streaming
-    // message grew taller than the viewport while the viewport stood still.
-    // Case (b) happens on essentially every multi-paragraph reply — the row at
-    // index 0 gets taller under reverseLayout, so the bottom edge slides out
-    // from under us before the next follow-scroll runs. Arming on (b) was
-    // self-defeating: the flag killed the streaming auto-follow that would
-    // have restored the bottom, so the reply scrolled through its first
-    // paragraph and then froze with the rest hidden behind the tool bar and
-    // composer, with no drag anywhere in the trace (observed 20:35:56.145 —
-    // `scrolledAway=true` 1.4s after send, zero DragInteraction).
-    //
-    // Suppress the arm outright while a turn is streaming. A first attempt
-    // tried to keep the net alive during streaming by demanding a "viewport
-    // moved" signal (isScrollInProgress, or firstVisibleItemIndex changing).
-    // That is not a valid discriminator and the on-device trace disproved it:
-    //
-    //   [20:40:45.050] ScrollFollow userScrolledAway ARMED
-    //                  inProgress=false firstIdx=1 streaming=true
-    //
-    // A growing row at index 0 pushes the previous row across the viewport
-    // boundary, so firstVisibleItemIndex advances 0→1 with the user's finger
-    // nowhere near the screen — indistinguishable, by position alone, from a
-    // real scroll. There is no purely positional test that separates the two.
-    //
-    // So gate on the turn instead: while isStreaming is true, the streaming
-    // auto-follow owns the viewport and an off-bottom reading is expected
-    // drift, not intent. Real user gestures during a stream are still honoured
-    // — the DragInteraction.Stop handler above sets userScrolledAway directly
-    // and does not route through this net. Outside a stream the net keeps its
-    // original T-android-updown-fab-asymmetry behaviour untouched, which is
-    // the case it was actually built for (programmatic turn-walk jumps).
-    //
-    // [T-android-stream-end-arm-race] The window must extend PAST the
-    // streaming→idle edge. The final markdown re-render (code blocks, tables
-    // and lists finishing their real layout) lands AFTER _isStreaming flips
-    // false, and it changes row heights exactly like streaming growth did:
-    //
-    //   21:20:52.959  _isStreaming=false
-    //   21:20:53.066  coldPrewarm.done + firstItem re-compose  (final reflow)
-    //   21:20:53.076  ARMED  inProgress=false firstIdx=1 streaming=false
-    //
-    // 117 ms after the flag cleared, so the isStreaming gate no longer
-    // covered it and the reflow armed userScrolledAway with the user's finger
-    // nowhere near the screen. That in turn made the stream-end settle LE
-    // (which sleeps 220 ms then bails on `if (userScrolledAway)`) a no-op, so
-    // the transcript was left parked mid-reply with the down-FAB showing —
-    // reported as "output stopped but the view isn't at the bottom".
-    //
-    // STREAM_END_ARM_GRACE_MS keeps the suppression alive across that reflow.
-    // It is deliberately longer than the settle LE's own 220 ms delay so the
-    // re-pin gets to run first and legitimately restore the bottom; a real
-    // drag inside the window still arms the flag directly via the
-    // DragInteraction.Stop handler, which never routes through this net.
-    LaunchedEffect(listState) {
-        snapshotFlow { isNearBottom.value }
-            .distinctUntilChanged()
-            .collect { nearBottom ->
-                val firstIdx = listState.firstVisibleItemIndex
-                // Content-growth drift during a live turn is not a user intent.
-                val sinceStreamEnd = System.currentTimeMillis() - lastStreamEndMs
-                val streamingDrift = viewModel.isStreaming.value ||
-                    (lastStreamEndMs > 0L && sinceStreamEnd <= STREAM_END_ARM_GRACE_MS)
-                if (!nearBottom && !userScrolledAway && !streamingDrift) {
-                    userScrolledAway = true
-                    // [T-android-stream-follow-dies-after-first-paragraph]
-                    // Arming kills streaming auto-follow, so record WHY. If a
-                    // "reply stopped scrolling" report ever recurs, this line
-                    // is the first thing to grep: streaming=true here means
-                    // the drift heuristic let a non-gesture through.
-                    AppLogger.debug(
-                        "ScrollFollow",
-                        "userScrolledAway ARMED inProgress=${listState.isScrollInProgress} " +
-                            "firstIdx=$firstIdx streaming=${viewModel.isStreaming.value}",
-                    )
-                } else if (!nearBottom && streamingDrift) {
-                    val why = if (viewModel.isStreaming.value) "streaming content growth"
-                              else "stream-end reflow (+${sinceStreamEnd}ms)"
-                    AppLogger.debug(
-                        "ScrollFollow",
-                        "arm SUPPRESSED ($why) firstIdx=$firstIdx",
-                    )
+                    val anchor = visibleTopAnchor()
+                    scrollPolicy.rearmIfDraggedAway(anchor?.first, anchor?.second ?: 0)
                 }
             }
     }
@@ -3410,7 +3212,7 @@ fun ChatScreen(
                     // [T-android-send-no-autoscroll-behind-preview] Send-grace
                     // bypass: within SEND_FOLLOW_GRACE_MS of a user message
                     // append the isNearBottom gate is waived — the user JUST
-                    // sent (userScrolledAway was explicitly reset), but the
+                    // sent (the send path pins explicitly), but the
                     // freshly-inserted user/thinking rows leave the live
                     // anchor transiently "not at bottom", which used to skip
                     // this pin and strand the new rows behind the floating
@@ -3420,7 +3222,7 @@ fun ChatScreen(
                     // within 2s of the user's send).
                     val sinceSendMs = System.currentTimeMillis() - lastUserAppendMs
                     val sendGrace = lastUserAppendMs > 0L && sinceSendMs in 0..SEND_FOLLOW_GRACE_MS
-                    if (!userScrolledAway && (isNearBottom.value || sendGrace)) {
+                    if (scrollPolicy.isPinned && (isNearBottom.value || sendGrace)) {
                         val reason = if (!isNearBottom.value) "send-grace" else "near-bottom"
                         tracedScrollToItem("reserve-change/$reason", 0, 0)
                     }
@@ -3696,8 +3498,8 @@ fun ChatScreen(
                 // ends up appended below the visible viewport. Pinning
                 // again keyed on `flatItems` head fixes the race without
                 // disturbing T281/T282 (those still own user-send and
-                // resume scroll). userScrolledAway is honoured so users
-                // reading history aren't yanked back.
+                // resume scroll). The scroll-policy gate honours Reading so
+                // users reading history aren't yanked back.
                 // [T-android-send-no-autoscroll-behind-preview] Key of the
                 // trailing tool/typing row we last pinned for — dedupes the
                 // pin to once per new row across flatten publishes.
@@ -3741,97 +3543,32 @@ fun ChatScreen(
                         !isQueuedBubble
                     ) return@LaunchedEffect
                     if (newest.key == lastTrailingPinKey) return@LaunchedEffect
-                    if (userScrolledAway) return@LaunchedEffect
+                    // [T-android-scroll-policy] Pinned-only: a reader must not
+                    // be yanked to the bottom by a tool card / typing row.
+                    if (!scrollPolicy.isPinned) return@LaunchedEffect
                     if (listState.isScrollInProgress) return@LaunchedEffect
                     val sinceInterrupt = System.currentTimeMillis() - lastInterruptMs
                     if (sinceInterrupt < 1000L) return@LaunchedEffect
                     // Pin fires when EITHER (a) we're inside the send-grace
                     // window (the original "freshly sent, snap the typing
                     // row up" case), OR (b) the agent loop is actively
-                    // streaming AND the user hasn't manually scrolled away.
-                    // History readers fail (b) on userScrolledAway.
+                    // streaming while the viewport is pinned.
                     val sinceSendForPin = System.currentTimeMillis() - lastUserAppendMs
                     val sendGrace = lastUserAppendMs > 0L && sinceSendForPin <= SEND_FOLLOW_GRACE_MS
-                    val streamingActive = viewModel.isStreaming.value && !userScrolledAway
+                    val streamingActive = viewModel.isStreaming.value
                     if (!sendGrace && !streamingActive) return@LaunchedEffect
                     lastTrailingPinKey = newest.key
                     tracedScrollToItem("trailing-row/${newest.contentType}", 0, 0)
                 }
-                // Keep the same row on screen when a page slide changes item
-                // indices. Streaming token updates do not change the key list,
-                // so they must not scroll.
-                val historyAnchorOldest = remember(sessionId) { mutableStateOf<String?>(null) }
-                val historyAnchorNewest = remember(sessionId) { mutableStateOf<String?>(null) }
-                val historyAnchorOldestOffset = remember(sessionId) { mutableStateOf(0) }
-                val historyAnchorNewestOffset = remember(sessionId) { mutableStateOf(0) }
-                var historyKeys by remember(sessionId) { mutableStateOf<List<String>>(emptyList()) }
-                fun historyItemsBeforeMessages(): Int {
-                    var count = 0
-                    if (compactProgress != null) count++
-                    val lastAssistantHasError = messages
-                        .lastOrNull { it.role == "assistant" }
-                        ?.error
-                        ?.isNotBlank() == true
-                    if (canResume && !isStreaming && error == null && !lastAssistantHasError) count++
-                    return count
-                }
-                data class VisibleHistoryAnchor(
-                    val oldestKey: String,
-                    val oldestOffset: Int,
-                    val newestKey: String,
-                    val newestOffset: Int,
-                )
-                LaunchedEffect(listState) {
-                    snapshotFlow {
-                        val rows = listState.layoutInfo.visibleItemsInfo.filter { item ->
-                            val key = item.key as? String ?: return@filter false
-                            !key.startsWith("__")
-                        }
-                        val oldest = rows.maxByOrNull { it.index }
-                        val newest = rows.minByOrNull { it.index }
-                        if (oldest == null || newest == null) null
-                        else VisibleHistoryAnchor(
-                            oldestKey = oldest.key as String,
-                            oldestOffset = oldest.offset,
-                            newestKey = newest.key as String,
-                            newestOffset = newest.offset,
-                        )
-                    }.collect { anchor ->
-                        if (anchor != null && userScrolledAway) {
-                            historyAnchorOldest.value = anchor.oldestKey
-                            historyAnchorNewest.value = anchor.newestKey
-                            historyAnchorOldestOffset.value = anchor.oldestOffset
-                            historyAnchorNewestOffset.value = anchor.newestOffset
-                        }
-                    }
-                }
-                LaunchedEffect(flatItems, userScrolledAway) {
-                    val keys = flatItems.map { it.key }
-                    val previous = historyKeys
-                    historyKeys = keys
-                    if (!userScrolledAway || previous.isEmpty() || previous == keys) return@LaunchedEffect
-                    val oldestIndex = historyAnchorOldest.value?.let(keys::indexOf) ?: -1
-                    val newestIndex = historyAnchorNewest.value?.let(keys::indexOf) ?: -1
-                    val useOldest = oldestIndex >= 0
-                    val flatIndex = when {
-                        useOldest -> oldestIndex
-                        newestIndex >= 0 -> newestIndex
-                        else -> return@LaunchedEffect
-                    }
-                    val anchorOffset = if (useOldest) {
-                        historyAnchorOldestOffset.value
-                    } else {
-                        historyAnchorNewestOffset.value
-                    }
-                    val target = ChatHistoryWindow.lazyIndexOfOldestFirstKey(
-                        oldestFirstCount = keys.size,
-                        keyIndexInOldestFirst = flatIndex,
-                        itemsBeforeMessages = historyItemsBeforeMessages(),
-                    )
-                    if (listState.firstVisibleItemIndex != target) {
-                        listState.scrollToItem(target, anchorOffset)
-                    }
-                }
+                // [T-android-scroll-policy] The old history anchor-restore
+                // machinery (VisibleHistoryAnchor snapshot + restore on every
+                // flatItems change) is deleted. It re-scrolled to STALE
+                // snapshots whenever content changed while reading and only
+                // compared indices, so it fought both the user's drags and
+                // LazyColumn's own key anchoring. With stable keys
+                // (FlatKeys + buildFlatChatItems) the native key-follow keeps
+                // the reading position across appends/prepends — nothing here
+                // needs to re-scroll.
                 // messageId → isCompactedHistory map. Used to fade entire
                 // assistant-row clusters (header + text + tool pills) at
                 // render time — mirrors iOS isCompactedHistory opacity(0.5).
@@ -4141,7 +3878,7 @@ fun ChatScreen(
                                 // mounts a frame or two later — pin once now,
                                 // then again after 100ms so the indicator
                                 // doesn't land below the fold.
-                                userScrolledAway = false
+                                scrollPolicy.pin()
                                 coroutineScope.launch {
                                     tracedScrollToItem("RESUME-BANNER/initial", 0, 0)
                                     kotlinx.coroutines.delay(100)
@@ -4581,7 +4318,21 @@ fun ChatScreen(
                                     if (isLoadingHistory) R.string.chat_loading_older_messages
                                     else R.string.chat_load_older_messages,
                                 ),
-                                onClick = { viewModel.loadOlderMessages() },
+                                onClick = {
+                                    // [T-android-scroll-policy] Reading from the
+                                    // moment the click lands — content followers
+                                    // must stay quiet across the prepend. The old
+                                    // code never set userScrolledAway here, so a
+                                    // pill-paged reader still counted as "pinned"
+                                    // and every stream tick yanked them back to
+                                    // the bottom. The prepend itself needs no
+                                    // scroll: older rows join the END of the
+                                    // reversed list, so visible indices don't move
+                                    // and key anchoring holds the viewport.
+                                    val anchor = visibleTopAnchor()
+                                    scrollPolicy.landReading(anchor?.first, anchor?.second ?: 0)
+                                    viewModel.loadOlderMessages()
+                                },
                             )
                         }
                     }
@@ -4768,7 +4519,7 @@ fun ChatScreen(
                 // instead of measured rects, which keeps it deterministic.
                 val upFabVisible = messages.isNotEmpty() && !isNearBottom.value
                 val downFabVisible = messages.isNotEmpty() && (
-                    hasNewerMessages || (userScrolledAway && contentOverflows.value)
+                    hasNewerMessages || (scrollMode is ScrollMode.Reading && contentOverflows.value)
                     )
                 val fabBaseDp = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                 val fabStackTopDp = when {
@@ -4872,20 +4623,15 @@ fun ChatScreen(
                     val upBaseBottom = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
-                            // [T-android-updown-fab-asymmetry] Arm the same flag a
-                            // finger-drag would. The down-button is gated on
-                            // `userScrolledAway`, which ONLY the drag handlers set
-                            // — and `scrollToPreviousUserTurn` moves the viewport
-                            // with `listState.scrollToItem` (instant, not
-                            // animated), so `isScrollInProgress` never toggles and
-                            // the fling-settle re-arm below never runs either.
-                            // Result: walking up with this button left the user
-                            // far from the bottom with NO way back except a manual
-                            // drag. Measured (ScrollFAB2 trace):
-                            //   up=true down=false | nearBottom=false scrolledAway=false
-                            // The down-button already does the symmetric reset
-                            // (`userScrolledAway = false`); this is its mirror.
-                            userScrolledAway = true
+                            // [T-android-scroll-policy] Land in Reading
+                            // immediately: this jump is a browse action, and
+                            // the seek below moves the viewport with
+                            // scrollToItem (instant) — no isScrollInProgress
+                            // edge ever fires, so nothing else can arm the
+                            // mode for us. (Old code set userScrolledAway=true
+                            // here for the same reason.)
+                            val anchor = visibleTopAnchor()
+                            scrollPolicy.landReading(anchor?.first, anchor?.second ?: 0)
                             coroutineScope.launch { scrollToPreviousUserTurn() }
                         },
                         modifier = Modifier
@@ -4914,19 +4660,18 @@ fun ChatScreen(
                     val fabBottomPadding = if (lastToolBlocks.isNotEmpty()) 80.dp else 8.dp
                     androidx.compose.material3.FilledIconButton(
                         onClick = {
-                            // [T-android-scroll-fab-down-stuck] Clear the
-                            // scrolled-away intent SYNCHRONOUSLY on tap — that
-                            // alone hides the FAB when the tail is already loaded.
-                            // Don't rely on the at-bottom auto-reset LE
-                            // (`isNearBottom && userScrolledAway → false`): on a
-                            // long reverseLayout session scrollToItem(0,0) can
+                            // [T-android-scroll-fab-down-stuck] Pin the mode
+                            // SYNCHRONOUSLY on tap — that alone hides the FAB
+                            // when the tail is already loaded. Don't rely on a
+                            // position-driven auto-reset: on a long
+                            // reverseLayout session scrollToItem(0,0) can
                             // settle on a non-zero firstVisibleItemIndex while
                             // unmeasured items resolve (logged: FAB-DOWN tap left
                             // firstIdx=41/60, canBwd=false), so isNearBottom stays
-                            // false, the auto-reset never fires, and the FAB was
+                            // false and a position check would keep the FAB
                             // stuck visible. The user tapped "go to bottom" — the
-                            // intent is unambiguous, so reset directly.
-                            userScrolledAway = false
+                            // intent is unambiguous.
+                            scrollPolicy.pin()
                             // The same button reaches the real session tail, not
                             // only the currently painted suffix.
                             pinRealLatest = true
@@ -6105,7 +5850,7 @@ fun ChatScreen(
                             releaseComposerAfterSend()
                             viewModel.sendMessage(toSend)
                             noteSendForInputModePref()
-                            userScrolledAway = false
+                            scrollPolicy.pin()
                             coroutineScope.launch {
                                 tracedScrollToItem("SEND-PATH(keyboard-imeAction)/initial", 0, 0)
                                 kotlinx.coroutines.delay(100)
