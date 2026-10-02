@@ -91,8 +91,8 @@ android {
         applicationId = "com.openminis.linux"
         minSdk = 26
         targetSdk = 35
-        versionCode = 221
-        versionName = "2.0.21"
+        versionCode = 222
+        versionName = "2.0.22"
 
         // [T-build-provenance] versionCode alone could not identify a build:
         // it stayed 220 across 11 commits, so "which commit is this APK?" was
@@ -130,7 +130,19 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
+            // A RANGE, not a pin. `3.22.1` alone forces every builder to own that
+            // exact CMake, and no aarch64 CMake distribution ships it in a
+            // ready-to-use form: Kitware's cmake-3.22.1-linux-aarch64 tarball has
+            // no `bin/ninja` (AGP requires one next to cmake) and no
+            // `source.properties`, so an arm64 builder had to hand-install a
+            // ninja before the native build would even configure.
+            //
+            // `3.22.1+` (AGP's CmakeVersionRequirements.dslVersionHasPlus) means
+            // "3.22.1 or higher", so an arm64 host uses whatever CMake its SDK
+            // already has (3.31.6 today) while x86_64 CI — which sdkmanager-installs
+            // exactly `cmake;3.22.1` and nothing else — still resolves 3.22.1 and
+            // stays byte-for-byte reproducible.
+            version = "3.22.1+"
         }
     }
 
