@@ -97,7 +97,7 @@
 - 本版新增 **31** 个测试：
   - `ModelListFetchRetryTest`（13）——重试策略矩阵 + 用 MockWebServer 端到端验证「401 后 200 恢复」「400 不浪费预算」「预算耗尽交回最后一次响应」
   - `StreamStallWatchdogTest`（6）——阶段 2 卡死、阶段 1 不变、短间隔不误杀、委托兼容
-  - `SessionMemorySheetGroupingTest`（12）——分组结构与折叠摘要，纯函数、不依赖 Compose
+  - `SessionMemorySheetGroupingTest`（11）——分组结构与折叠摘要，纯函数、不依赖 Compose
 - 既有 `FirstEventWatchdogTest`（4）与 `XAIDynamicCatalogTest` 全部通过；xAI 那条按新契约更新并新增了反向回归。
 
 ## 安装与校验

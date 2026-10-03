@@ -1,4 +1,4 @@
-# OpenMinis-Linux 更新日志（2.0.9 → 2.0.25）
+# OpenMinis-Linux 更新日志（2.0.9 → 2.0.26）
 
 基线 **2.0.9（versionCode 209）** 只做机械拆分：聊天、OpenAI、配置仓库与流式 Markdown 的可搬函数改为同包扩展，公开签名不变。以下按版本列出其后全部用户可见与工程变更。未列出的 versionCode 为滚动包中间态。
 
@@ -99,8 +99,15 @@
 - **会话记忆面板收敛为「人格 / 规则」两行**：2.0.24 把 6 个条目平铺成同级（人格、应用级 GLOBAL.md、会话级 GLOBAL.md、提示词快照、今天日记、昨天日记）。改为分组而非删信息：主区只剩人格与规则两行，**规则可展开**显示原先那两个 GLOBAL.md（应用级 · 只读 / 本会话 · 可编辑，顺序与注入拼接顺序一致），折叠摘要由子条目派生因而不可能与展开内容不一致；记忆日记与诊断（提示词快照）各自独立分区。2.0.24 建立的注入同源语义完整保留。未配置文件在摘要中省略而非显示 0 行（`"".lines().size == 1`，直接数行会让从未动过的 GLOBAL.md 看起来像已配置），两者都未配置只显示一次「未设置」。
 - **修掉 2.0.24 的 i18n 回归**：面板行标题此前**硬编码中文**，17 个非中文 locale 用户看到中文。改为字符串资源（英文默认 + 中文），其余 locale 回落英文。分组逻辑抽为纯函数 `groupAutoItems` / `rulesSummary`，不依赖 Compose 即可断言信息架构（旧的平铺渲染没有这样的接缝，行数只能靠肉眼检查）。
 - **备份恒定包含凭据，去掉「必须加密」前置条件**：「包含凭据」此前是独立开关且与加密**双向互锁**（关加密强制关凭据、开凭据强制开加密），手动备份默认**不含**凭据；而 `BackupExporter.Options.includeCredentials` 本就默认 `true`，定时与 agent 备份一直带凭据——互锁只让手动导出成了例外，从这种备份恢复后所有供应商连不上，形同数据丢失。现去掉该开关与互锁，备份恒定包含凭据（API 密钥、OAuth 令牌、环境变量值、MCP 授权头）；加密开关回归「只决定包是否加密」，未加密时的明文警告保留且仍按同样三类（供应商 / 环境变量 / MCP 服务器）触发。清理失效偏好键与两条死符串（其副标题「Requires encryption.」在去掉互锁后已是错误陈述）。
-- 新增 31 个测试：`ModelListFetchRetryTest`(13，含 MockWebServer 端到端)、`StreamStallWatchdogTest`(6)、`SessionMemorySheetGroupingTest`(12)。
+- 新增 31 个测试：`ModelListFetchRetryTest`(13，含 MockWebServer 端到端)、`StreamStallWatchdogTest`(6)、`SessionMemorySheetGroupingTest`(11)，以及 `XAIDynamicCatalogTest` 的反向回归 1 个（401 后恢复 200 必须拿到 live 目录）。全量 JVM 单测 2118 个通过。
+
+## 2.0.26（226）— 强制刷新不再破坏模型列表
+
+- **根因：目录 URL 不再被改写**。`ModelListFetchIsolation.bustUrl()` 在强制刷新时追加 `?minis_nocache=<instanceId>-<nanoTime>`，而严格按路径路由的网关对**任何查询字符串**都返回 404（实测：`/v1/models` → 200；`/v1/models?foo=bar` → 404 空响应体；同样的请求只带 `Cache-Control: no-cache, no-store` + `Pragma: no-cache` → 200，且 `cf-cache-status: DYNAMIC` 说明 CDN 并未缓存该端点）。手动刷新走的正是 `forceRefresh = true, clearFirst = true`，所以必然命中——表现为"添加时能拉到模型、按一次刷新就永久空掉"。删掉 `bustUrl`，破缓存只走请求头；6 个调用点全部更新（OpenAI 兼容 / Anthropic / OpenRouter / Gemini / Antigravity），Gemini 非 OAuth 路径自身的 `?key=` 保留。原设计声称的收益（防中间层折叠并行刷新）经复核站不住：并行强制刷新是完全相同的请求，折叠后答案对双方都正确，且磁盘缓存本就按 `cacheKey(base|apiKey, instanceId)` 分开。
+- **放大器：清空推迟到拿到替换数据之后**。`clearFirst` 原本在网络调用**之前**删掉该实例全部条目，而 `clearFirst` 蕴含 `liveForce`、`liveForce` 又跳过 models.dev 兜底直接返回 `FAILURE` → 一次失败刷新即摧毁列表，只能删供应商重加。改为 `hardClearIfNeeded()`，最多执行一次；**成功路径逐字节等价**（条目仍在 `replaceEntries` 前清掉，不继承 uuid/overrides/isHidden，`pruned` 依旧为空），失败路径不再破坏数据。此条无新增单测——`refreshModels` 需要 Context 与加密 prefs，遵循本仓库既有约定（见 `EmptyKeyRefreshTest` 文档），且改动是纯顺序调整。
+- 新增 `ModelListUrlShapeTest`(5)：强制刷新路径断言 `RecordedRequest.path` **恰好**为 `/v1/models`（`path` 含查询串，任何重新引入的 `?…` 当场失败），并钉住破缓存由请求头承担、`/v1` 不重复追加也不漏追加。全量 JVM 单测 **2118 个通过**。
+- 与 2.0.25 的关系：2.0.25 修的是间歇性 401 被当成"密钥无效"，本版修的是 404。**404 按设计不重试**（重发字节相同的请求不会改变答案），所以 2.0.25 的重试救不了本版的场景；两个缺陷叠加才构成完整现象。
 
 ---
 
-完整逐提交历史见 `git log 074ecc5..HEAD`；各版本的发布说明另见 `docs/RELEASE-NOTES.zh.md` 与 `docs/github-release-<版本>.md`。
+；各版本的发布说明另见 `docs/RELEASE-NOTES.zh.md` 与 `docs/github-release-<版本>.md`。

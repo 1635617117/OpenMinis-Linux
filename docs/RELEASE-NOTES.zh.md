@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.26-linux
+
+- versionCode **226**
+- 修「模型列表拉不到、按刷新后彻底空掉」，与 2.0.25 是两个不同缺陷。数据库仍为 21。**根因**：`bustUrl()` 在强制刷新时把目录 URL 改写成 `/v1/models?minis_nocache=…`，而严格按路径路由的网关对**任何**查询字符串直接 404（实测：裸 `/v1/models` 返回 200/1711 字节，`?minis_nocache=abc` 与 `?foo=bar` 均 404 空响应体，而带 `Cache-Control: no-cache, no-store` + `Pragma: no-cache` 头仍 200，`cf-cache-status: DYNAMIC` 说明 CDN 并未缓存该端点）；手动刷新走的正是 `forceRefresh = true`，所以添加时能拉到、一刷新就永久拉不到。改为**删掉 `bustUrl`、目录 URL 永不改写**，破缓存只走请求头（6 个调用点全改，Gemini 非 OAuth 的 `?key=` 是端点自身鉴权参数，保留）。原设计声称的收益经复核站不住：被折叠的并行刷新本就是同 URL 同凭据的相同请求，答案对双方都正确，磁盘缓存也已按 `cacheKey(base|apiKey, instanceId)` 分开。**放大原因**：`clearFirst` 在网络调用之前就删光该实例条目，而它蕴含的 `liveForce` 又会跳过 models.dev 兜底直接 `FAILURE`——于是一次失败的刷新摧毁了它本该重载的列表。改为把清空**推迟到确实拿到替换数据时**（`hardClearIfNeeded()`，最多执行一次）；成功路径逐字节等价（条目仍在 `replaceEntries` 前被清，故不继承 overrides、`pruned` 仍为空），失败路径不再破坏数据。新增 `ModelListUrlShapeTest`(5) 端到端钉住"强制刷新路径恰为 `/v1/models`"（`RecordedRequest.path` 含查询串，任何重新引入的 `?…` 当场失败）并钉住破缓存改由请求头承担；`refreshModels` 需 Context 与加密 prefs，按仓库既有约定（见 `EmptyKeyRefreshTest` 文档）不为其伪造测试台，第 2 条为纯顺序调整故无新增单测。全量 JVM 单测 **2118 个通过**。
+
+---
+
 # OpenMinis-Linux 2.0.25-linux
 
 - versionCode **225**
