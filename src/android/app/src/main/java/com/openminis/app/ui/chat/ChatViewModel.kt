@@ -1689,6 +1689,16 @@ class ChatViewModel(
     @Volatile
     internal var personaHistorySteering = false
 
+    /**
+     * Byte offset at which the last [buildSystemPrompt] result switches from
+     * byte-stable (base, skills, MCP, global + daily memory) to per-turn
+     * dynamic (WorldBook hits, learned prefs, recall, runtime context).
+     * AnthropicProvider places its system cache_control breakpoint exactly here
+     * so the stable head is a cross-turn cache hit; -1 means "unknown, cache
+     * the whole system prompt as before".
+     */
+    @Volatile internal var systemPromptStablePrefixLen: Int = -1
+
     /** True when a compact-summary LLM call is in flight (UI disables further sends). */
     internal val _isCompacting = MutableStateFlow(false)
     override val isCompacting: StateFlow<Boolean> = _isCompacting.asStateFlow()

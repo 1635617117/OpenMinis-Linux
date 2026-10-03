@@ -121,8 +121,10 @@ class AnthropicProvider(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        systemStablePrefixLen: Int,
     ): Flow<LLMStreamChunk> = rawStreamMessage(
         messages, systemPrompt, maxTokens, temperature, imageParts, tools, thinkingLevel,
+        systemStablePrefixLen,
     ).failOnSilentEmptyCompletion(name)
 
     private fun rawStreamMessage(
@@ -133,8 +135,9 @@ class AnthropicProvider(
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        systemStablePrefixLen: Int = -1,
     ): Flow<LLMStreamChunk> = callbackFlow {
-        val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel)
+        val body = buildRequestBody(messages, systemPrompt, maxTokens, stream = true, temperature = temperature, imageParts = imageParts, tools = tools, thinkingLevel = thinkingLevel, systemStablePrefixLen = systemStablePrefixLen)
         // T302: serialize the body exactly once and pass the string to
         // buildRequest. Pre-T302 body.toString() ran twice per call (once
         // here, once inside buildRequest); each emitted string was tens of
@@ -300,47 +303,41 @@ class AnthropicProvider(
      * Mirrors iOS AnthropicProvider.resolveSystemPrompt — two authentication paths:
      *
      * - **OAuth (isOAuth=true)**: must start with the Claude Code prefix block (uncached)
-     *   so Anthropic's server-side OAuth check sees the exact expected prompt. Any user
-     *   tail is emitted as a second block with `cache_control: ephemeral` for cache hits.
-     *   If the caller already embedded the prefix, strip it before splitting; if not,
-     *   force-prepend the prefix so OAuth never fails the server-side gate.
+     *   so Anthropic's server-side OAuth check sees the exact expected prompt.
+     * - **API key (isOAuth=false)**: no prefix requirement.
      *
-     * - **API key (isOAuth=false)**: single user-prompt block with `cache_control: ephemeral`.
-     *   Returns null when the prompt is null/empty (iOS parity — no empty `system` field).
+     * Returns null when the prompt is null, or empty on the API-key path
+     * (iOS parity — no empty `system` field).
+     *
+     * Breakpoint placement: [systemStablePrefixLen] is the offset up to which
+     * the assembled prompt is byte-stable across turns (published by
+     * ChatViewModel.buildSystemPrompt). The cache_control breakpoint goes at
+     * the end of THAT block, not at the end of the whole prompt: the tail
+     * carries per-turn WorldBook hits, scene-classified learned prefs, FTS
+     * recall and the runtime context, so a breakpoint after it rewrote the
+     * cached prefix on every turn — paid for on write, never read back.
+     * With the split, the stable head (identity, tool docs, memory, skills,
+     * MCP) hits across turns and only the small tail is re-ingested.
+     *
+     * Breakpoint budget: this contributes at most ONE cached system block;
+     * with the last tool and the last two user messages that is exactly the
+     * four breakpoints Anthropic honors.
      */
-    internal fun resolveSystemPrompt(userPrompt: String?): JSONArray? {
-        if (isOAuth) {
-            val claudeCodePrefix = oauthIdentifierPromptProvider()
-            // Strip the prefix if the caller already prepended it; the tail is the real user prompt.
-            val tail = when {
-                userPrompt == null -> ""
-                userPrompt.startsWith(claudeCodePrefix) ->
-                    userPrompt.removePrefix(claudeCodePrefix).trimStart('\n')
-                else -> userPrompt
-            }
-            val arr = JSONArray()
-            // Block 1: Claude Code base prompt — NO cache_control (iOS parity).
-            arr.put(JSONObject().apply {
-                put("type", "text")
-                put("text", claudeCodePrefix)
-            })
-            // Block 2 (optional): user tail with ephemeral cache_control for max cache hits.
-            if (tail.isNotEmpty()) {
-                arr.put(JSONObject().apply {
+    internal fun resolveSystemPrompt(userPrompt: String?, systemStablePrefixLen: Int = -1): JSONArray? {
+        if (userPrompt == null) return null
+        if (!isOAuth && userPrompt.isEmpty()) return null
+        val prefix = if (isOAuth) oauthIdentifierPromptProvider() else ""
+        val arr = JSONArray()
+        for (block in systemCacheBlocks(userPrompt, systemStablePrefixLen, isOAuth, prefix)) {
+            arr.put(
+                JSONObject().apply {
                     put("type", "text")
-                    put("text", tail)
-                    put("cache_control", ephemeralCacheControl())
-                })
-            }
-            return arr
+                    put("text", block.text)
+                    if (block.cached) put("cache_control", ephemeralCacheControl())
+                },
+            )
         }
-        // API key path: single cached block, or null when prompt is missing/empty.
-        if (userPrompt.isNullOrEmpty()) return null
-        return JSONArray().put(JSONObject().apply {
-            put("type", "text")
-            put("text", userPrompt)
-            put("cache_control", ephemeralCacheControl())
-        })
+        return arr
     }
 
     private fun buildRequestBody(
@@ -354,6 +351,7 @@ class AnthropicProvider(
         // [T-android-thinking-level-arch] Already clamped to the model ceiling by
         // LLMProvider.streamMessage/sendMessage before reaching here.
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        systemStablePrefixLen: Int = -1,
     ): JSONObject {
         val body = JSONObject()
         body.put("model", model.id)
@@ -429,7 +427,7 @@ class AnthropicProvider(
         }
 
         // System prompt blocks — mirrors iOS AnthropicProvider.resolveSystemPrompt.
-        val systemArray = resolveSystemPrompt(systemPrompt)
+        val systemArray = resolveSystemPrompt(systemPrompt, systemStablePrefixLen)
         if (systemArray != null) {
             body.put("system", systemArray)
         }
@@ -800,6 +798,46 @@ class AnthropicProvider(
     }
 
     companion object {
+        /** One `system` content block, plus whether it carries a cache breakpoint. */
+        internal data class SystemBlock(val text: String, val cached: Boolean)
+
+        /**
+         * Split an assembled system prompt into cache blocks. Pure, so the
+         * breakpoint placement is testable without a provider instance.
+         *
+         * [stablePrefixLen] is the offset before which the prompt is byte-stable
+         * across turns; everything at or after it varies per turn. Values outside
+         * `1 until length` mean "no split known" and reproduce the previous
+         * single-cached-block shape, so callers that do not track the boundary
+         * (title generation, compaction, sub-agents) behave exactly as before.
+         */
+        internal fun systemCacheBlocks(
+            userPrompt: String,
+            stablePrefixLen: Int,
+            isOAuth: Boolean,
+            claudeCodePrefix: String,
+        ): List<SystemBlock> {
+            val split = stablePrefixLen in 1 until userPrompt.length
+            val stable = if (split) userPrompt.substring(0, stablePrefixLen) else userPrompt
+            val dynamic = if (split) userPrompt.substring(stablePrefixLen).trimStart('\n') else ""
+            val blocks = mutableListOf<SystemBlock>()
+            if (isOAuth) {
+                // The OAuth gate compares this prefix verbatim: first block, and
+                // never carrying a breakpoint of its own.
+                blocks += SystemBlock(claudeCodePrefix, cached = false)
+                val rest =
+                    if (stable.startsWith(claudeCodePrefix)) {
+                        stable.removePrefix(claudeCodePrefix).trimStart('\n')
+                    } else {
+                        stable
+                    }
+                if (rest.isNotEmpty()) blocks += SystemBlock(rest, cached = true)
+            } else if (stable.isNotEmpty()) {
+                blocks += SystemBlock(stable, cached = true)
+            }
+            if (dynamic.isNotEmpty()) blocks += SystemBlock(dynamic, cached = false)
+            return blocks
+        }
         /**
          * Parse the `-<major>-<minor>` (or `/<major>.<minor>`) version out of a Claude id.
          * [T-anthropic-temp-claude5-android] The minor segment is OPTIONAL and

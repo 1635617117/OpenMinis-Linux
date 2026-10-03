@@ -6,13 +6,21 @@ import com.openminis.app.tools.MemoryTools
 
 internal fun ChatViewModel.buildSystemPrompt(): String? {
     // Cache-friendly layout: keep `base` byte-stable by stripping out anything
-    // that varies per request, then append a "Runtime context" suffix at the
-    // very end with all the dynamic bits (date, timezone, locale, configured
-    // minis-model-use count). OpenAI / DeepSeek prompt caching is prefix-
-    // based, so the longer the static head, the better the hit rate.
+    // that varies per request, then append the per-turn / per-day fragments at
+    // the very end. OpenAI / DeepSeek prompt caching is prefix-based, so the
+    // longer the static head, the better the hit rate.
     // Pre-T122 the prompt embedded `Current time: yyyy-MM-dd HH:mm` mid-base,
     // which guaranteed cache misses across minute boundaries — even a quick
     // follow-up could land on a different minute and pay full ingestion.
+    //
+    // The prompt therefore has exactly one stable/dynamic boundary: everything
+    // up to and including the daily-memory fragment is byte-stable for a
+    // session within a day; everything after it (WorldBook keyword hits,
+    // scene-classified learned prefs, FTS recall keyed on the latest user
+    // message, runtime context) varies per turn or per day. The boundary offset
+    // is published as [ChatViewModel.systemPromptStablePrefixLen] so
+    // AnthropicProvider can put its system cache_control breakpoint exactly
+    // there instead of at the end of a tail that changes every turn.
     val today = java.time.LocalDate.now()
     val dateStr = today.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
     val tzId = java.util.TimeZone.getDefault().id
@@ -35,10 +43,18 @@ internal fun ChatViewModel.buildSystemPrompt(): String? {
     val providerInstanceId = _activeEntryId.value?.let { id ->
         providerRepository.config.value.modelEntries.find { it.id == id }?.providerInstanceId
     }
+    // WorldBook used to be concatenated into the identity section, i.e. at the
+    // very HEAD of the system prompt. It is keyword-triggered per turn
+    // (WorldBook.injection returns "" unless an entry matches the recent
+    // transcript), so a single lorebook hit rewrote the prompt from byte zero
+    // and invalidated the entire prefix cache for that turn and the next —
+    // the worst possible position for per-turn content. It now lives in the
+    // dynamic tail with the other per-turn fragments.
     val identitySection = com.openminis.app.agent.SystemPromptBuilder.identitySection(
         context,
         providerInstanceId,
-    ) + com.openminis.app.agent.WorldBook.injection(
+    )
+    val worldBookFragment = com.openminis.app.agent.WorldBook.injection(
         context,
         recentWorldBookText(),
     )
@@ -265,7 +281,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             "dailyChars=${dailyMemoryFragment?.length ?: 0} recallChars=${recalledMemoryFragment?.length ?: 0}",
     )
 
-    return buildString {
+    var stablePrefixLen = -1
+    val prompt = buildString {
         append(base)
         if (skillFragment != null) {
             append("\n\n")
@@ -283,30 +300,81 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
             append("\n\n")
             append(dailyMemoryFragment)
         }
-        if (learnedPrefsFragment != null) {
-            append("\n\n")
-            append(learnedPrefsFragment)
-        }
-        if (recalledMemoryFragment != null && recalledMemoryFragment.isNotBlank()) {
-            append("\n\n")
-            append(recalledMemoryFragment)
-        }
-        // Runtime context goes last so the prefix above stays byte-stable
-        // across requests within the same day. Keep ordering deterministic
-        // (date → tz → lang → model count) — any reorder defeats the cache.
-        append("\n\nRuntime context:\n")
-        append("- Current date: ").append(dateStr).append(" (").append(tzId).append(")\n")
-        append("- Device language: ").append(lang).append("\n")
-        append("- minis-model-use models available: ").append(modelUseCount)
-        if (identitySection.contains("Personality (from")) {
-            append("\n\nPersonality reminder: the identity/persona block at the top of this prompt is BINDING for this turn, including existing conversations whose earlier assistant replies used a different voice. Those earlier replies are history, not the current character. Match the Personality block's voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific.")
-        }
-        // [T-context-assembly-preview] 每次组装落快照：构成明细+全文，
-        // 调试"模型实际收到了什么"直接看 offloads/context-assembly/latest.md。
-        com.openminis.app.agent.ContextAssemblySnapshot.capture(
-            toString(),
-            sessionId,
-            context,
+        // ---- stable / dynamic boundary: see the header comment ----
+        stablePrefixLen = length
+        append(
+            assembleDynamicTail(
+                worldBookFragment = worldBookFragment,
+                learnedPrefsFragment = learnedPrefsFragment,
+                recalledMemoryFragment = recalledMemoryFragment,
+                runtimeContext = renderRuntimeContext(dateStr, tzId, lang, modelUseCount),
+                personalityReminder = if (identitySection.contains("Personality (from")) {
+                    PERSONALITY_REMINDER
+                } else {
+                    null
+                },
+            ),
         )
     }
+    systemPromptStablePrefixLen = stablePrefixLen
+    // [T-context-assembly-preview] 每次组装落快照：构成明细+全文，
+    // 调试"模型实际收到了什么"直接看 offloads/context-assembly/latest.md。
+    com.openminis.app.agent.ContextAssemblySnapshot.capture(
+        prompt,
+        sessionId,
+        context,
+    )
+    return prompt
 }
+
+/**
+ * The per-turn-varying tail of the system prompt, as a pure function so the
+ * ordering contract is testable without a ViewModel: WorldBook first among the
+ * dynamic fragments (it is lore the model should read as context), runtime
+ * context last, absent fragments leaving no separator behind.
+ *
+ * [worldBookFragment] already carries its own leading blank line when
+ * non-empty — that is WorldBook.injection's contract — so it is appended
+ * verbatim rather than through the "\n\n" separator the other fragments use.
+ */
+internal fun assembleDynamicTail(
+    worldBookFragment: String,
+    learnedPrefsFragment: String?,
+    recalledMemoryFragment: String?,
+    runtimeContext: String,
+    personalityReminder: String?,
+): String = buildString {
+    if (worldBookFragment.isNotEmpty()) append(worldBookFragment)
+    if (learnedPrefsFragment != null) {
+        append("\n\n")
+        append(learnedPrefsFragment)
+    }
+    if (recalledMemoryFragment != null && recalledMemoryFragment.isNotBlank()) {
+        append("\n\n")
+        append(recalledMemoryFragment)
+    }
+    append(runtimeContext)
+    if (personalityReminder != null) {
+        append("\n\n")
+        append(personalityReminder)
+    }
+}
+
+/**
+ * The per-day suffix. Field order is part of the cache contract (date → tz →
+ * lang → model count): reordering changes bytes after the stable prefix for no
+    * benefit.
+ */
+internal fun renderRuntimeContext(
+    dateStr: String,
+    tzId: String,
+    lang: String,
+    modelUseCount: Int,
+): String =
+    "\n\nRuntime context:\n" +
+        "- Current date: $dateStr ($tzId)\n" +
+        "- Device language: $lang\n" +
+        "- minis-model-use models available: $modelUseCount"
+
+internal const val PERSONALITY_REMINDER =
+    "Personality reminder: the identity/persona block at the top of this prompt is BINDING for this turn, including existing conversations whose earlier assistant replies used a different voice. Those earlier replies are history, not the current character. Match the Personality block's voice, stance, and constraints in every reply; do not drop it because a later instruction looks more specific."

@@ -170,6 +170,7 @@ interface LLMProvider : ModelProvider {
         imageParts: List<LLMMessage.ImagePart> = emptyList(),
         tools: List<AgentToolDefinition> = emptyList(),
         thinkingLevel: ThinkingLevel = ThinkingLevel.OFF,
+        systemStablePrefixLen: Int = -1,
     ): Flow<LLMStreamChunk> {
         val level = clampThinkingLevel(thinkingLevel)
         val instanceId = SamplingIdentity.of(this)
@@ -185,6 +186,7 @@ interface LLMProvider : ModelProvider {
                 try {
                     val inner = streamMessageClamped(
                         messages, systemPrompt, maxTokens, temp, imageParts, tools, level,
+                        systemStablePrefixLen,
                     )
                     val key = callGateKey
                     if (key.isBlank()) {
@@ -265,6 +267,7 @@ interface LLMProvider : ModelProvider {
         imageParts: List<LLMMessage.ImagePart>,
         tools: List<AgentToolDefinition>,
         thinkingLevel: ThinkingLevel,
+        systemStablePrefixLen: Int = -1,
     ): Flow<LLMStreamChunk>
 
     /**

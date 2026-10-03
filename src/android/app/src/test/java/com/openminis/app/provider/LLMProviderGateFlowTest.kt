@@ -41,6 +41,7 @@ class LLMProviderGateFlowTest {
             imageParts: List<LLMMessage.ImagePart>,
             tools: List<AgentToolDefinition>,
             thinkingLevel: ThinkingLevel,
+            systemStablePrefixLen: Int,
         ): Flow<LLMStreamChunk> = flow {
             emit(LLMStreamChunk.Text("hi"))
             emit(LLMStreamChunk.Finished("stop"))
