@@ -67,10 +67,13 @@ fun SessionMemorySheet(
     onDismiss: () -> Unit,
     onRevokeRecord: (MemoryToolRecord) -> MemoryRepository.EntryMutationResult,
     onSaveRecord: (MemoryToolRecord, String) -> MemoryRepository.EntryMutationResult,
+    sources: InjectionSources? = null,
 ) {
     val context = LocalContext.current
     var mode by remember { mutableStateOf<MemorySheetMode>(MemorySheetMode.List) }
-    val autoItems = remember(memoryRepository, context) { buildAutoInjectedItems(context, memoryRepository) }
+    val autoItems = remember(memoryRepository, context, sources) {
+        buildAutoInjectedItems(context, memoryRepository, sources)
+    }
 
     // Editing state for the active detail screen. Lives at the sheet level so
     // a single Save button in the header can read the latest buffer without
@@ -137,9 +140,11 @@ fun SessionMemorySheet(
                 toolRecords = toolRecords,
                 onAutoItemClick = { item ->
                     mode = MemorySheetMode.AutoFile(
-                        name = item.fileName,
+                        name = item.name,
+                        fileName = item.fileName,
                         content = item.content,
-                        editable = true,
+                        editable = item.editable,
+                        saver = item.saver,
                     )
                 },
                 onWriteClick = { rec -> mode = MemorySheetMode.Write(rec) },
@@ -154,16 +159,21 @@ fun SessionMemorySheet(
                     onEdit = { isEditing = true; editedContent = m.content },
                     onSave = {
                         try {
-                            memoryRepository.saveFile(m.name, editedContent)
+                            val saver = m.saver
+                            if (saver != null) {
+                                saver(editedContent)
+                            } else {
+                                memoryRepository.saveFile(m.fileName, editedContent)
+                            }
                             // SOUL.md drives [SoulStore.cachedMetadata] which
                             // backs the chat-bubble header name. The raw
                             // saveFile() path here bypasses SoulStore.save(),
                             // so refresh the cache manually to keep readers
                             // in sync after an in-sheet edit.
-                            if (m.name == "SOUL.md") {
+                            if (m.fileName == "SOUL.md") {
                                 com.openminis.app.agent.SoulStore.refreshCache(context)
                             }
-                            mode = MemorySheetMode.AutoFile(m.name, editedContent, m.editable)
+                            mode = MemorySheetMode.AutoFile(m.name, m.fileName, editedContent, m.editable, m.saver)
                             isEditing = false
                             savedToastVisible = true
                         } catch (_: Exception) { /* fall through; UI toast omitted on failure */ }
@@ -435,10 +445,35 @@ data class MemoryToolRecord(
  */
 private sealed class MemorySheetMode {
     data object List : MemorySheetMode()
-    data class AutoFile(val name: String, val content: String, val editable: Boolean) : MemorySheetMode()
+    data class AutoFile(
+        val name: String,
+        val fileName: String,
+        val content: String,
+        val editable: Boolean,
+        val saver: ((String) -> Unit)? = null,
+    ) : MemorySheetMode()
     data class Write(val record: MemoryToolRecord) : MemorySheetMode()
     data class Get(val record: MemoryToolRecord) : MemorySheetMode()
 }
+
+/**
+ * What the system-prompt injector actually reads for this session, so the
+ * sheet can show the same sources instead of a file guess.
+ *
+ * The previous sheet read "SOUL.md" out of the session memory directory — a
+ * file the injector never looks at — and a single unnamed GLOBAL.md, while
+ * injection concatenates the app-wide standing rules with the session-level
+ * ones and resolves the persona per provider instance. A user who configured
+ * a per-provider persona therefore saw the default here and had no way to
+ * tell whether their selection was live.
+ */
+data class InjectionSources(
+    val appRepo: MemoryRepository?,
+    val sessionRepo: MemoryRepository?,
+    val providerInstanceId: String?,
+    val providerLabel: String?,
+    val sessionId: String,
+)
 
 internal data class AutoItem(
     val name: String,
@@ -447,70 +482,168 @@ internal data class AutoItem(
     val fileName: String,
     /** Cached full content, snapshot at sheet open — keeps tap responsiveness fast. */
     val content: String,
+    val editable: Boolean = true,
+    /**
+     * Custom save target for items whose file does not live in the sheet's
+     * default repository (app-wide vs session GLOBAL.md, persona bodies).
+     * Null keeps the legacy saveFile(fileName) path.
+     */
+    val saver: ((String) -> Unit)? = null,
 )
 
-private fun buildAutoInjectedItems(context: Context, memoryRepository: MemoryRepository): List<AutoItem> {
+private fun buildAutoInjectedItems(
+    context: Context,
+    memoryRepository: MemoryRepository,
+    sources: InjectionSources?,
+): List<AutoItem> {
     val items = mutableListOf<AutoItem>()
 
-    // SOUL.md — persona / identity. Lives in the same memory dir as
-    // GLOBAL.md and is auto-injected into the system prompt by
-    // SystemPromptBuilder.identitySection(). Surfaced here so the user
-    // can see + edit the same file the model sees, mirroring GLOBAL.md.
-    val soulContent = memoryRepository.readFile("SOUL.md")
-    if (soulContent.isNotBlank()) {
-        val lineCount = soulContent.lines().size
-        items.add(AutoItem(
-            name = "SOUL.md",
-            detail = "$lineCount lines (full)",
-            fileName = "SOUL.md",
-            content = soulContent,
-        ))
-    } else {
-        items.add(AutoItem(
-            name = "SOUL.md",
-            detail = context.getString(R.string.memory_file_empty),
-            fileName = "SOUL.md",
-            content = "",
-        ))
+    // Persona: what the injector RESOLVED for this session, including the
+    // per-provider selection. Reading a "SOUL.md" out of the memory directory
+    // (the old behaviour) showed a file the injector never looks at, so a
+    // per-provider persona never appeared and the sheet looked stuck on the
+    // default. Editing writes back through the same library the injector
+    // reads, so what you see is what the next turn gets.
+    val resolved = com.openminis.app.agent.PersonaPromptLibrary.resolve(
+        context,
+        sources?.providerInstanceId,
+        sources?.sessionId,
+    )
+    val scopeLabel = when (resolved.scope) {
+        com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_SESSION ->
+            "本会话覆盖（仅本会话生效；保存空内容清除覆盖）"
+        com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_PROVIDER ->
+            "供应商选择: ${sources?.providerLabel ?: resolved.id}"
+        com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_BUILTIN -> "默认人格"
+        else -> "全局选择"
+    }
+    val personaSessionId = sources?.sessionId
+    items.add(
+        AutoItem(
+            name = "人格（本会话实际注入）",
+            detail = "${resolved.fileName.ifBlank { "SOUL.md" }} · $scopeLabel · ${resolved.body.lines().size} lines",
+            fileName = resolved.fileName.ifBlank { "SOUL.md" },
+            content = resolved.body,
+            // Editing here is session-scoped BY DESIGN: it writes the session
+            // override (PERSONA.md in this session's memory dir), never the
+            // provider-selected or global persona file. Priority is
+            // session menu > provider/custom > default, exactly as resolved.
+            editable = !personaSessionId.isNullOrBlank(),
+            saver = if (personaSessionId.isNullOrBlank()) {
+                null
+            } else {
+                { text ->
+                    com.openminis.app.agent.PersonaPromptLibrary.writeSessionOverride(
+                        context,
+                        personaSessionId,
+                        text,
+                    )
+                }
+            },
+        ),
+    )
+
+    // GLOBAL.md: injection concatenates the app-wide standing rules with the
+    // session-level ones. Show both, labelled, so "which GLOBAL.md did the
+    // model see?" has an answer.
+    val appRepo = sources?.appRepo
+    val sessionRepo = sources?.sessionRepo
+    if (appRepo != null) {
+        val appGlobal = appRepo.loadGlobalMd()
+        items.add(
+            AutoItem(
+                name = "GLOBAL.md（应用级 · 只读）",
+                detail = (if (appGlobal.isBlank()) {
+                    context.getString(R.string.memory_file_empty)
+                } else {
+                    "${appGlobal.lines().size} lines (full)"
+                }) + " · 全会话生效，在 设置→记忆 编辑",
+                fileName = "GLOBAL.md",
+                content = appGlobal,
+                // Read-only here on purpose: an edit from the session menu must
+                // not change other sessions. The session-level item below is
+                // the editable one.
+                editable = false,
+            ),
+        )
+    }
+    if (sessionRepo != null && sessionRepo !== appRepo) {
+        val sessionGlobal = sessionRepo.loadGlobalMd()
+        items.add(
+            AutoItem(
+                name = "GLOBAL.md（本会话 · 可编辑）",
+                detail = if (sessionGlobal.isBlank()) {
+                    context.getString(R.string.memory_file_empty)
+                } else {
+                    "${sessionGlobal.lines().size} lines (full)"
+                },
+                fileName = "GLOBAL.md",
+                content = sessionGlobal,
+                saver = { text -> sessionRepo.saveGlobalMd(text) },
+            ),
+        )
+    }
+    if (appRepo == null && sessionRepo == null) {
+        val globalContent = memoryRepository.loadGlobalMd()
+        items.add(
+            AutoItem(
+                name = "GLOBAL.md",
+                detail = if (globalContent.isBlank()) {
+                    context.getString(R.string.memory_file_empty)
+                } else {
+                    "${globalContent.lines().size} lines (full)"
+                },
+                fileName = "GLOBAL.md",
+                content = globalContent,
+            ),
+        )
     }
 
-    // GLOBAL.md
-    val globalContent = memoryRepository.loadGlobalMd()
-    if (globalContent.isNotBlank()) {
-        val lineCount = globalContent.lines().size
-        items.add(AutoItem(
-            name = "GLOBAL.md",
-            detail = "$lineCount lines (full)",
-            fileName = "GLOBAL.md",
-            content = globalContent,
-        ))
-    } else {
-        items.add(AutoItem(
-            name = "GLOBAL.md",
-            detail = context.getString(R.string.memory_file_empty),
-            fileName = "GLOBAL.md",
-            content = "",
-        ))
+    // Ground truth: the exact system prompt this session last sent, captured
+    // at assembly time with secrets masked. This is the item that answers
+    // "did the injection take effect" without re-deriving anything.
+    if (sources != null) {
+        val snapshotFile = java.io.File(
+            com.openminis.app.agent.ContextAssemblySnapshot.dir(context, sources.sessionId),
+            "latest.md",
+        )
+        val snapshot = runCatching { snapshotFile.readText() }.getOrNull()
+        if (!snapshot.isNullOrBlank()) {
+            items.add(
+                AutoItem(
+                    name = "系统提示词组装快照（实际注入全文）",
+                    detail = "${snapshot.lines().size} lines · ${snapshotFile.lastModified().let { java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) }}",
+                    fileName = "context-assembly-latest.md",
+                    content = snapshot,
+                    editable = false,
+                ),
+            )
+        }
     }
 
-    // Today + yesterday
+    // Today + yesterday — from the SESSION repository, because that is the
+    // one injection reads daily logs from.
+    val dailyRepo = sessionRepo ?: memoryRepository
     val today = IsoTime.formatLocalDate()
     val yesterday = IsoTime.formatLocalDate(System.currentTimeMillis() - 86400_000L)
 
     for (dateStr in listOf(today, yesterday)) {
         val fileName = "$dateStr.md"
         val label = if (dateStr == today) context.getString(R.string.time_today) else context.getString(R.string.time_yesterday)
-        val content = memoryRepository.readFile(fileName)
+        val content = dailyRepo.readFile(fileName)
         if (content.isNotBlank()) {
             val lineCount = content.lines().size
             val injected = minOf(lineCount, 200)
             val detail = if (lineCount > 200) "$injected/$lineCount lines injected" else "$lineCount lines (full)"
-            items.add(AutoItem(
-                name = "$label — $fileName",
-                detail = detail,
-                fileName = fileName,
-                content = content,
-            ))
+            items.add(
+                AutoItem(
+                    name = "$label — $fileName",
+                    detail = detail,
+                    fileName = fileName,
+                    content = content,
+                    saver = { text -> dailyRepo.saveFile(fileName, text) },
+                ),
+            )
         }
     }
 

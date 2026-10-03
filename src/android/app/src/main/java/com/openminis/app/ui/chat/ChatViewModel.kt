@@ -1608,6 +1608,22 @@ class ChatViewModel(
     internal val _activeEntryId = MutableStateFlow<String?>(null)
     override val activeEntryId: StateFlow<String?> = _activeEntryId.asStateFlow()
 
+    /**
+     * Provider instance the current turn bills against. Persona resolution is
+     * per-instance ([com.openminis.app.agent.PersonaPromptLibrary.resolve]), so
+     * anything that wants to show or verify "the persona this session actually
+     * uses" must go through the same id the injector uses.
+     */
+    internal fun activeProviderInstanceId(): String? =
+        _activeEntryId.value?.let { id ->
+            providerRepository.config.value.modelEntries.find { it.id == id }?.providerInstanceId
+        }
+
+    internal fun activeProviderInstanceLabel(): String? =
+        activeProviderInstanceId()?.let { iid ->
+            providerRepository.config.value.instances.find { it.id == iid }?.label
+        }
+
     /** Prompts enqueued while the agent loop is running. Drained after the loop finishes. */
     internal val _promptQueue = MutableStateFlow<List<QueuedPrompt>>(emptyList())
     val promptQueue: StateFlow<List<QueuedPrompt>> = _promptQueue.asStateFlow()

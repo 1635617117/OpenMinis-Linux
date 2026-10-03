@@ -7029,6 +7029,16 @@ fun ChatScreen(
             onDismiss = { viewModel.dismissMemorySheet() },
             onRevokeRecord = { record -> viewModel.revokeMemoryRecord(record) },
             onSaveRecord = { record, newContent -> viewModel.replaceMemoryRecord(record, newContent) },
+            // Show what the injector reads, not a file guess: resolved persona
+            // for this session's provider, both GLOBAL.md levels, and the
+            // captured assembly snapshot as ground truth.
+            sources = InjectionSources(
+                appRepo = viewModel.memoryRepository,
+                sessionRepo = runCatching { viewModel.sessionMemoryRepo() }.getOrNull(),
+                providerInstanceId = viewModel.activeProviderInstanceId(),
+                providerLabel = viewModel.activeProviderInstanceLabel(),
+                sessionId = viewModel.sessionId,
+            ),
         )
     }
 

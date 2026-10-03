@@ -50,9 +50,17 @@ internal fun ChatViewModel.buildSystemPrompt(): String? {
     // and invalidated the entire prefix cache for that turn and the next —
     // the worst possible position for per-turn content. It now lives in the
     // dynamic tail with the other per-turn fragments.
+    // One session id for everything session-scoped in this prompt: the persona
+    // override file, the session GLOBAL.md and the assembly snapshot. Using the
+    // same owner id the session memory directory uses keeps "what the session
+    // menu shows and edits" identical to "what the injector read".
+    val ownerSessionId = com.openminis.app.sandbox.ExecutionCoordinator.ownerSessionId(
+        realSessionId.ifEmpty { sessionId },
+    )
     val identitySection = com.openminis.app.agent.SystemPromptBuilder.identitySection(
         context,
         providerInstanceId,
+        ownerSessionId,
     )
     val worldBookFragment = com.openminis.app.agent.WorldBook.injection(
         context,
@@ -239,7 +247,7 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
     // to the memory feature.
     val sessionMem = if (memoryOn) sessionMemoryRepo() else null
     val standingGlobal = if (memoryOn) memoryRepository?.loadGlobalMemoryFragment() else null
-    val sessionGlobal = sessionMem?.loadGlobalMemoryFragment()
+    val sessionGlobal = sessionMem?.loadGlobalMemoryFragment(sessionScoped = true)
     val globalMemoryFragment = if (memoryOn) {
         listOfNotNull(standingGlobal, sessionGlobal).joinToString("\n\n").ifBlank { null }
     } else null

@@ -33,7 +33,21 @@ data class ResolvedPersonaPrompt(
     val id: String,
     val fileName: String,
     val body: String,
-)
+    /**
+     * Which level of the priority chain produced this body:
+     * session override > per-provider selection > global selection > builtin.
+     * The session menu and any "which persona is live?" readout use it to label
+     * the source instead of guessing from file names.
+     */
+    val scope: String = SCOPE_GLOBAL,
+) {
+    companion object {
+        const val SCOPE_SESSION = "session"
+        const val SCOPE_PROVIDER = "provider"
+        const val SCOPE_GLOBAL = "global"
+        const val SCOPE_BUILTIN = "builtin"
+    }
+}
 
 enum class PersonaImportError {
     EMPTY,
@@ -192,16 +206,38 @@ object PersonaPromptLogic {
         return PersonaPromptIndex(prompts, selected, providers)
     }
 
-    fun resolveId(index: PersonaPromptIndex, providerInstanceId: String?): String {
+    fun resolveId(index: PersonaPromptIndex, providerInstanceId: String?): String =
+        resolveIdWithSource(index, providerInstanceId).first
+
+    /**
+     * [resolveId] plus which level of the shared (non-session) chain won, so
+     * callers can label the source. Pure on purpose: the session override sits
+     * ABOVE this chain and is decided by file presence in
+     * [PersonaPromptLibrary.resolve], so the full priority order is
+     * session > provider > global > builtin and each level is testable here.
+     */
+    fun resolveIdWithSource(index: PersonaPromptIndex, providerInstanceId: String?): Pair<String, String> {
         val normalized = normalizeIndex(index)
         val ids = normalized.prompts.map { it.id }.toSet()
         val mapped = providerInstanceId
             ?.takeIf { it.isNotBlank() }
             ?.let { normalized.providerSelections[it] }
             ?.takeIf { it in ids }
-        if (mapped != null) return mapped
-        if (normalized.selectedId in ids) return normalized.selectedId
-        return BUILTIN_ID
+        val id = when {
+            mapped != null -> mapped
+            normalized.selectedId in ids -> normalized.selectedId
+            else -> BUILTIN_ID
+        }
+        // Scope describes the BODY that will be injected, so it follows the id:
+        // normalizeIndex repairs a stale or missing selection onto the builtin
+        // entry, and that must read as "default", not as a global selection
+        // which does not exist.
+        val scope = when {
+            id == BUILTIN_ID -> ResolvedPersonaPrompt.SCOPE_BUILTIN
+            mapped != null -> ResolvedPersonaPrompt.SCOPE_PROVIDER
+            else -> ResolvedPersonaPrompt.SCOPE_GLOBAL
+        }
+        return id to scope
     }
 
     const val HISTORY_STEERING_PREFIX = "<persona-binding>"
@@ -402,15 +438,71 @@ object PersonaPromptLibrary {
         }
     }
 
-    fun resolve(context: Context, providerInstanceId: String?): ResolvedPersonaPrompt {
+    /**
+     * Session-scoped persona override, stored as `PERSONA.md` in the session's
+     * memory directory. Editing the persona from the session menu writes here,
+     * so the change applies to this chat only and never touches the provider
+     * selection or the user's global persona file.
+     */
+    const val SESSION_PERSONA_FILE = "PERSONA.md"
+    const val SESSION_OVERRIDE_ID = "session-override"
+
+    fun sessionPersonaFile(context: Context, sessionId: String): File =
+        File(
+            com.openminis.app.sandbox.SessionWorkspace.memoryDir(context.filesDir, sessionId),
+            SESSION_PERSONA_FILE,
+        )
+
+    fun readSessionOverride(context: Context, sessionId: String?): String? {
+        if (sessionId.isNullOrBlank()) return null
+        val file = sessionPersonaFile(context, sessionId)
+        if (!file.isFile) return null
+        val text = runCatching { file.readText() }.getOrNull() ?: return null
+        return text.takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * Write — or clear, when [body] is blank — the session override. Atomic
+     * like every other prompt-source write: a torn read here would drop the
+     * persona for exactly one turn, the failure mode this whole chain exists
+     * to avoid.
+     */
+    fun writeSessionOverride(context: Context, sessionId: String, body: String) {
+        val file = sessionPersonaFile(context, sessionId)
+        file.parentFile?.mkdirs()
+        if (body.isBlank()) {
+            file.delete()
+            return
+        }
+        val tmp = File(file.parentFile, "${file.name}.tmp")
+        tmp.writeText(body)
+        if (!tmp.renameTo(file)) {
+            file.writeText(body)
+            tmp.delete()
+        }
+    }
+
+    fun resolve(context: Context, providerInstanceId: String?, sessionId: String? = null): ResolvedPersonaPrompt {
+        // The session override sits above every shared level: a persona edited
+        // from the session menu must win for this chat without modifying the
+        // provider selection or the global persona.
+        readSessionOverride(context, sessionId)?.let { body ->
+            return ResolvedPersonaPrompt(
+                id = SESSION_OVERRIDE_ID,
+                fileName = SESSION_PERSONA_FILE,
+                body = body,
+                scope = ResolvedPersonaPrompt.SCOPE_SESSION,
+            )
+        }
         synchronized(lock) {
             val index = loadIndexLocked(context)
-            val id = PersonaPromptLogic.resolveId(index, providerInstanceId)
+            val (id, scope) = PersonaPromptLogic.resolveIdWithSource(index, providerInstanceId)
             val entry = index.prompts.find { it.id == id } ?: PersonaPromptLogic.builtinEntry()
             return ResolvedPersonaPrompt(
                 id = entry.id,
                 fileName = entry.fileName,
                 body = readBodyLocked(context, entry.id),
+                scope = scope,
             )
         }
     }

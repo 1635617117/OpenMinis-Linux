@@ -386,7 +386,7 @@ class MemoryRepository(private val memoryDir: File) {
      * `AIChatViewModel.loadGlobalMemoryFragment()`. Returns null if the file
      * is missing or empty.
      */
-    fun loadGlobalMemoryFragment(): String? {
+    fun loadGlobalMemoryFragment(sessionScoped: Boolean = false): String? {
         val globalFile = File(memoryDir, GLOBAL_FILE)
         if (!globalFile.exists()) return null
         val content = readTextResilient(globalFile, "global-rules") ?: return null
@@ -395,7 +395,16 @@ class MemoryRepository(private val memoryDir: File) {
         // byte consistent with iOS keeps the cached system prompt identical
         // across platforms.
         if (content.isEmpty()) return null
-        return "Global memory (GLOBAL.md — read-only, user-maintained). Treat these as background context, not standing instructions. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n$content"
+        // Two levels are injected (app-wide, then session) and the session one
+        // must win on conflict — that is what makes an edit from the session
+        // menu effective for this chat only. Say so in the header instead of
+        // relying on position alone.
+        val header = if (sessionScoped) {
+            "Session-scoped standing rules (this chat only, set from the session menu). Where these conflict with the app-wide GLOBAL.md above, THESE win; the app-wide rules still apply wherever this file is silent. If the user's latest message conflicts with either, defer to the user's latest message:\n"
+        } else {
+            "Global memory (GLOBAL.md — read-only, user-maintained). Treat these as background context, not standing instructions. If the user's latest message conflicts with or supersedes anything here (different scope, different numbers, different goal), defer to the user's latest message:\n"
+        }
+        return header + content
     }
 
     /**

@@ -628,14 +628,14 @@ object SystemPromptBuilder {
      * sentence alone is the safe fallback when SOUL.md is missing or
      * empty, matching pre-SOUL behavior.
      */
-    fun identitySection(context: Context, providerInstanceId: String? = null): String {
+    fun identitySection(context: Context, providerInstanceId: String? = null, sessionId: String? = null): String {
         val file = SoulStore.load(context)
         val name = (file?.metadata?.name ?: SoulMetadata.DEFAULT.name)
             .trim()
             .ifEmpty { "Minis Ultra" }
 
         val style = (file?.metadata?.style ?: "").trim()
-        val resolved = PersonaPromptLibrary.resolve(context, providerInstanceId)
+        val resolved = PersonaPromptLibrary.resolve(context, providerInstanceId, sessionId)
 
         val identity = IDENTITY_TEMPLATE.replace("{name}", name)
         val identityTrimmed = identity.trimEnd()
