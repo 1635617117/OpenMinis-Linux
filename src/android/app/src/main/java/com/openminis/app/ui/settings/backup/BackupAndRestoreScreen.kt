@@ -222,7 +222,6 @@ private fun BackupTab(
     val context = androidx.compose.ui.platform.LocalContext.current
     val selected by vm.selected.collectAsState()
     val encrypt by vm.encrypt.collectAsState()
-    val includeCredentials by vm.includeCredentials.collectAsState()
     val maxFileSizeMB by vm.maxFileSizeMB.collectAsState()
     val running by vm.isRunning.collectAsState()
     val status by vm.statusText.collectAsState()
@@ -321,21 +320,13 @@ private fun BackupTab(
             stringResource(R.string.backup_encrypt_footer_off)
         },
     ) {
-        val hasSensitiveCategory = BackupCategory.PROVIDERS in selected ||
-            BackupCategory.ENVIRONMENT_VARIABLES in selected ||
-            BackupCategory.MCP_SERVERS in selected
-        if (hasSensitiveCategory) {
-            CategorySwitchRow(
-                title = stringResource(R.string.backup_include_credentials),
-                subtitle = stringResource(R.string.backup_include_credentials_subtitle),
-                icon = Icons.Outlined.Link,
-                iconColor = Color(0xFFFF9500),
-                checked = includeCredentials,
-                onCheckedChange = { vm.setIncludeCredentials(it) },
-                enabled = !running,
-                showDivider = true,
-            )
-        }
+        // [T-backup-credentials-always] The "Include credentials" switch that
+        // used to sit here is gone. Credentials are always backed up, so the
+        // encryption switch below is purely about protecting the package — not
+        // about unlocking part of its contents. The plaintext warning in this
+        // section's footer still fires on the same three categories
+        // (PROVIDERS / ENVIRONMENT_VARIABLES / MCP_SERVERS), so the user is
+        // still told; it is simply no longer a choice.
 
         CategorySwitchRow(
             title = stringResource(R.string.backup_encrypt_backup),

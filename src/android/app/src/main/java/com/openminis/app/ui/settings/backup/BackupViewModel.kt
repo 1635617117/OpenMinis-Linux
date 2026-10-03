@@ -49,9 +49,6 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
     private val _encrypt = MutableStateFlow(prefs.getBoolean(KEY_ENCRYPT, false))
     val encrypt: StateFlow<Boolean> = _encrypt.asStateFlow()
 
-    private val _includeCredentials = MutableStateFlow(prefs.getBoolean(KEY_INCLUDE_CREDENTIALS, false))
-    val includeCredentials: StateFlow<Boolean> = _includeCredentials.asStateFlow()
-
     /**
      * Max per-file size, in MB, using iOS's sentinel tags: -1 = don't back up
      * files, 0 = unlimited (the default), otherwise the MB cap. Persisted.
@@ -214,18 +211,18 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setEncrypt(on: Boolean) {
         _encrypt.value = on
-        if (!on && _includeCredentials.value) setIncludeCredentials(false)
         prefs.edit().putBoolean(KEY_ENCRYPT, on).apply()
     }
 
-    fun setIncludeCredentials(on: Boolean) {
-        _includeCredentials.value = on
-        if (on && !_encrypt.value) {
-            _encrypt.value = true
-            prefs.edit().putBoolean(KEY_ENCRYPT, true).apply()
-        }
-        prefs.edit().putBoolean(KEY_INCLUDE_CREDENTIALS, on).apply()
-    }
+    // [T-backup-credentials-always] There used to be a setIncludeCredentials()
+    // here, mutually interlocked with setEncrypt: turning encryption off forced
+    // credentials off, and turning credentials on forced encryption on. Both
+    // directions are gone. Credentials are part of a backup, full stop —
+    // BackupExporter.Options already defaulted includeCredentials to true, so
+    // every path except this screen (scheduled/agent backups) was including
+    // them anyway. The interlock only made the manual export the odd one out,
+    // and a restore from a credential-less backup silently comes back without
+    // any working provider, which reads as data loss.
 
     fun setMaxFileSizeMB(value: Int) {
         _maxFileSizeMB.value = value
@@ -297,7 +294,10 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
                         BackupExporter.Options(
                             categories = cats,
                             maxFileBytes = maxFileBytesOption(),
-                            includeCredentials = _includeCredentials.value,
+                            // [T-backup-credentials-always] Not a user option any
+                            // more: a backup without credentials restores into an
+                            // app that cannot reach any provider.
+                            includeCredentials = true,
                             passphrase = passphrase?.takeIf { encrypting },
                         ),
                     ) { line ->
@@ -1044,7 +1044,6 @@ class BackupViewModel(app: Application) : AndroidViewModel(app) {
 
         private const val KEY_CATEGORIES = "selectedCategories"
         private const val KEY_ENCRYPT = "encrypt"
-        private const val KEY_INCLUDE_CREDENTIALS = "includeCredentials"
         private const val KEY_MAX_FILE_MB = "maxFileSizeMB"
     }
 }
