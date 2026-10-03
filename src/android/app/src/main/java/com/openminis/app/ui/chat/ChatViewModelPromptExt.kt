@@ -277,6 +277,8 @@ Scheduled tasks: crontab / at / nohup loops will stop when the app is suspended,
         "XSessionDiag",
         "[XSessionDiag] prompt/memory: session=${activeSessionId.take(8)} " +
             "memoryEnabled=$memoryOn " +
+            "personaChars=${identitySection.length} " +
+            "worldBookChars=${worldBookFragment.length} " +
             "globalChars=${globalMemoryFragment?.length ?: 0} " +
             "dailyChars=${dailyMemoryFragment?.length ?: 0} recallChars=${recalledMemoryFragment?.length ?: 0}",
     )

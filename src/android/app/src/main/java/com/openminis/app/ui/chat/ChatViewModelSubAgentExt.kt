@@ -24,6 +24,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.sync.Semaphore
@@ -453,6 +454,20 @@ private suspend fun ChatViewModel.runOneSubAgent(
                 status = ToolBlockStatus.FAILED,
             )
             return ToolExecutionResult(msg, false)
+        }
+        // [T-subagent-config-race] `config.value` is whatever the StateFlow
+        // holds RIGHT NOW. A spawn that lands before the one-shot async config
+        // load publishes (cold app start, process recreate after memory
+        // pressure) sees empty modelEntries, resolves baseEntry to null and
+        // dies with "No model available for sub-agent" — on a device that has
+        // models configured. Intermittent by construction: it is a start-up
+        // window, not a state, and the retry loop further down never runs
+        // because the failure happens before it. Wait for the load, bounded,
+        // and only then fall through to the actionable error.
+        if (providerRepository.config.value.modelEntries.isEmpty()) {
+            kotlinx.coroutines.withTimeoutOrNull(5_000L) {
+                providerRepository.configLoaded.first { it }
+            }
         }
         val config = providerRepository.config.value
         val pool = MultiAgentSettings.retainLive(

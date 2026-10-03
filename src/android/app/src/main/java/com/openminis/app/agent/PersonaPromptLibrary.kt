@@ -671,12 +671,18 @@ object PersonaPromptLibrary {
         }
         val dest = File(filesDir(context), entry.storedName)
         if (!dest.isFile) return SoulStore.load(context)?.body.orEmpty()
-        return try {
-            dest.readText(Charsets.UTF_8)
-        } catch (t: Throwable) {
-            AppLogger.warning(TAG, "body read failed: ${t.message}")
-            SoulStore.load(context)?.body.orEmpty()
+        // Retry before falling back to the builtin body: one torn or busy read
+        // must not silently swap the user's custom persona for the default.
+        var last: Throwable? = null
+        repeat(2) {
+            try {
+                return dest.readText(Charsets.UTF_8)
+            } catch (t: Throwable) {
+                last = t
+            }
         }
+        AppLogger.warning(TAG, "persona body read failed twice: ${last?.message}")
+        return SoulStore.load(context)?.body.orEmpty()
     }
 
     private fun atomicWrite(target: File, text: String) {

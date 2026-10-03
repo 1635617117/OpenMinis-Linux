@@ -71,7 +71,7 @@ class MemoryRepository(private val memoryDir: File) {
             if (file.exists()) return
             try {
                 file.parentFile?.mkdirs()
-                file.writeText(DEFAULT_GLOBAL_CONTENT)
+                writeTextAtomic(file, DEFAULT_GLOBAL_CONTENT)
                 com.openminis.app.logging.AppLogger.info(TAG, "seeded GLOBAL.md at ${file.absolutePath}")
             } catch (t: Throwable) {
                 com.openminis.app.logging.AppLogger.warning(TAG, "ensureGlobalExists failed: ${t.message}")
@@ -199,7 +199,7 @@ class MemoryRepository(private val memoryDir: File) {
         val newContent = entry + existing
 
         return try {
-            file.writeText(newContent)
+            writeTextAtomic(file, newContent)
             val newRevision = sha256Hex(newContent).take(16)
             Log.i(TAG, "Memory written to $fileName (${content.length} chars, revision $newRevision)")
             "Memory saved to $fileName (${content.length} chars, revision $newRevision)"
@@ -389,7 +389,7 @@ class MemoryRepository(private val memoryDir: File) {
     fun loadGlobalMemoryFragment(): String? {
         val globalFile = File(memoryDir, GLOBAL_FILE)
         if (!globalFile.exists()) return null
-        val content = try { globalFile.readText() } catch (_: Exception) { "" }
+        val content = readTextResilient(globalFile, "global-rules") ?: return null
         // Match iOS: literal-empty check (`!content.isEmpty`), not blank.
         // A whitespace-only file is unusual in practice, but staying byte-for-
         // byte consistent with iOS keeps the cached system prompt identical
@@ -426,7 +426,7 @@ class MemoryRepository(private val memoryDir: File) {
             val file = File(memoryDir, "$dateStr.md")
 
             if (file.exists()) {
-                val content = try { file.readText() } catch (_: Exception) { "" }
+                val content = readTextResilient(file, "daily-memory") ?: ""
                 if (content.isNotEmpty()) {
                     val lines = content.lines()
                     val preview = lines.take(MAX_INJECT_LINES).joinToString("\n")
@@ -529,8 +529,9 @@ class MemoryRepository(private val memoryDir: File) {
         return if (file.exists()) try { file.readText() } catch (_: Exception) { "" } else ""
     }
 
+
     fun saveGlobalMd(content: String) {
-        File(memoryDir, GLOBAL_FILE).writeText(content)
+        writeTextAtomic(File(memoryDir, GLOBAL_FILE), content)
     }
 
     fun readFile(name: String): String {
@@ -540,7 +541,7 @@ class MemoryRepository(private val memoryDir: File) {
 
     fun saveFile(name: String, content: String) {
         if (name == LearnedPrefsStore.FILE_NAME) return
-        File(memoryDir, name).writeText(content)
+        writeTextAtomic(File(memoryDir, name), content)
     }
 
     fun deleteFile(name: String): Boolean {
@@ -602,7 +603,7 @@ class MemoryRepository(private val memoryDir: File) {
 
                 val newContent = content.removeRange(match.range.first, entryEnd)
                 return try {
-                    file.writeText(newContent)
+                    writeTextAtomic(file, newContent)
                     Log.i(TAG, "Revoked memory entry from $dateStr.md")
                     EntryMutationResult.Success(dateStr)
                 } catch (e: Exception) {
@@ -644,7 +645,7 @@ class MemoryRepository(private val memoryDir: File) {
                 val replacement = "$trimmedNew\n\n"
                 val newFileContent = content.replaceRange(bodyStart, entryEnd, replacement)
                 return try {
-                    file.writeText(newFileContent)
+                    writeTextAtomic(file, newFileContent)
                     Log.i(TAG, "Replaced memory entry body in $dateStr.md")
                     EntryMutationResult.Success(dateStr)
                 } catch (e: Exception) {
@@ -693,4 +694,51 @@ class MemoryRepository(private val memoryDir: File) {
         }
         return result
     }
+}
+
+/**
+ * Atomic write: `.tmp` sibling plus rename, with a copy fallback.
+ *
+ * Memory files are read on every system-prompt build, including while a
+ * memory_write or a Settings save is in flight. A plain writeText leaves a
+ * window in which a concurrent reader sees a truncated or empty file — and
+ * the readers here treat empty as "nothing to inject", so one unlucky turn
+ * silently dropped the user's global rules or diary entry. Rename is atomic
+ * on every filesystem this app writes to.
+ *
+ * Top-level rather than a member so the companion-object seeding path and the
+ * instance save paths share one implementation.
+ */
+internal fun writeTextAtomic(file: File, content: String) {
+    file.parentFile?.mkdirs()
+    val tmp = File(file.parentFile, "${file.name}.tmp")
+    tmp.writeText(content)
+    if (!tmp.renameTo(file)) {
+        // Filesystems that refuse rename over an existing target.
+        file.writeText(content)
+        tmp.delete()
+    }
+}
+
+/**
+ * Read with one retry, warning when both attempts fail.
+ *
+ * A single failed read used to collapse to "" and then to "no fragment", i.e.
+ * the source vanished from the system prompt with no trace in any log — the
+ * intermittent "persona / global rules stopped applying" report. The retry
+ * absorbs transient IO failures; the warning makes a persistent one visible
+ * instead of invisible.
+ */
+internal fun readTextResilient(file: File, what: String): String? {
+    var last: Exception? = null
+    for (attempt in 0..1) {
+        try {
+            return file.readText()
+        } catch (e: Exception) {
+            last = e
+            if (attempt == 0) Thread.sleep(20)
+        }
+    }
+    Log.w("MemoryRepository", "$what: read failed twice for ${file.name}: ${last?.message}")
+    return null
 }
