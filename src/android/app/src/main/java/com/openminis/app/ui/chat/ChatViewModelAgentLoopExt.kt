@@ -13,7 +13,7 @@ import com.openminis.app.data.model.ThinkingLevel
 import com.openminis.app.data.repository.MultiAgentSettings
 import com.openminis.app.logging.AppLogger
 import com.openminis.app.provider.LLMProvider
-import com.openminis.app.provider.firstEventWatchdog
+import com.openminis.app.provider.streamStallWatchdog
 import com.openminis.app.service.SessionActivityTracker
 import com.openminis.app.tools.SubAgentKind
 import com.openminis.app.tools.ToolExecutionResult
@@ -576,6 +576,13 @@ internal suspend fun ChatViewModel.runAgentLoop(
                 // never throws — the stream below will cancel itself and surface
                 // a TransientError, letting the existing retry chain take over.
                 val firstEventTimeoutMs = if ((if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF).isEnabled) 90_000L else 45_000L
+                // [T-stream-stall-watchdog] Phase 2: once the stream is alive,
+                // silence longer than twice the first-event budget means
+                // progress stopped, not that it is slow to start. Derived from
+                // the existing constant so there is no second number to tune
+                // per vendor, and it replaces a 600s transport read timeout as
+                // the only bound on a mid-stream stall.
+                val streamIdleTimeoutMs = firstEventTimeoutMs * 2
                 currentProvider.streamMessage(
                     applyRequestImageBudget(requestHistory),
                     systemPrompt, dynamicMaxTokens(currentProvider, lastContextTokens),
@@ -583,7 +590,7 @@ internal suspend fun ChatViewModel.runAgentLoop(
                     tools = agentTools,
                     thinkingLevel = if (currentModelSupportsReasoning) _thinkingLevel.value else ThinkingLevel.OFF,
                     systemStablePrefixLen = systemPromptStablePrefixLen,
-                ).firstEventWatchdog(firstEventTimeoutMs).collect { chunk ->
+                ).streamStallWatchdog(firstEventTimeoutMs, streamIdleTimeoutMs).collect { chunk ->
             // [T-stream-trace-live] 运行时轨迹录制（日志页开关控制，默认关）。
             com.openminis.app.provider.StreamTraceRecorder.record(chunk)
             when (chunk) {
