@@ -2057,9 +2057,28 @@ class ProviderRepository(private val context: Context) {
         forceRefresh: Boolean = false,
         clearFirst: Boolean = false,
     ): ModelRefreshResult {
-        val clearedIds = if (clearFirst) clearFetchedModelEntries(instance.id) else emptySet()
-        if (clearedIds.isNotEmpty()) scrubExternalEntryRefs(clearedIds)
         val liveForce = forceRefresh || clearFirst
+        // [T-refresh-no-destructive-clear] `clearFirst` used to wipe this
+        // instance's model entries BEFORE the network call. A hard refresh does
+        // have to clear first — that is what stops `replaceEntries` from
+        // carrying forward uuid / overrides / isHidden, so the catalog comes
+        // back pristine — but doing it up front means any failed fetch leaves
+        // the picker empty. And because `clearFirst` implies `liveForce`, the
+        // models.dev fallback below is skipped as well, so pressing Refresh
+        // against a flaky or strict gateway *destroyed* the list it was meant to
+        // reload, with no way back short of re-adding the provider.
+        //
+        // Deferred to the moment a replacement is actually in hand, and run at
+        // most once. On success the observable result is byte-identical to the
+        // old order: entries are gone before `replaceEntries` runs, so nothing
+        // is carried forward and `pruned` is empty exactly as before.
+        var hardCleared = false
+        suspend fun hardClearIfNeeded() {
+            if (!clearFirst || hardCleared) return
+            hardCleared = true
+            val clearedIds = clearFetchedModelEntries(instance.id)
+            if (clearedIds.isNotEmpty()) scrubExternalEntryRefs(clearedIds)
+        }
         // [T-android-refresh-models-empty-key] usableApiKey, NOT loadApiKey.
         //
         // A self-hosted OpenAI/Anthropic-compatible endpoint (ollama, LM
@@ -2106,6 +2125,7 @@ class ProviderRepository(private val context: Context) {
         ) {
             val models = OpenAIModelsApi.fetchModelsOAuth()
             if (models.isNotEmpty()) {
+                hardClearIfNeeded()
                 replaceEntries(instance.id, models)
                 return ModelRefreshResult.SUCCESS_API
             }
@@ -2211,6 +2231,7 @@ class ProviderRepository(private val context: Context) {
 
             // Step 2: If API returned results, use them
             if (models.isNotEmpty()) {
+                hardClearIfNeeded()
                 val pruned = replaceEntries(instance.id, models, dropStaleRefs = clearFirst)
                 if (pruned.isNotEmpty()) scrubExternalEntryRefs(pruned)
                 return ModelRefreshResult.SUCCESS_API
