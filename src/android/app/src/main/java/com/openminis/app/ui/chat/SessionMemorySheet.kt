@@ -312,20 +312,103 @@ private fun ListBody(
     onWriteClick: (MemoryToolRecord) -> Unit,
     onGetClick: (MemoryToolRecord) -> Unit,
 ) {
+    val sections = remember(autoItems) { groupAutoItems(autoItems) }
+    val lineCountTemplate = stringResource(R.string.memory_line_count)
+    val emptyLabel = stringResource(R.string.memory_rules_none)
+    // Collapsed summary for the rules row, derived from the children so it can
+    // never disagree with what expanding reveals.
+    val rulesSummaryText = rulesSummary(
+        sections.rules,
+        { n -> lineCountTemplate.format(n) },
+        emptyLabel,
+    )
+    var rulesExpanded by remember { mutableStateOf(false) }
+
     LazyColumn(modifier = Modifier.fillMaxSize()) {
-        // ── Section 1: Auto-injected ──
-        item {
-            SettingsSection(
-                header = stringResource(R.string.memory_section_auto_injected),
-                footer = stringResource(R.string.memory_section_auto_injected_footer),
-            ) {
-                autoItems.forEachIndexed { index, item ->
-                    SettingsValueRow(
-                        title = item.name,
-                        value = item.detail,
-                        onClick = { onAutoItemClick(item) },
-                        showDivider = index < autoItems.size - 1,
-                    )
+        // ── Section 1: Auto-injected — 人格 / 规则, two rows ──
+        //
+        // Everything the injector reads is still reachable from here; it is
+        // grouped rather than flattened. The rules row expands to the same
+        // app-wide + session GLOBAL.md entries the flat list used to show as
+        // top-level siblings.
+        if (sections.hasPrimary) {
+            item {
+                SettingsSection(
+                    header = stringResource(R.string.memory_section_auto_injected),
+                    footer = stringResource(R.string.memory_section_auto_injected_footer),
+                ) {
+                    sections.persona?.let { persona ->
+                        SettingsValueRow(
+                            title = persona.name,
+                            value = persona.detail,
+                            onClick = { onAutoItemClick(persona) },
+                            showDivider = sections.rules.isNotEmpty(),
+                        )
+                    }
+                    if (sections.rules.isNotEmpty()) {
+                        SettingsValueRow(
+                            title = stringResource(R.string.memory_row_rules),
+                            value = if (rulesExpanded) {
+                                stringResource(R.string.memory_rules_tap_to_expand)
+                            } else {
+                                rulesSummaryText
+                            },
+                            onClick = { rulesExpanded = !rulesExpanded },
+                            showDivider = rulesExpanded,
+                        )
+                        if (rulesExpanded) {
+                            sections.rules.forEachIndexed { index, child ->
+                                SettingsValueRow(
+                                    title = child.scopeLabel.ifBlank { child.name },
+                                    value = if (child.lineCount <= 0) {
+                                        emptyLabel
+                                    } else {
+                                        lineCountTemplate.format(child.lineCount)
+                                    },
+                                    onClick = { onAutoItemClick(child) },
+                                    showDivider = index < sections.rules.size - 1,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Section 2: Memory diary (not a setting — injected logs) ──
+        if (sections.diary.isNotEmpty()) {
+            item {
+                SettingsSection(
+                    header = stringResource(R.string.memory_section_diary),
+                    footer = stringResource(R.string.memory_section_diary_footer),
+                ) {
+                    sections.diary.forEachIndexed { index, entry ->
+                        SettingsValueRow(
+                            title = entry.name,
+                            value = entry.detail,
+                            onClick = { onAutoItemClick(entry) },
+                            showDivider = index < sections.diary.size - 1,
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Section 3: Diagnostics (ground truth, read-only) ──
+        if (sections.diagnostic.isNotEmpty()) {
+            item {
+                SettingsSection(
+                    header = stringResource(R.string.memory_section_diagnostic),
+                    footer = stringResource(R.string.memory_section_diagnostic_footer),
+                ) {
+                    sections.diagnostic.forEachIndexed { index, entry ->
+                        SettingsValueRow(
+                            title = entry.name,
+                            value = entry.detail,
+                            onClick = { onAutoItemClick(entry) },
+                            showDivider = index < sections.diagnostic.size - 1,
+                        )
+                    }
                 }
             }
         }
@@ -489,7 +572,77 @@ internal data class AutoItem(
      * Null keeps the legacy saveFile(fileName) path.
      */
     val saver: ((String) -> Unit)? = null,
+    /**
+     * [T-memory-sheet-simplify] Which top-level row this belongs to. The sheet
+     * used to render one row per injected file, so "Auto-Injected" listed six
+     * entries (persona, two GLOBAL.md, a snapshot, two daily logs) for what is
+     * conceptually two settings. Grouping keeps every file reachable — the
+     * injection-faithfulness that `0839a2c` established is the whole point of
+     * this sheet — but the primary list reads as 人格 / 规则.
+     */
+    val group: AutoGroup = AutoGroup.DIAGNOSTIC,
+    /**
+     * Short scope tag for members of a group, e.g. "App-wide · read-only".
+     * Used both as the child row's own label and to compose the collapsed
+     * group summary.
+     */
+    val scopeLabel: String = "",
+    /** Line count of [content], for summaries that must not re-split the body. */
+    val lineCount: Int = 0,
 )
+
+/** Top-level grouping of injected sources. Order here is the display order. */
+internal enum class AutoGroup { PERSONA, RULES, DIARY, DIAGNOSTIC }
+
+/**
+ * The sheet's primary list: one persona row, one (expandable) rules row, then
+ * the diary and diagnostic sections that are not settings.
+ */
+internal data class MemorySheetSections(
+    val persona: AutoItem?,
+    val rules: List<AutoItem>,
+    val diary: List<AutoItem>,
+    val diagnostic: List<AutoItem>,
+) {
+    /** True when the primary "Auto-Injected" section has anything to show. */
+    val hasPrimary: Boolean get() = persona != null || rules.isNotEmpty()
+}
+
+/**
+ * Pure regrouping of a flat [AutoItem] list. Extracted so the sheet's
+ * information architecture is assertable without composing UI: the bug this
+ * replaced was structural (six sibling rows), not visual.
+ *
+ * Order within each group is preserved, so the app-wide GLOBAL.md keeps
+ * rendering above the session one — the same order injection concatenates them.
+ */
+internal fun groupAutoItems(items: List<AutoItem>): MemorySheetSections = MemorySheetSections(
+    persona = items.firstOrNull { it.group == AutoGroup.PERSONA },
+    rules = items.filter { it.group == AutoGroup.RULES },
+    diary = items.filter { it.group == AutoGroup.DIARY },
+    diagnostic = items.filter { it.group == AutoGroup.DIAGNOSTIC },
+)
+
+/**
+ * Collapsed summary for the rules row: "App-wide · read-only 12 lines · This
+ * session 3 lines". Deliberately derived from [AutoItem.scopeLabel] and
+ * [AutoItem.lineCount] rather than by re-parsing [AutoItem.detail], so the
+ * summary cannot drift from the children it stands for.
+ */
+internal fun rulesSummary(
+    rules: List<AutoItem>,
+    lineCount: (Int) -> String,
+    empty: String,
+): String {
+    val parts = rules.mapNotNull { item ->
+        val label = item.scopeLabel.ifBlank { item.name }
+        when {
+            item.lineCount <= 0 && item.content.isBlank() -> null // nothing configured: omit
+            else -> "$label ${lineCount(item.lineCount)}"
+        }
+    }
+    return if (parts.isEmpty()) empty else parts.joinToString(" · ")
+}
 
 private fun buildAutoInjectedItems(
     context: Context,
@@ -497,6 +650,13 @@ private fun buildAutoInjectedItems(
     sources: InjectionSources?,
 ): List<AutoItem> {
     val items = mutableListOf<AutoItem>()
+
+    // Blank content reports as 0 lines, not 1: `"".lines().size == 1`, which
+    // would make an unset file look configured in the collapsed summary.
+    fun lineCountOf(body: String): Int = if (body.isBlank()) 0 else body.lines().size
+    fun linesOrEmpty(body: String): String =
+        if (body.isBlank()) context.getString(R.string.memory_rules_none)
+        else context.getString(R.string.memory_line_count, lineCountOf(body))
 
     // Persona: what the injector RESOLVED for this session, including the
     // per-provider selection. Reading a "SOUL.md" out of the memory directory
@@ -511,19 +671,26 @@ private fun buildAutoInjectedItems(
     )
     val scopeLabel = when (resolved.scope) {
         com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_SESSION ->
-            "本会话覆盖（仅本会话生效；保存空内容清除覆盖）"
+            context.getString(R.string.memory_persona_scope_session)
         com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_PROVIDER ->
-            "供应商选择: ${sources?.providerLabel ?: resolved.id}"
-        com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_BUILTIN -> "默认人格"
-        else -> "全局选择"
+            context.getString(R.string.memory_persona_scope_provider, sources?.providerLabel ?: resolved.id)
+        com.openminis.app.agent.ResolvedPersonaPrompt.SCOPE_BUILTIN ->
+            context.getString(R.string.memory_persona_scope_builtin)
+        else -> context.getString(R.string.memory_persona_scope_global)
     }
     val personaSessionId = sources?.sessionId
     items.add(
         AutoItem(
-            name = "人格（本会话实际注入）",
-            detail = "${resolved.fileName.ifBlank { "SOUL.md" }} · $scopeLabel · ${resolved.body.lines().size} lines",
+            name = context.getString(R.string.memory_row_persona),
+            // Scope first, not the filename: "which level won" is the question
+            // this row exists to answer. The resolved filename is still what
+            // the editor loads.
+            detail = "$scopeLabel · ${linesOrEmpty(resolved.body)}",
             fileName = resolved.fileName.ifBlank { "SOUL.md" },
             content = resolved.body,
+            group = AutoGroup.PERSONA,
+            scopeLabel = scopeLabel,
+            lineCount = lineCountOf(resolved.body),
             // Editing here is session-scoped BY DESIGN: it writes the session
             // override (PERSONA.md in this session's memory dir), never the
             // provider-selected or global persona file. Priority is
@@ -550,51 +717,55 @@ private fun buildAutoInjectedItems(
     val sessionRepo = sources?.sessionRepo
     if (appRepo != null) {
         val appGlobal = appRepo.loadGlobalMd()
+        // [T-memory-sheet-i18n] Scope labels come from resources: they were
+        // hardcoded Chinese, which 17 of the 18 shipped locales cannot read.
+        val appScope = context.getString(R.string.memory_rules_scope_app) +
+            " · " + context.getString(R.string.memory_scope_readonly)
         items.add(
             AutoItem(
-                name = "GLOBAL.md（应用级 · 只读）",
-                detail = (if (appGlobal.isBlank()) {
-                    context.getString(R.string.memory_file_empty)
-                } else {
-                    "${appGlobal.lines().size} lines (full)"
-                }) + " · 全会话生效，在 设置→记忆 编辑",
+                name = "GLOBAL.md",
+                detail = "$appScope · ${linesOrEmpty(appGlobal)}",
                 fileName = "GLOBAL.md",
                 content = appGlobal,
                 // Read-only here on purpose: an edit from the session menu must
                 // not change other sessions. The session-level item below is
                 // the editable one.
                 editable = false,
+                group = AutoGroup.RULES,
+                scopeLabel = appScope,
+                lineCount = lineCountOf(appGlobal),
             ),
         )
     }
     if (sessionRepo != null && sessionRepo !== appRepo) {
         val sessionGlobal = sessionRepo.loadGlobalMd()
+        val sessionScope = context.getString(R.string.memory_rules_scope_session) +
+            " · " + context.getString(R.string.memory_scope_editable)
         items.add(
             AutoItem(
-                name = "GLOBAL.md（本会话 · 可编辑）",
-                detail = if (sessionGlobal.isBlank()) {
-                    context.getString(R.string.memory_file_empty)
-                } else {
-                    "${sessionGlobal.lines().size} lines (full)"
-                },
+                name = "GLOBAL.md",
+                detail = "$sessionScope · ${linesOrEmpty(sessionGlobal)}",
                 fileName = "GLOBAL.md",
                 content = sessionGlobal,
                 saver = { text -> sessionRepo.saveGlobalMd(text) },
+                group = AutoGroup.RULES,
+                scopeLabel = sessionScope,
+                lineCount = lineCountOf(sessionGlobal),
             ),
         )
     }
     if (appRepo == null && sessionRepo == null) {
         val globalContent = memoryRepository.loadGlobalMd()
+        val loneScope = context.getString(R.string.memory_rules_scope_app)
         items.add(
             AutoItem(
                 name = "GLOBAL.md",
-                detail = if (globalContent.isBlank()) {
-                    context.getString(R.string.memory_file_empty)
-                } else {
-                    "${globalContent.lines().size} lines (full)"
-                },
+                detail = "$loneScope · ${linesOrEmpty(globalContent)}",
                 fileName = "GLOBAL.md",
                 content = globalContent,
+                group = AutoGroup.RULES,
+                scopeLabel = loneScope,
+                lineCount = lineCountOf(globalContent),
             ),
         )
     }
@@ -602,6 +773,9 @@ private fun buildAutoInjectedItems(
     // Ground truth: the exact system prompt this session last sent, captured
     // at assembly time with secrets masked. This is the item that answers
     // "did the injection take effect" without re-deriving anything.
+    //
+    // [T-memory-sheet-simplify] Diagnostic, not a setting: it moves out of the
+    // primary list into its own section so "Auto-Injected" stays two rows.
     if (sources != null) {
         val snapshotFile = java.io.File(
             com.openminis.app.agent.ContextAssemblySnapshot.dir(context, sources.sessionId),
@@ -609,13 +783,18 @@ private fun buildAutoInjectedItems(
         )
         val snapshot = runCatching { snapshotFile.readText() }.getOrNull()
         if (!snapshot.isNullOrBlank()) {
+            val stamp = snapshotFile.lastModified().let {
+                java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it))
+            }
             items.add(
                 AutoItem(
-                    name = "系统提示词组装快照（实际注入全文）",
-                    detail = "${snapshot.lines().size} lines · ${snapshotFile.lastModified().let { java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.getDefault()).format(java.util.Date(it)) }}",
+                    name = context.getString(R.string.memory_row_snapshot),
+                    detail = context.getString(R.string.memory_line_count, lineCountOf(snapshot)) + " · $stamp",
                     fileName = "context-assembly-latest.md",
                     content = snapshot,
                     editable = false,
+                    group = AutoGroup.DIAGNOSTIC,
+                    lineCount = lineCountOf(snapshot),
                 ),
             )
         }
@@ -632,16 +811,23 @@ private fun buildAutoInjectedItems(
         val label = if (dateStr == today) context.getString(R.string.time_today) else context.getString(R.string.time_yesterday)
         val content = dailyRepo.readFile(fileName)
         if (content.isNotBlank()) {
-            val lineCount = content.lines().size
-            val injected = minOf(lineCount, 200)
-            val detail = if (lineCount > 200) "$injected/$lineCount lines injected" else "$lineCount lines (full)"
+            val lines = content.lines().size
+            val injected = minOf(lines, DIARY_INJECTED_LINE_CAP)
+            val detail = if (lines > DIARY_INJECTED_LINE_CAP) {
+                context.getString(R.string.memory_diary_lines_capped, injected, lines)
+            } else {
+                context.getString(R.string.memory_diary_lines_full, lines)
+            }
             items.add(
                 AutoItem(
-                    name = "$label — $fileName",
+                    name = context.getString(R.string.memory_diary_row, label, fileName),
                     detail = detail,
                     fileName = fileName,
                     content = content,
                     saver = { text -> dailyRepo.saveFile(fileName, text) },
+                    group = AutoGroup.DIARY,
+                    scopeLabel = label,
+                    lineCount = lines,
                 ),
             )
         }
@@ -649,3 +835,10 @@ private fun buildAutoInjectedItems(
 
     return items
 }
+
+/**
+ * Injection reads at most this many lines of a daily log. Kept next to the row
+ * that displays it so the "N/M lines injected" summary cannot disagree with
+ * what the injector actually takes.
+ */
+private const val DIARY_INJECTED_LINE_CAP = 200

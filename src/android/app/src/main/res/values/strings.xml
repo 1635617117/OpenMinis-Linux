@@ -22,6 +22,31 @@
     <string name="session_memory_title">Memories in Session</string>
     <string name="memory_section_auto_injected">Auto-Injected</string>
     <string name="memory_section_auto_injected_footer">Loaded into the system prompt at the start of each Agent turn.</string>
+    <!-- [T-memory-sheet-simplify] The section above used to list six rows
+         (persona, two GLOBAL.md files, a prompt snapshot, two daily logs).
+         Config is now two rows — Persona and Rules — with the two rule sources
+         nested behind Rules, and the logs/snapshot moved to their own sections. -->
+    <string name="memory_row_persona">Persona</string>
+    <string name="memory_row_rules">Rules</string>
+    <string name="memory_rules_scope_app">App-wide</string>
+    <string name="memory_rules_scope_session">This session</string>
+    <string name="memory_scope_readonly">read-only</string>
+    <string name="memory_scope_editable">editable</string>
+    <string name="memory_line_count">%1$d lines</string>
+    <string name="memory_rules_none">Not set</string>
+    <string name="memory_rules_tap_to_expand">Tap to show sources</string>
+    <string name="memory_persona_scope_session">Session override</string>
+    <string name="memory_persona_scope_provider">Provider: %1$s</string>
+    <string name="memory_persona_scope_builtin">Built-in default</string>
+    <string name="memory_persona_scope_global">Global selection</string>
+    <string name="memory_section_diary">Memory Diary</string>
+    <string name="memory_section_diary_footer">Daily logs in this session\'s memory folder. The two most recent are injected.</string>
+    <string name="memory_section_diagnostic">Diagnostics</string>
+    <string name="memory_section_diagnostic_footer">The exact system prompt this session last sent, with secrets masked.</string>
+    <string name="memory_row_snapshot">System prompt snapshot</string>
+    <string name="memory_diary_row">%1$s — %2$s</string>
+    <string name="memory_diary_lines_full">%1$d lines (full)</string>
+    <string name="memory_diary_lines_capped">%1$d of %2$d lines injected</string>
     <string name="memory_section_tool_activity">Tool Activity</string>
     <string name="memory_section_tool_activity_footer">Memory reads and writes performed by the Agent during this session.</string>
     <string name="memory_section_written_content">Written Content</string>
