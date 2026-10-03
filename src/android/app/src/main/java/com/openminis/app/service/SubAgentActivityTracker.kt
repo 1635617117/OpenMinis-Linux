@@ -11,10 +11,13 @@ import java.util.UUID
  * UI shows 子代理 i/N plus turn and the in-flight tool.
  *
  * A member exists only for as long as it is RUNNING: [finish] removes the
- * entry outright. There is deliberately no terminal state — the transcript
- * that mattered is already on the tool result and folded into the process
- * summary before the entry goes away, so a sticky SUCCESS/FAILED chip carried
- * no information and read as "still going".
+ * entry outright. There is deliberately no terminal state in the BAR — a
+ * sticky SUCCESS/FAILED chip carried no information and read as "still
+ * going". The completed run is NOT invisible, though: the session page hides
+ * a sub-agent transcript card only while its `parentToolId` is in this roster,
+ * so once [finish] drops the member the card reappears in the timeline and the
+ * user can see what finished. See ChatFlatItems.buildFlatItems'
+ * `activeSubAgentToolIds`.
  */
 object SubAgentActivityTracker {
 

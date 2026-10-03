@@ -1901,6 +1901,13 @@ fun ChatScreen(
     var showCompletedToolCards by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_COMPLETED_TOOL_CARDS, false)) }
     var foldAiProcess by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_FOLD_AI_PROCESS, false)) }
     var showSubAgentBar by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_SUBAGENT_BAR, true)) }
+    // Live roster of running sub-agents. The top bar renders these; the session
+    // page hides a sub-agent transcript card only while its run is in this set,
+    // so a finished run stays visible as a card instead of vanishing.
+    val subAgentMembers by com.openminis.app.service.SubAgentActivityTracker.members.collectAsState()
+    val activeSubAgentToolIds = remember(subAgentMembers) {
+        subAgentMembers.mapTo(mutableSetOf()) { it.parentToolId }
+    }
     // T-chat-title-pill: live-toggled by Settings → Appearance and by
     // `minis-config set appearance.show_chat_title …`. Default ON.
     var showChatTitlePill by remember { mutableStateOf(appearancePrefs.getBoolean(com.openminis.app.ui.settings.KEY_SHOW_CHAT_TITLE, true)) }
@@ -3295,7 +3302,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
-                                        hideSubAgentCards = showSubAgentBar,
+                                        activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
                                     )
                                 }
                                 val buildMs = (System.nanoTime() - tBuildStart) / 1_000_000
@@ -3382,7 +3389,7 @@ fun ChatScreen(
                                         showCompletedToolCards = showCompletedToolCards,
                                         foldAiProcess = foldAiProcess,
                                         expandedProcessIds = expandedProcessIds,
-                                        hideSubAgentCards = showSubAgentBar,
+                                        activeSubAgentToolIds = if (showSubAgentBar) activeSubAgentToolIds else emptySet(),
                                     )
                                 }
                             }
@@ -4369,7 +4376,11 @@ fun ChatScreen(
                         val latestReply = merged.lastOrNull { it.role == "assistant" }
                         val overlay = latestReply?.toolBlocks.orEmpty()
                             .filter { isFloatingProcessTool(it, foldAiProcess) }
-                            .filterNot { showSubAgentBar && isSubAgentTranscriptCard(it) }
+                            .filterNot {
+                                showSubAgentBar && isSubAgentTranscriptCard(it) &&
+                                    (it.id in activeSubAgentToolIds ||
+                                        it.id.substringBefore("#sub-") in activeSubAgentToolIds)
+                            }
                         all to overlay
                     }.collect { (all, overlay) ->
                         detailToolBlocks = all

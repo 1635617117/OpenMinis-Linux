@@ -360,7 +360,7 @@ internal fun buildFlatChatItems(
     showCompletedToolCards: Boolean = true,
     foldAiProcess: Boolean = false,
     expandedProcessIds: Set<String> = emptySet(),
-    hideSubAgentCards: Boolean = false,
+    activeSubAgentToolIds: Set<String> = emptySet(),
 ): List<FlatChatItem> {
     val out = mutableListOf<FlatChatItem>()
     val usedKeys = if (seedKeys.isEmpty()) mutableSetOf() else seedKeys.toMutableSet()
@@ -381,14 +381,25 @@ internal fun buildFlatChatItems(
         // shows the current thinking block or tool card.
         val hideSpeakerTools = !rawMessage.speakerName.isNullOrBlank() &&
             !rawMessage.isStreaming && !rawMessage.isAwaitingModelResponse
+        // A sub-agent transcript card is hidden only while its run is still
+        // live in the top bar — the bar and the card would otherwise show the
+        // same run twice. Once the run finishes the bar drops it, so the card
+        // must come back here: with the old "hide whenever the bar is on"
+        // rule a completed sub-agent left no trace anywhere on the session
+        // page and the user could not tell it had finished at all.
+        fun hiddenSubAgent(block: AssistantBlock): Boolean =
+            activeSubAgentToolIds.isNotEmpty() &&
+                isSubAgentTranscriptCard(block) &&
+                (block.id in activeSubAgentToolIds ||
+                    block.id.substringBefore("#sub-") in activeSubAgentToolIds)
         val message = if (
-            (!hideSubAgentCards || rawMessage.toolBlocks.none(::isSubAgentTranscriptCard)) &&
+            rawMessage.toolBlocks.none(::hiddenSubAgent) &&
             !hideSpeakerTools
         ) {
             rawMessage
         } else {
             rawMessage.copy(toolBlocks = rawMessage.toolBlocks.filterNot { block ->
-                (hideSubAgentCards && isSubAgentTranscriptCard(block)) ||
+                hiddenSubAgent(block) ||
                     (hideSpeakerTools && block.kind == "tool_use")
             })
         }
