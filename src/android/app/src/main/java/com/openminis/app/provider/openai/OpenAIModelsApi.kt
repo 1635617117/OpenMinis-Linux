@@ -1,6 +1,7 @@
 package com.openminis.app.provider.openai
 
 import com.openminis.app.provider.ModelListFetchIsolation
+import com.openminis.app.provider.ModelListFetchRetry
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.normalizeModalities
@@ -111,7 +112,10 @@ object OpenAIModelsApi {
             .let { ModelListFetchIsolation.run { it.noStoreIf(forceRefresh) } }
             .build()
 
-        val response = client.newCall(request).execute()
+        // [T-models-fetch-transient-auth] one 401 sample used to empty the list
+        // and drop the cache; a relay in a bad channel window answers 401 for a
+        // key that works minutes later.
+        val response = ModelListFetchRetry.execute(client, request, "OpenAIModels")
         val body = response.body?.string() ?: return@withContext fallback
 
         if (!response.isSuccessful) {

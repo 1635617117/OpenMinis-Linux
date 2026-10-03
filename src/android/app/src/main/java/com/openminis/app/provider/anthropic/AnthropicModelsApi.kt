@@ -1,6 +1,7 @@
 package com.openminis.app.provider.anthropic
 
 import com.openminis.app.provider.ModelListFetchIsolation
+import com.openminis.app.provider.ModelListFetchRetry
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
@@ -96,8 +97,18 @@ object AnthropicModelsApi {
             val request = ModelListFetchIsolation.run { requestBuilder.noStoreIf(forceRefresh) }.build()
             android.util.Log.d("AnthropicModels", "Fetching models (level=$idx): ${request.url} isOAuth=$isOAuth headers=${request.headers}")
 
+            // [T-models-fetch-transient-auth] Split the retry budget across the
+            // candidate bases instead of giving each one a full budget: this
+            // loop already retries by climbing parent paths, so worst-case wall
+            // time for one refresh stays ~TOTAL_BUDGET_MILLIS however many
+            // bases are tried.
             val response: Response = try {
-                client.newCall(request).execute()
+                ModelListFetchRetry.execute(
+                    client,
+                    request,
+                    "AnthropicModels",
+                    totalBudgetMillis = ModelListFetchRetry.TOTAL_BUDGET_MILLIS / candidateBases.size,
+                )
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")
                 continue

@@ -1,6 +1,7 @@
 package com.openminis.app.provider.gemini
 
 import com.openminis.app.provider.ModelListFetchIsolation
+import com.openminis.app.provider.ModelListFetchRetry
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
@@ -58,7 +59,9 @@ object GeminiModelsApi {
 
         // [T-android-default-ua] brand outbound /v1beta/models request.
         builder.applyUserAgentOverride(null)
-        val response = client.newCall(ModelListFetchIsolation.run { builder.noStoreIf(forceRefresh) }.build()).execute()
+        val geminiRequest = ModelListFetchIsolation.run { builder.noStoreIf(forceRefresh) }.build()
+        // [T-models-fetch-transient-auth] Bounded retry; see ModelListFetchRetry.
+        val response = ModelListFetchRetry.execute(client, geminiRequest, "GeminiModels")
         val body = response.body?.string() ?: return@withContext LLMModel.allGemini
 
         if (!response.isSuccessful) {

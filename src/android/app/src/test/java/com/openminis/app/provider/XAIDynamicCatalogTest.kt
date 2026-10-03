@@ -102,7 +102,14 @@ class XAIDynamicCatalogTest {
 
     @Test
     fun httpFailureFallsBackToTheBuiltInCatalog() {
-        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"nope"}"""))
+        // [T-models-fetch-transient-auth] A single 401 is no longer final: the
+        // catalog GET retries an auth challenge once, because gateways that pool
+        // upstream channel keys answer 401 for a fault that is theirs, not the
+        // caller's. Enqueue enough rejections to exhaust the retry budget so
+        // this still tests "the credential is definitively refused".
+        repeat(ModelListFetchRetry.MAX_ATTEMPTS) {
+            server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"nope"}"""))
+        }
 
         val models = resolve(baseUrl())
 
@@ -117,6 +124,29 @@ class XAIDynamicCatalogTest {
             "fallback must not contain OpenAI models",
             models.none { it.id.startsWith("gpt-") },
         )
+    }
+
+    @Test
+    fun aTransientAuthFailureDoesNotDemoteTheLiveCatalog() {
+        // The other half of the same contract: one 401 followed by a good
+        // answer must yield the LIVE catalog, not the built-in fallback. Before
+        // the retry existed this silently degraded a working provider to its
+        // hand-authored seed list — for xAI that means a model released after
+        // this build stays invisible, which is the bug GH#265 was about.
+        server.enqueue(MockResponse().setResponseCode(401).setBody("""{"error":"nope"}"""))
+        server.enqueue(
+            MockResponse().setResponseCode(200).setBody(
+                """{"object":"list","data":[{"id":"grok-9.9-unreleased","object":"model"}]}""",
+            ),
+        )
+
+        val models = resolve(baseUrl())
+
+        assertTrue(
+            "a recovered fetch must surface the live catalog, got ${models.map { it.id }}",
+            models.any { it.id == "grok-9.9-unreleased" },
+        )
+        assertEquals("one retry, no more", 2, server.requestCount)
     }
 
     @Test
