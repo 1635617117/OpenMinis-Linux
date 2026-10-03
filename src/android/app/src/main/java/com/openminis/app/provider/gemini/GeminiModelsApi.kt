@@ -51,10 +51,12 @@ object GeminiModelsApi {
 
         val builder = Request.Builder()
         if (isOAuth) {
-            builder.url(ModelListFetchIsolation.bustUrl("https://generativelanguage.googleapis.com/v1beta/models", forceRefresh, cacheScope))
+            builder.url("https://generativelanguage.googleapis.com/v1beta/models")
             builder.header("Authorization", "Bearer $apiKey")
         } else {
-            builder.url(ModelListFetchIsolation.bustUrl("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey", forceRefresh, cacheScope))
+            // The ?key= query is the Gemini API's own credential parameter and
+            // stays; only the cache-buster is gone (see ModelListFetchIsolation).
+            builder.url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
         }
 
         // [T-android-default-ua] brand outbound /v1beta/models request.

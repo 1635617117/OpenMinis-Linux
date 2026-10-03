@@ -43,7 +43,7 @@ object OpenRouterModelsApi {
 
         val request = ModelListFetchIsolation.run {
             Request.Builder()
-                .url(bustUrl("https://openrouter.ai/api/v1/models", forceRefresh, cacheScope))
+                .url("https://openrouter.ai/api/v1/models")
                 .header("Authorization", "Bearer $apiKey")
                 .header("HTTP-Referer", "https://github.com/OpenMinis/OpenMinis")
                 .header("X-Title", "Minis App")

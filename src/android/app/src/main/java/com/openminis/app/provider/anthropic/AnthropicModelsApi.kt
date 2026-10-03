@@ -75,7 +75,7 @@ object AnthropicModelsApi {
             // overridden and services without /v1 return 404. idx > 0 are climbed parent
             // paths used purely for host-root discovery (e.g. deepseek.com/anthropic ->
             // host root /v1/models); those keep the /v1 auto-append.
-            val url = ModelListFetchIsolation.bustUrl(buildURL(candidate, forceV1Discovery = idx > 0), forceRefresh, cacheScope)
+            val url = buildURL(candidate, forceV1Discovery = idx > 0)
             val requestBuilder = Request.Builder()
                 .url(url)
                 .header("anthropic-version", "2023-06-01")

@@ -103,7 +103,7 @@ object OpenAIModelsApi {
             cache.load(context, cacheKey)?.let { return@withContext it }
         }
 
-        val url = ModelListFetchIsolation.bustUrl(buildURL(baseURL), forceRefresh, cacheScope)
+        val url = buildURL(baseURL)
         val request = Request.Builder()
             .url(url)
             .header("Authorization", "Bearer $apiKey")

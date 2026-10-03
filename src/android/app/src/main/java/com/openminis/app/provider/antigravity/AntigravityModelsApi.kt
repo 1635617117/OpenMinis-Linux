@@ -55,7 +55,7 @@ object AntigravityModelsApi {
 
         val request = ModelListFetchIsolation.run {
             Request.Builder()
-            .url(bustUrl("${baseURL.trimEnd('/')}/v1internal:fetchAvailableModels", forceRefresh, cacheScope))
+            .url("${baseURL.trimEnd('/')}/v1internal:fetchAvailableModels")
             .post("{}".toRequestBody("application/json".toMediaType()))
             .header("Authorization", "Bearer $accessToken")
             .header("User-Agent", USER_AGENT)
