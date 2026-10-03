@@ -20,6 +20,14 @@ data class UsageRecord(
     /** `ProviderType` rawValue captured at write time. Non-null only when [hasSnapshot]. */
     val providerType: String?,
     /**
+     * The instance the turn actually billed against, captured at write time.
+     * Nullable for rows written before the column existed and for orphan rows.
+     * This is what makes two provider instances serving the same model id
+     * distinguishable on the Usage page: [modelId] alone cannot tell them
+     * apart, because model ids repeat across relays and accounts.
+     */
+    val providerInstanceId: String?,
+    /**
      * True when this row carries a per-message snapshot (accurate). False for
      * rows written before the snapshot columns existed, whose model is a
      * best-effort guess from the session's CURRENT model — the UI must label

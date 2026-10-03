@@ -476,6 +476,7 @@ interface ChatDao {
         SELECT COALESCE(m.model_id, s.model_id) AS modelId,
                m.model_display_name  AS modelDisplayName,
                m.provider_type       AS providerType,
+               m.provider_instance_id AS providerInstanceId,
                (m.model_id IS NOT NULL) AS hasSnapshot,
                m.token_usage AS tokenUsage, m.created_at AS createdAt, m.session_id AS sessionId
         FROM messages m LEFT JOIN sessions s ON m.session_id = s.id

@@ -1,6 +1,7 @@
 package com.openminis.app.ui.settings
 
 import com.openminis.app.R
+import com.openminis.app.data.db.UsageRecord
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -67,11 +68,13 @@ internal enum class Attribution {
     MEASURED_REMOVED,
 }
 
-private data class ModelStats(
+internal data class ModelStats(
     val modelId: String,
-    val displayName: String,
+    var displayName: String,
     val provider: String,
     val attribution: Attribution,
+    val instanceId: String? = null,
+    val instanceLabel: String? = null,
     var inputTokens: Long = 0,
     var outputTokens: Long = 0,
     var cacheCreationTokens: Long = 0,
@@ -82,9 +85,9 @@ private data class ModelStats(
     val totalInput: Long get() = inputTokens + cacheReadTokens + cacheCreationTokens
 }
 
-private data class ProviderGroup(val name: String, val models: List<ModelStats>)
+internal data class ProviderGroup(val name: String, val models: List<ModelStats>)
 
-private data class GrandTotal(
+internal data class GrandTotal(
     val totalInput: Long = 0,
     val outputTokens: Long = 0,
     val cacheReadTokens: Long = 0,
@@ -117,6 +120,116 @@ private const val UNKNOWN_PROVIDER = "Unknown"
  */
 internal fun providerDisplayName(rawValue: String): String =
     runCatching { ProviderType.valueOf(rawValue).displayName }.getOrDefault(rawValue)
+
+internal data class UsageAggregation(
+    val groups: List<ProviderGroup>,
+    val grandTotal: GrandTotal,
+)
+
+/**
+ * Aggregate raw usage rows into per-model buckets and provider groups.
+ *
+ * Pure so the bucketing rules are testable. The bucket key is
+ * (provider instance, model id, attribution state) — NOT the model id alone.
+ * Two provider instances can serve the same model id under the same display
+ * name (two relays, or official plus relay), and keying on the model id merged
+ * their billed tokens into one row: the Usage page then showed one entry whose
+ * numbers silently summed two different accounts. Rows without an instance
+ * snapshot (written before the column existed) fall back to the provider
+ * type, so they still never merge across providers.
+ */
+internal fun aggregateUsageRecords(
+    records: List<UsageRecord>,
+    modelLookup: Map<String, Pair<String, String>>,
+    instanceLabels: Map<String, String>,
+): UsageAggregation {
+    val statsMap = mutableMapOf<String, ModelStats>()
+    for (record in records) {
+        val usage = try { JSONObject(record.tokenUsage) } catch (_: Exception) { continue }
+        val input = usage.optLong("inputTokens", 0)
+        val output = usage.optLong("outputTokens", 0)
+        val cacheCr = usage.optLong("cacheCreationTokens", usage.optLong("cacheCreationInputTokens", 0))
+        val cacheRd = usage.optLong("cacheReadTokens", usage.optLong("cacheReadInputTokens", 0))
+
+        // [T-android-usage-orphan-rows] GH#168: modelId is null for a
+        // message whose session row is gone (LEFT JOIN). Those tokens were
+        // still billed, so they are counted under a single "unknown" bucket
+        // instead of being dropped.
+        val modelKey = record.modelId ?: UNKNOWN_MODEL_KEY
+        val resolved = modelLookup[modelKey]
+
+        // [T-token-attribution-snapshot] Four distinct states — see
+        // [Attribution]. Bucket key includes the state so an estimated row
+        // never merges into a measured one and quietly inherits its
+        // credibility.
+        val attribution = classifyAttribution(
+            modelId = record.modelId,
+            hasSnapshot = record.hasSnapshot,
+            resolvesInConfig = resolved != null,
+        )
+
+        // Prefer the snapshot's own strings: for a removed provider they
+        // are the ONLY remaining source of a human-readable name.
+        val displayName = record.modelDisplayName?.takeIf { it.isNotBlank() }
+            ?: resolved?.first
+            ?: modelKey
+        val provider = record.providerType?.takeIf { it.isNotBlank() }
+            ?.let { raw -> providerDisplayName(raw) }
+            ?: resolved?.second
+            ?: UNKNOWN_PROVIDER
+        val instanceId = record.providerInstanceId?.takeIf { it.isNotBlank() }
+        val instanceKey = instanceId ?: provider
+
+        val stats = statsMap.getOrPut("$instanceKey|$modelKey#${attribution.name}") {
+            ModelStats(
+                modelId = modelKey,
+                displayName = displayName,
+                provider = provider,
+                attribution = attribution,
+                instanceId = instanceId,
+                instanceLabel = instanceId?.let { instanceLabels[it] },
+            )
+        }
+        stats.inputTokens += input
+        stats.outputTokens += output
+        stats.cacheCreationTokens += cacheCr
+        stats.cacheReadTokens += cacheRd
+        stats.distinctDays.add(IsoTime.formatLocalDate(record.createdAt))
+        stats.distinctSessions.add(record.sessionId)
+    }
+
+    // The same display name in more than one bucket means the name alone
+    // cannot tell the rows apart; suffix the instance label (or the provider
+    // when the instance is gone) so the page never shows two identical rows
+    // holding different numbers.
+    val nameCounts = statsMap.values.groupingBy { it.displayName }.eachCount()
+    for (stats in statsMap.values) {
+        if ((nameCounts[stats.displayName] ?: 0) > 1) {
+            val suffix = stats.instanceLabel ?: stats.provider
+            stats.displayName = "${stats.displayName} · $suffix"
+        }
+    }
+
+    val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
+    val grouped = statsMap.values.groupBy { it.provider }
+    val sortedGroups = grouped.entries.sortedBy { (name, _) ->
+        val idx = providerOrder.indexOf(name)
+        if (idx >= 0) idx else providerOrder.size
+    }.map { (name, models) ->
+        ProviderGroup(name, models.sortedByDescending { it.totalInput })
+    }
+
+    val allStats = statsMap.values
+    return UsageAggregation(
+        groups = sortedGroups,
+        grandTotal = GrandTotal(
+            totalInput = allStats.sumOf { it.totalInput },
+            outputTokens = allStats.sumOf { it.outputTokens },
+            cacheReadTokens = allStats.sumOf { it.cacheReadTokens },
+            cacheCreationTokens = allStats.sumOf { it.cacheCreationTokens },
+        ),
+    )
+}
 
 /**
  * [T-token-attribution-snapshot] Decide how trustworthy a usage row's model
@@ -157,7 +270,9 @@ fun UsageStatsScreen(
 
         val modelLookup = mutableMapOf<String, Pair<String, String>>()
         for (m in LLMModel.allModels) modelLookup[m.id] = m.displayName to m.provider
+        val instanceLabels = mutableMapOf<String, String>()
         providerConfig?.let { config ->
+            for (instance in config.instances) instanceLabels[instance.id] = instance.label
             for (entry in config.modelEntries) {
                 if (entry.model.id !in modelLookup) {
                     val instance = config.instances.find { it.id == entry.providerInstanceId }
@@ -167,71 +282,9 @@ fun UsageStatsScreen(
             }
         }
 
-        val statsMap = mutableMapOf<String, ModelStats>()
-        for (record in records) {
-            val usage = try { JSONObject(record.tokenUsage) } catch (_: Exception) { continue }
-            val input = usage.optLong("inputTokens", 0)
-            val output = usage.optLong("outputTokens", 0)
-            val cacheCr = usage.optLong("cacheCreationTokens", usage.optLong("cacheCreationInputTokens", 0))
-            val cacheRd = usage.optLong("cacheReadTokens", usage.optLong("cacheReadInputTokens", 0))
-
-            // [T-android-usage-orphan-rows] GH#168: modelId is null for a
-            // message whose session row is gone (LEFT JOIN). Those tokens were
-            // still billed, so they are counted under a single "unknown" bucket
-            // instead of being dropped — matching iOS, where an unresolvable id
-            // falls back to the raw id and the "Other" provider group.
-            val modelKey = record.modelId ?: UNKNOWN_MODEL_KEY
-            val resolved = modelLookup[modelKey]
-
-            // [T-token-attribution-snapshot] Four distinct states — see
-            // [Attribution]. Bucket key includes the state so an estimated row
-            // never merges into a measured one and quietly inherits its
-            // credibility.
-            val attribution = classifyAttribution(
-                modelId = record.modelId,
-                hasSnapshot = record.hasSnapshot,
-                resolvesInConfig = resolved != null,
-            )
-
-            // Prefer the snapshot's own strings: for a removed provider they
-            // are the ONLY remaining source of a human-readable name.
-            val displayName = record.modelDisplayName?.takeIf { it.isNotBlank() }
-                ?: resolved?.first
-                ?: modelKey
-            val provider = record.providerType?.takeIf { it.isNotBlank() }
-                ?.let { raw -> providerDisplayName(raw) }
-                ?: resolved?.second
-                ?: UNKNOWN_PROVIDER
-
-            val stats = statsMap.getOrPut("$modelKey#${attribution.name}") {
-                ModelStats(modelKey, displayName, provider, attribution)
-            }
-            stats.inputTokens += input
-            stats.outputTokens += output
-            stats.cacheCreationTokens += cacheCr
-            stats.cacheReadTokens += cacheRd
-            stats.distinctDays.add(IsoTime.formatLocalDate(record.createdAt))
-            stats.distinctSessions.add(record.sessionId)
-        }
-
-        val providerOrder = listOf("OpenAI", "Anthropic", "Google Gemini", "Google", "Antigravity", "Unknown")
-        val grouped = statsMap.values.groupBy { it.provider }
-        val sortedGroups = grouped.entries.sortedBy { (name, _) ->
-            val idx = providerOrder.indexOf(name)
-            if (idx >= 0) idx else providerOrder.size
-        }.map { (name, models) ->
-            ProviderGroup(name, models.sortedByDescending { it.totalInput })
-        }
-
-        val allStats = statsMap.values
-        grandTotal = GrandTotal(
-            totalInput = allStats.sumOf { it.totalInput },
-            outputTokens = allStats.sumOf { it.outputTokens },
-            cacheReadTokens = allStats.sumOf { it.cacheReadTokens },
-            cacheCreationTokens = allStats.sumOf { it.cacheCreationTokens },
-        )
-
-        providerGroups = sortedGroups
+        val summary = aggregateUsageRecords(records, modelLookup, instanceLabels)
+        grandTotal = summary.grandTotal
+        providerGroups = summary.groups
         isLoaded = true
     }
 
