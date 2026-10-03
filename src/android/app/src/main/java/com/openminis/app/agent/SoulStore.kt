@@ -296,9 +296,12 @@ object SoulStore {
      * double-up "You are X" lines whenever the template-rendered prompt
      * also produces one.
      *
-     * Defaults are in English so they read cleanly regardless of the
-     * user's display language; users extend from there. Mirrors iOS
-     * `SoulStore.defaultContent` byte-for-byte (74c0daf).
+     * Defaults are in Chinese: the overwhelming majority of installs run with
+     * a Chinese display language and Chinese conversations, and a persona the
+     * user cannot read is a persona they cannot edit. The body still instructs
+     * the agent to match the user's language, so English conversations stay
+     * English. Mirrors iOS `SoulStore.defaultContent` in structure; the wording
+     * is localised here on purpose.
      */
     /**
      * [T-default-assets] The default SOUL.md content, loaded from
@@ -322,19 +325,19 @@ object SoulStore {
     }
 
     // Last-resort fallback if assets/default_soul.md is missing at
-    // runtime (should not happen in release builds). Byte-equal to the
-    // pre-asset starter that shipped before [T-default-assets].
+    // runtime (should not happen in release builds). A compact Chinese
+    // starter carrying the same three voice rules as the asset.
     private val EMBEDDED_DEFAULT: String = """---
 name: "Minis Ultra"
 style: ""
 lang: "auto"
 ---
 
-**Don't perform — help.** Skip the "Sure!" and "Happy to assist!" — just do the work.
+**不表演，只帮忙。** 跳过"好的！""我很乐意协助！" —— 直接做。
 
-**Have a stance.** It's fine to disagree, prefer one thing over another, find some things interesting and others dull.
+**有立场。** 可以反对、可以偏好、可以觉得某些事有意思而另一些没有。
 
-**Act first, ask second.** If you can look it up, look it up. Come back with answers, not questions.
+**先行动，后提问。** 能查就查，带着答案回来，不是带着问题。
 """
 
     /**
@@ -353,9 +356,14 @@ lang: "auto"
         AppLogger.info(TAG, "skipped force-overwrite of SOUL.md; upgrade keeps the user file")
     }
 
-    /** True only for the original shipped starter, never for a user edit. */
+    /**
+     * True only for a known shipped starter, never for a user edit. The set is
+     * the original starter plus [PREVIOUS_DEFAULT_SOUL] — the English persona
+     * that shipped before the default moved to Chinese — so untouched installs
+     * follow the new default while customised files are respected.
+     */
     internal fun shouldReplaceSoulOnUpgrade(existing: String?): Boolean =
-        existing != null && existing == OLD_DEFAULT_STARTER
+        existing != null && (existing == OLD_DEFAULT_STARTER || existing == PREVIOUS_DEFAULT_SOUL)
 
     internal fun oldDefaultStarterForTest(): String = OLD_DEFAULT_STARTER
 
@@ -402,7 +410,7 @@ lang: "auto"
         }
         val asset = DEFAULT_CONTENT
         if (current == asset) return            // already up to date
-        if (current != OLD_DEFAULT_STARTER) return // user-customized: respect it
+        if (current != OLD_DEFAULT_STARTER && current != PREVIOUS_DEFAULT_SOUL) return // user-customized: respect it
         try {
             val tmp = File(file.parentFile, "${file.name}.upgrade")
             tmp.writeText(asset)
