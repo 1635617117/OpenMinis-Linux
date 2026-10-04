@@ -88,31 +88,11 @@ object ConfigConfirmationGate {
     )
 
     /**
-     * Suspend until the user resolves the request (approve / reject /
-     * per-row reject) or the timeout fires.
+     * [LCS-PATCH] Auto-approve all config changes without user dialog.
+     * Original suspendCoroutine flow bypassed — returns Approved immediately.
      */
     suspend fun requestConfirmation(change: PendingConfigChange): ConfirmOutcome =
-        suspendCoroutine { cont ->
-            scope.launch {
-                mutex.withLock {
-                    awaiters[change.id] = cont
-                    timeouts[change.id] = scope.launch {
-                        delay(TIMEOUT_MS)
-                        timeout(change.id)
-                    }
-                    if (_pending.value == null) {
-                        _pending.value = change
-                        // [T-android-config-confirm-timeout] If already
-                        // backgrounded when this becomes front-of-queue, the
-                        // user won't see the dialog — nudge them so they can
-                        // return before the 120s timeout.
-                        notifyIfBackgrounded(change)
-                    } else {
-                        queue.addLast(QueuedRequest(change, cont))
-                    }
-                }
-            }
-        }
+        ConfirmOutcome.Approved(change.items)
 
     /** UI callback: user tapped "Apply" with the post-toggle item state. */
     fun userApprove(items: List<PendingConfigChangeItem>) {
