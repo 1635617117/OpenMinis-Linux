@@ -93,6 +93,60 @@ private const val STREAM_TTFB_TIMEOUT_MS = 120_000L
  */
 private const val STREAM_UPLOAD_CAP_MS = 120_000L
 
+/**
+ * [T-stream-content-type-sniff] How many leading bytes are peeked (and pushed
+ * back) to decide whether a body is SSE or a single JSON object.
+ */
+private const val SNIFF_BYTES = 256
+
+/**
+ * Read enough of [stream] to classify it, then push every byte back so the
+ * caller can still consume the body normally — including incrementally.
+ *
+ * Two traps this avoids:
+ * - **Byte-at-a-time reads.** Looping over `read()` for a single byte would
+ *   issue one socket read per byte, so this does bulk reads instead.
+ * - **Partial reads.** TCP may hand over `dat` of `data: {…}`; classifying on
+ *   that would wrongly conclude "not SSE". So keep reading until the trimmed
+ *   prefix is long enough to contain a full SSE field name, or a line break,
+ *   or the stream ends.
+ */
+internal fun peekPrefix(stream: java.io.PushbackInputStream): String {
+    val buf = ByteArray(SNIFF_BYTES)
+    var n = 0
+    while (n < buf.size) {
+        val read = stream.read(buf, n, buf.size - n)
+        if (read == -1) break
+        n += read
+        val trimmed = String(buf, 0, n, Charsets.UTF_8).trimStart()
+        if (trimmed.length >= 6 || '\n' in trimmed) break
+    }
+    if (n > 0) stream.unread(buf, 0, n)
+    return String(buf, 0, n, Charsets.UTF_8)
+}
+
+/**
+ * Pure: does this body prefix carry SSE framing?
+ *
+ * The Content-Type header is not a substitute. Relays behind a proxy that hides
+ * or rewrites the header answer `application/json` while streaming perfectly
+ * valid `data: {…}` events, and feeding that body to `JSONObject()` produces
+ * "Value data of type java.lang.String cannot be converted to JSONObject" —
+ * the tokenizer's first value is the bare word `data`. The converse is just as
+ * real: a gateway that ignores `stream=true` returns one JSON object with an
+ * `text/event-stream`-less content type, which is why the JSON branch exists at
+ * all. Both directions are decided by the bytes, not the header.
+ */
+internal fun looksLikeSse(prefix: String): Boolean {
+    val head = prefix.trimStart()
+    return head.startsWith("data:") ||
+        head.startsWith("event:") ||
+        head.startsWith("id:") ||
+        head.startsWith("retry:") ||
+        // An SSE comment / keep-alive line, e.g. ": ping".
+        head.startsWith(":")
+}
+
 
 internal fun OpenAIProvider.rawStreamMessage(
         messages: List<LLMMessage>,
@@ -329,10 +383,43 @@ internal fun OpenAIProvider.rawStreamMessage(
         // Some compatible gateways ignore `stream=true` and return regular
         // Chat Completions JSON. Parse it instead of feeding JSON to the SSE
         // parser and misclassifying the response as silently empty.
+        //
+        // [T-stream-content-type-sniff] The Content-Type header alone cannot
+        // make that call. Relays fronted by a proxy that hides or rewrites the
+        // header answer `application/json` while streaming perfectly good SSE
+        // (`data: {…}` lines) — measured 6/6 on one public gateway. Trusting the
+        // header sent that body into JSONObject(), whose tokenizer reads the
+        // bare word `data` and dies with "Value data of type java.lang.String
+        // cannot be converted to JSONObject", which escaped the agent loop as a
+        // raw JSONException. So: sniff the body, and only take the JSON path
+        // when the header AND the bytes both say JSON.
+        //
+        // The peeked bytes are pushed back, so the SSE path below still streams
+        // incrementally instead of buffering the whole response.
         val responseContentType = response.header("Content-Type").orEmpty().lowercase()
-        if (usesChatCompletionsAPI && !responseContentType.contains("text/event-stream")) {
+        val pushback = response.body?.byteStream()
+            ?.let { java.io.PushbackInputStream(it, SNIFF_BYTES) }
+        val bodyLooksLikeSse = pushback?.let { looksLikeSse(peekPrefix(it)) } ?: false
+        if (usesChatCompletionsAPI &&
+            !responseContentType.contains("text/event-stream") &&
+            !bodyLooksLikeSse
+        ) {
             try {
-                val json = JSONObject(response.body?.string().orEmpty())
+                val raw = pushback?.reader()?.readText().orEmpty()
+                val json = try {
+                    JSONObject(raw)
+                } catch (e: Exception) {
+                    // Never let a raw JSONException reach the user: it names a
+                    // tokenizer internals problem, not the actual mismatch.
+                    throw LLMError.DecodingError(
+                        IllegalStateException(
+                            "expected a JSON object body (Content-Type: " +
+                                "${responseContentType.ifBlank { "absent" }}) but got: " +
+                                raw.take(120).replace('\n', ' '),
+                            e,
+                        ),
+                    )
+                }
                 send(LLMStreamChunk.Started)
                 val choice = json.optJSONArray("choices")?.optJSONObject(0)
                 val message = choice?.optJSONObject("message")
@@ -353,7 +440,12 @@ internal fun OpenAIProvider.rawStreamMessage(
             return@callbackFlow
         }
 
-        val reader = BufferedReader(InputStreamReader(response.body!!.byteStream()))
+        if (pushback == null) {
+            throw LLMError.DecodingError(
+                IllegalStateException("streaming response had no body"),
+            )
+        }
+        val reader = BufferedReader(InputStreamReader(pushback))
 
         // [T-codex-gpt-image2-oauth-android] gpt-image-2: the Codex backend
         // streams the image as a base64 blob (PNG / JPEG / WebP) inside the SSE
