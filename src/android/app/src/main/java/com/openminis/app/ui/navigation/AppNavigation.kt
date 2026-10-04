@@ -359,10 +359,25 @@ fun AppNavigation(
             com.openminis.app.diagnostics.RouteFuse.blocksAnyUnhealthy(context)
         ) 3 else rawMode
         val autoThresholdMs = 15L * 60 * 1000
+        // [T-android-startup-splash-hang] The workspace-owner warmup no longer
+        // blocks Application.onCreate, so the ordering guarantee it used to
+        // provide ("populated before the first file tool or shell") is this
+        // await. It sits before any navigation, so no chat screen can mount —
+        // and therefore no shell or file tool can resolve a workspace path —
+        // until the folder map is loaded. Bounded and normally instantaneous:
+        // the warmup is one indexed two-column query.
+        com.openminis.app.sandbox.SessionWorkspace.awaitWarmup()
         // [T-android-first-launch-lands-home] Read once, before the mode
         // branches: "is this device set up at all?" is the question that
         // outranks the launch preference.
-        val hasAnySession = chatRepository.dao.listSessions().isNotEmpty()
+        //
+        // [T-android-startup-splash-hang] `hasAnySession` was
+        // `listSessions().isNotEmpty()` — a full hydration of the widest table
+        // in the schema, including every session's `last_message` preview, to
+        // answer a yes/no question. This resolver ran that same full query up to
+        // three times per cold start (emptiness, then `firstOrNull()` for the
+        // target session), all on the main-dispatcher LaunchedEffect.
+        val hasAnySession = chatRepository.dao.hasAnySession()
         val hasAnyProvider = providerRepository.instances.isNotEmpty()
         // [XSessionDiag] Hypothesis 1 context: which launch mode actually applied.
         // rawMode is the user's preference (0 = auto, the default); mode is what
@@ -389,7 +404,7 @@ fun AppNavigation(
             // steps that explain why. Once the user has either a session or a
             // provider, their preference is honoured again.
             !hasAnySession && !hasAnyProvider -> null
-            mode == 1 -> chatRepository.dao.listSessions().firstOrNull()?.let { Routes.chat(it.id) }
+            mode == 1 -> chatRepository.dao.newestSession()?.let { Routes.chat(it.id) }
             mode == 2 -> Routes.chat("__new__${java.util.UUID.randomUUID()}")
             mode == 3 -> null
             else -> {
@@ -399,7 +414,7 @@ fun AppNavigation(
                 // sessions yet opened straight into an empty composer instead
                 // of the list. "Resume what I was doing" has nothing to resume
                 // when nothing was ever done.
-                val latest = chatRepository.dao.listSessions().firstOrNull()
+                val latest = chatRepository.dao.newestSession()
                     ?: return@LaunchedEffect
                 val fresh = System.currentTimeMillis() - latest.updatedAt < autoThresholdMs
                 // [XSessionDiag] Hypothesis 1: auto mode silently RESUMES the most

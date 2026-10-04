@@ -251,12 +251,39 @@ class MainActivity : ComponentActivity() {
         }
 
         if (minisApp == null || !minisApp.subsystemsInitialized) {
+            val initFailure = minisApp?.subsystemInitFailure
             android.util.Log.w(
                 "MainActivity",
                 "app subsystems not initialized (safeMode=" +
-                    "${com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()}) — " +
-                    "showing crash share dialog and finishing",
+                    "${com.openminis.app.crash.CrashFrequencyDetector.isSafeMode()}" +
+                    ", cause=$initFailure) — showing recovery UI",
             )
+            // [T-android-startup-splash-hang] Read BEFORE maybeShowOnActivity,
+            // which consumes and clears it.
+            //
+            // An init failure is caught and logged, never written as a crash
+            // file, so pendingShareFiles is essentially always null on this
+            // path — and maybeShowOnActivity invokes onClosed *synchronously*
+            // when there is nothing to share. onClosed is
+            // finishAndRestartProcess(): a 1.2s Toast, finish(), killProcess.
+            // Since this branch also `return`s without setContent, the Activity
+            // had no content at all: white system splash, then a content-less
+            // window going black, then the process gone. Application.onCreate
+            // never re-runs and the cause is usually deterministic, so every
+            // tap repeated it — "stuck on the splash, then a black screen", with
+            // no reason shown and no in-app way out.
+            //
+            // When there IS a crash burst the existing dialog is strictly better
+            // (it ships logs), so that path is unchanged.
+            if (com.openminis.app.crash.CrashFrequencyDetector.pendingShareFiles == null) {
+                setContent {
+                    com.openminis.app.ui.StartupFailureScreen(
+                        reason = initFailure,
+                        onRestart = { finishAndRestartProcess() },
+                    )
+                }
+                return
+            }
             com.openminis.app.crash.CrashFrequencyDetector.maybeShowOnActivity(
                 activity = this,
                 // T-android-safemode-lateinit-crash: plain finish() here is a

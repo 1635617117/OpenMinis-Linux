@@ -91,6 +91,14 @@ class MinisApp : Application(), ImageLoaderFactory {
      */
     @Volatile
     var subsystemsInitialized: Boolean = false
+
+    /**
+     * [T-android-startup-splash-hang] Why the subsystem block failed, when it
+     * did. Previously the cause went only to `Log.e`, so the one screen that
+     * could have explained a boot loop to the user had nothing to show and
+     * said nothing at all — see the recovery screen in MainActivity.
+     */
+    var subsystemInitFailure: String? = null
         private set
 
     /**
@@ -462,13 +470,20 @@ class MinisApp : Application(), ImageLoaderFactory {
         }
         appContainer.database = AppDatabase.getInstance(this)
         appContainer.chatRepository = ChatRepository(database.chatDao(), database.goalDao(), filesDir)
-        // Must finish before the first file tool or shell. A filed session's
-        // folder id is what makes both sides share minis-workspaces/<folder>.
-        runCatching {
-            kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
-                chatRepository.warmupWorkspaceOwners()
-            }
-        }.onFailure { Log.e("MinisApp", "workspace owner warmup failed", it) }
+        // [T-android-startup-splash-hang] The workspace-owner warmup moved OFF
+        // this thread. It used to be a `runBlocking(Dispatchers.IO)` right here,
+        // which meant the first Room open, any pending schema migrations and a
+        // full hydration of the sessions table all ran on the main thread inside
+        // Application.onCreate — before `subsystemsInitialized` was set and
+        // before MainActivity existed. The system splash (a white
+        // `windowBackground`) stayed up for as long as the user's history took
+        // to load, and past ~5s that is an ANR. Cost scaled with session count,
+        // so only heavy users hit it.
+        //
+        // The ordering guarantee it was bought for ("must finish before the
+        // first file tool or shell") is now SessionWorkspace.awaitWarmup(),
+        // which the launch resolver awaits before mounting any destination. The
+        // single remaining call site is the async launch below.
         appContainer.providerRepository = ProviderRepository(this)
         appContainer.envVarRepository = EnvVarRepository(this)
         // [T-android-safemode-lateinit-crash-147] SkillRepository parses
@@ -516,6 +531,13 @@ class MinisApp : Application(), ImageLoaderFactory {
             // repositories. Do NOT rethrow: that is what turns a one-off init
             // failure into an unrecoverable launch loop.
             Log.e("MinisApp", "subsystem init failed — app will start in degraded mode", t)
+            // Keep a short, user-presentable cause. The recovery screen shows
+            // this, so it must not carry a stack trace or anything key-shaped;
+            // class name plus message is what a bug report needs.
+            subsystemInitFailure = buildString {
+                append(t.javaClass.simpleName)
+                t.message?.take(300)?.let { append(": ").append(it) }
+            }
             return
         }
 

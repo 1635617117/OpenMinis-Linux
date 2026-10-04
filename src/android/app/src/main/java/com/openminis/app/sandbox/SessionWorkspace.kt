@@ -48,6 +48,43 @@ object SessionWorkspace {
 
     private val folderIds = ConcurrentHashMap<String, String>()
 
+    /**
+     * [T-android-startup-splash-hang] Released once this process has loaded the
+     * folder map from the database (or tried and failed — see
+     * `ChatRepository.warmupWorkspaceOwners`, which completes it in a `finally`).
+     *
+     * The warmup used to be a `runBlocking(Dispatchers.IO)` on the **main
+     * thread** inside `Application.onCreate`, justified by "must finish before
+     * the first file tool or shell". That made the first Room open, any pending
+     * schema migrations, and a full hydration of the sessions table all happen
+     * before `subsystemsInitialized` was set and before `MainActivity` even
+     * existed — so the system splash (a white `windowBackground`) stayed up for
+     * as long as the user's history took to load, and past ~5s it was an ANR.
+     * Cost scaled with session count, which is why only *some* users saw it.
+     *
+     * The warmup now runs on `Dispatchers.IO` like everything else at startup,
+     * and the ordering guarantee is this gate instead of a blocked UI thread:
+     * the launch resolver awaits it before mounting any destination, so no chat
+     * screen — and therefore no shell or file tool — can exist before the map
+     * is populated.
+     */
+    private val warmupGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+
+    /** Idempotent. Safe to call from a `finally`, and safe to call twice. */
+    fun completeWarmup() {
+        warmupGate.complete(Unit)
+    }
+
+    /**
+     * Wait for the folder map, bounded. The timeout is a safety valve, not the
+     * normal path: the warmup is one indexed two-column query, so it completes
+     * in milliseconds. A stuck warmup must degrade to "session looks unfiled"
+     * rather than hang the launcher forever.
+     */
+    suspend fun awaitWarmup(timeoutMillis: Long = 3_000L) {
+        kotlinx.coroutines.withTimeoutOrNull(timeoutMillis) { warmupGate.await() }
+    }
+
     fun rememberFolder(sessionId: String, folderId: String?) {
         if (!isSafeId(sessionId)) return
         if (folderId.isNullOrBlank()) folderIds.remove(sessionId)

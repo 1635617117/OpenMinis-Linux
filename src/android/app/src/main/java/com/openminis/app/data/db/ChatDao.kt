@@ -131,6 +131,33 @@ interface ChatDao {
     @Query("SELECT * FROM sessions ORDER BY updated_at DESC")
     suspend fun listSessions(): List<ChatSessionEntity>
 
+    /**
+     * [T-android-startup-splash-hang] Existence probe for the launch resolver.
+     * `listSessions().isNotEmpty()` hydrated every row of the widest table in
+     * the schema to answer a yes/no question, on the cold-start path.
+     */
+    @Query("SELECT EXISTS(SELECT 1 FROM sessions)")
+    suspend fun hasAnySession(): Boolean
+
+    /**
+     * [T-android-startup-splash-hang] The newest session by `updated_at`
+     * (indexed) without pulling the whole table through the cursor. Replaces
+     * `listSessions().firstOrNull()`, which loaded every row to keep one.
+     */
+    @Query("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT 1")
+    suspend fun newestSession(): ChatSessionEntity?
+
+    /**
+     * [T-android-startup-splash-hang] id + folder_id for FILED sessions only —
+     * exactly what `warmupWorkspaceOwners` consumes. Unfiled rows are excluded
+     * because they cannot contribute an entry (see [SessionFolderId]).
+     */
+    @Query(
+        "SELECT id AS id, folder_id AS folderId FROM sessions " +
+            "WHERE folder_id IS NOT NULL AND folder_id <> ''",
+    )
+    suspend fun listSessionFolderIds(): List<SessionFolderId>
+
     @Query("SELECT * FROM sessions WHERE id = :id")
     suspend fun getSession(id: String): ChatSessionEntity?
 

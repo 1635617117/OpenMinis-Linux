@@ -1209,6 +1209,19 @@
     <string name="newer_db_body">This copy of Minis Ultra is older than the one that created your data, so it can\'t open it safely.\n\nNothing has been deleted — your conversations are intact on this device. Reinstall the newer version of Minis Ultra and everything will be there.</string>
     <string name="newer_db_versions">This version supports data format %1$d</string>
     <string name="newer_db_exit">Close</string>
+    <!-- [T-android-startup-splash-hang] Recovery screen for a failed
+         Application.onCreate. Before this existed the path showed a 1.2s toast
+         and killed the process with no content ever composed. -->
+    <string name="startup_failure_title">Minis couldn\'t start</string>
+    <string name="startup_failure_body">Something failed while the app was preparing its data. Nothing has been deleted. Restart to try again — if it keeps failing, copy the details below and report them, or clear app data as a last resort.</string>
+    <string name="startup_failure_reason_unknown">No cause was recorded.</string>
+    <string name="startup_failure_restart">Restart app</string>
+    <string name="startup_failure_copy">Copy details</string>
+    <string name="startup_failure_copied">Copied</string>
+    <string name="startup_failure_clear_data">Clear app data (last resort)</string>
+    <string name="startup_failure_clear_title">Clear all app data?</string>
+    <string name="startup_failure_clear_body">This deletes local chats, memories, settings and sandbox files on this device, then restarts the app. Backups you already exported are untouched. Only do this if restarting keeps failing.</string>
+    <string name="startup_failure_clear_confirm">Clear and restart</string>
     <string name="usage_attr_unknown_session">Model unknown — the session record was deleted</string>
     <string name="usage_attr_removed">No longer in your configured providers</string>
     <string name="usage_detail_output">Output</string>

@@ -1117,6 +1117,16 @@
     <string name="newer_db_body">当前这个 Minis Ultra 版本比创建这些数据的版本旧，无法安全打开。\n\n数据没有被删除，你的会话都还在这台设备上。重新安装较新版本的 Minis Ultra 即可继续使用。</string>
     <string name="newer_db_versions">当前版本支持的数据格式为 %1$d</string>
     <string name="newer_db_exit">关闭</string>
+    <string name="startup_failure_title">Minis 无法启动</string>
+    <string name="startup_failure_body">应用在准备数据时出了问题。没有任何内容被删除。可以先重启重试——如果反复失败，请复制下方信息反馈，或把清除应用数据当作最后手段。</string>
+    <string name="startup_failure_reason_unknown">未记录到具体原因。</string>
+    <string name="startup_failure_restart">重启应用</string>
+    <string name="startup_failure_copy">复制诊断信息</string>
+    <string name="startup_failure_copied">已复制</string>
+    <string name="startup_failure_clear_data">清除应用数据（最后手段）</string>
+    <string name="startup_failure_clear_title">确认清除全部应用数据？</string>
+    <string name="startup_failure_clear_body">这会删除本机上的本地会话、记忆、设置与沙箱文件，然后重启应用。已导出的备份不受影响。仅在反复重启失败时使用。</string>
+    <string name="startup_failure_clear_confirm">清除并重启</string>
     <string name="usage_attr_unknown_session">无法确定模型 —— 会话记录已删除</string>
     <string name="usage_attr_removed">已不在当前配置的服务商中</string>
     <string name="usage_detail_output">输出</string>

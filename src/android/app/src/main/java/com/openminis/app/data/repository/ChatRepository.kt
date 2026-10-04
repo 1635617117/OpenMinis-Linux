@@ -481,8 +481,19 @@ class ChatRepository(
     }
 
     suspend fun warmupWorkspaceOwners() {
-        for (s in dao.listSessions()) {
-            SessionWorkspace.rememberFolder(s.id, s.folderId)
+        // [T-android-startup-splash-hang] Two-column projection over FILED
+        // sessions only, replacing `SELECT * FROM sessions ORDER BY updated_at
+        // DESC` + full entity hydration. See SessionFolderId for why unfiled
+        // rows are skipped without changing behaviour.
+        try {
+            for (row in dao.listSessionFolderIds()) {
+                SessionWorkspace.rememberFolder(row.id, row.folderId)
+            }
+        } finally {
+            // Always release the gate: a failed warmup must degrade to "this
+            // session looks unfiled", never wedge every shell behind an await
+            // that can never complete.
+            SessionWorkspace.completeWarmup()
         }
     }
 
