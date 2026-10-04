@@ -48,6 +48,7 @@ import androidx.compose.material.icons.outlined.ScreenLockPortrait
 import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.ViewAgenda
 import androidx.compose.material.icons.outlined.Groups
+import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -106,6 +107,9 @@ const val KEY_AUTO_EXPAND_THINKING = "chat.autoExpandThinking"  // Boolean, defa
 // Collapse thinking + tool process into a summary after the turn finishes
 // (streaming stays expanded). Default off. Read live in ChatScreen.
 const val KEY_FOLD_AI_PROCESS = "chat.foldAiProcess"  // Boolean, default false
+// Material You wallpaper dynamic color. Default OFF: the app's identity is the
+// iOS-parity palette with measured contrast, so wallpaper tinting is opt-in.
+const val KEY_DYNAMIC_COLOR = "chat.dynamicColor"  // Boolean, default false
 // [T-android-auto-grouping] When a chat's title is first generated, also file
 // it into a matching EXISTING group. Rides the title-generation call — no
 // second round-trip. Key name matches iOS `autoGroupingEnabled` so a future
@@ -272,6 +276,10 @@ fun AppearanceScreen(
     var autoFocusAfterReply by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_FOCUS_AFTER_REPLY, true)) }
     var autoExpandThinking by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_EXPAND_THINKING, true)) }
     var foldAiProcess by remember { mutableStateOf(prefs.getBoolean(KEY_FOLD_AI_PROCESS, false)) }
+    // Material You is an Android 12+ framework capability (minSdk is 26), so the
+    // row renders disabled below S instead of promising something it cannot do.
+    val monetSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    var dynamicColor by remember { mutableStateOf(prefs.getBoolean(KEY_DYNAMIC_COLOR, false)) }
     var showChatTitle by remember { mutableStateOf(prefs.getBoolean(KEY_SHOW_CHAT_TITLE, true)) }
     var autoGrouping by remember { mutableStateOf(prefs.getBoolean(KEY_AUTO_GROUPING, true)) }
     var chatInputLevel by remember { mutableIntStateOf(prefs.getInt(KEY_FONT_CHAT_INPUT, 0)) }
@@ -321,9 +329,27 @@ fun AppearanceScreen(
                             tint = row.tint,
                         )
                     },
-                    showDivider = idx < themeRows.size - 1,
+                    showDivider = true,
                 )
             }
+            // [T-android-monet-dynamic-color] Sits in the Theme section because
+            // it is the fourth way to answer "what colours is this app" — after
+            // system / light / dark. Last row in the section, so showDivider is
+            // false and the preceding rows all draw theirs (hence the themeRows
+            // showDivider change above).
+            SettingsSwitchRow(
+                icon = Icons.Outlined.Palette,
+                iconColor = tileTeal,
+                title = stringResource(R.string.appearance_monet_title),
+                subtitle = stringResource(R.string.appearance_monet_subtitle),
+                checked = dynamicColor && monetSupported,
+                onCheckedChange = {
+                    dynamicColor = it
+                    prefs.edit().putBoolean(KEY_DYNAMIC_COLOR, it).apply()
+                },
+                enabled = monetSupported,
+                showDivider = false,
+            )
         }
 
         // -- Launch Session --

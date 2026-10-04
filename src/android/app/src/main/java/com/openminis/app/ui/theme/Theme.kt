@@ -1,15 +1,20 @@
 package com.openminis.app.ui.theme
 
+import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -154,9 +159,27 @@ private val MinisShapes = Shapes(
 fun MinisTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     fontScale: Float = 1f,
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme
+    val context = LocalContext.current
+    val colorScheme = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
+            // [T-android-monet-dynamic-color] The framework only carries the
+            // system_* color resources on Android 12+, so the gate is a
+            // correctness requirement, not a nicety: below S those resources do
+            // not resolve. minSdk is 26, hence the explicit branch.
+            dynamicMinisScheme(
+                base = if (darkTheme) {
+                    dynamicDarkColorScheme(context)
+                } else {
+                    dynamicLightColorScheme(context)
+                },
+                chrome = if (darkTheme) DarkColorScheme else LightColorScheme,
+            )
+        darkTheme -> DarkColorScheme
+        else -> LightColorScheme
+    }
     val typography = scaledTypography(fontScale)
     val chatPalette = if (darkTheme) DarkChatPalette else LightChatPalette
 
@@ -168,6 +191,45 @@ fun MinisTheme(
         CompositionLocalProvider(LocalChatPalette provides chatPalette, content = content)
     }
 }
+
+/**
+ * [T-android-monet-dynamic-color] Merge a Material You wallpaper scheme with
+ * Minis' neutral grouped chrome.
+ *
+ * Monet derives every slot from the wallpaper, including `surface*`. Minis'
+ * visual identity is the iOS-style systemGroupedBackground: a neutral gray
+ * page with white / near-black cards. Letting wallpaper tones into those slots
+ * recolors every card and settings group at once — a different app. So the
+ * accent families (primary / secondary / tertiary and their containers) come
+ * from [base], and the neutral chrome (background, onBackground, surface,
+ * onSurface, surfaceVariant, onSurfaceVariant, surfaceContainer*, outline*,
+ * outlineVariant) comes from [chrome] — the same palette the non-dynamic path
+ * uses, so text contrast on those surfaces is exactly what the WCAG notes in
+ * this file measured.
+ *
+ * The on-accent slots deliberately stay on [base]: `onPrimary` must pair with
+ * the wallpaper-derived `primary`, not with Minis' hand-tuned teal-on-white.
+ *
+ * Pure and Context-free so the merge rule is unit-testable; the
+ * dynamicLight/DarkColorScheme callers need a Context and only resolve on
+ * API 31+, which [MinisTheme] gates.
+ */
+internal fun dynamicMinisScheme(base: ColorScheme, chrome: ColorScheme): ColorScheme =
+    base.copy(
+        background = chrome.background,
+        onBackground = chrome.onBackground,
+        surface = chrome.surface,
+        onSurface = chrome.onSurface,
+        surfaceVariant = chrome.surfaceVariant,
+        onSurfaceVariant = chrome.onSurfaceVariant,
+        surfaceContainerLowest = chrome.surfaceContainerLowest,
+        surfaceContainerLow = chrome.surfaceContainerLow,
+        surfaceContainer = chrome.surfaceContainer,
+        surfaceContainerHigh = chrome.surfaceContainerHigh,
+        surfaceContainerHighest = chrome.surfaceContainerHighest,
+        outline = chrome.outline,
+        outlineVariant = chrome.outlineVariant,
+    )
 
 private fun TextStyle.scale(factor: Float): TextStyle =
     if (factor == 1f) this else copy(fontSize = fontSize * factor)
