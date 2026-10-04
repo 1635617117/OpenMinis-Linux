@@ -72,6 +72,44 @@ object ShellExecutor {
             outputRateBytesPerSec = budget.outputRateBytesPerSec,
         )
 
+        // [LCS-PATCH] Auto-retry on non-zero exit code (up to 1 extra attempt)
+        // before falling through to seccomp fallback. Mirrors a "try again"
+        // reflex: transient failures (file locks, race conditions, resource
+        // contention) often clear on immediate retry.
+        if (first.exitCode != 0 && first.exitCode != 124) {
+            Log.w(TAG, "[lcs-retry] exit ${first.exitCode}, retrying once: $command")
+            val retried = runOnce(
+                context, command, armed, environment, lineCallback, noSeccomp = false,
+                outputCapBytes = budget.outputCapBytes,
+                outputRateBytesPerSec = budget.outputRateBytesPerSec,
+            )
+            if (retried.exitCode == 0) return@withContext retried
+            // Fall through to seccomp check with the retried result
+            if (!SeccompFallbackPolicy.shouldRetryWithoutSeccomp(
+                    exitCode = retried.exitCode,
+                    durationMs = retried.durationMs,
+                    producedOutput = retried.output.isNotEmpty(),
+                    alreadyRetried = true,
+                )
+            ) {
+                return@withContext retried
+            }
+            // Seccomp retry uses the retried result as base
+            val seccompRetried = runOnce(
+                context, command, armed, environment, lineCallback, noSeccomp = true,
+                outputCapBytes = budget.outputCapBytes,
+                outputRateBytesPerSec = budget.outputRateBytesPerSec,
+            )
+            if (seccompRetried.exitCode == 0) {
+                com.openminis.app.logging.AppLogger.warning(
+                    TAG,
+                    "[proot-retry] succeeded with ${SeccompFallbackPolicy.NO_SECCOMP_ENV}=1 — " +
+                        "this device needs the seccomp workaround (GH#186)",
+                )
+            }
+            return@withContext seccompRetried
+        }
+
         // [T-android-seccomp-selfheal / GH#186] If the child died on an early
         // fatal signal with no output at all, the host kernel's seccomp fast
         // path is the prime suspect — retry once without it. Gated hard so a
