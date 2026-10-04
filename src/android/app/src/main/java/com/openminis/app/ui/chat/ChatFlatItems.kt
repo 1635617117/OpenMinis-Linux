@@ -802,9 +802,22 @@ internal fun assistantToolUseBlocks(messages: List<ChatMessage>): List<Assistant
  *
  * The overlay subset is *not* the source of truth for ToolDetailSheet:
  * completed tools must remain openable after they leave the overlay.
+ *
+ * [T-android-fold-expanded-duplicate] [processExpanded] is the fold bar for
+ * this block's turn being open. The overlay exists to surface process activity
+ * that the in-list rows are currently HIDING; once the turn is expanded those
+ * rows are back in the list at their own chronological positions, so pinning a
+ * second copy of the same running tool to the viewport bottom shows one card in
+ * two places that do not correspond to each other. The list wins — it is the
+ * one that is positionally anchored to the turn.
  */
-internal fun isFloatingProcessTool(block: AssistantBlock, foldAiProcess: Boolean): Boolean {
+internal fun isFloatingProcessTool(
+    block: AssistantBlock,
+    foldAiProcess: Boolean,
+    processExpanded: Boolean = false,
+): Boolean {
     if (!isDetailProcessTool(block)) return false
+    if (foldAiProcess && processExpanded) return false
     if (foldAiProcess && block.toolStatus !in IN_FLIGHT_PROCESS_TOOL_STATUSES) return false
     return true
 }

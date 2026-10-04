@@ -268,4 +268,95 @@ class ChatFlatItemsProcessFoldTest {
         assertFalse(isFloatingProcessTool(done, foldAiProcess = true))
         assertTrue(isFloatingProcessTool(running, foldAiProcess = true))
     }
+
+    // ── [T-android-fold-expanded-duplicate] ──────────────────────────────
+    //
+    // The overlay exists to surface process activity the in-list rows are
+    // currently hiding. Once the turn's fold bar is expanded those rows are
+    // back in the list at their own positions, so the same running tool must
+    // not ALSO be pinned to the viewport bottom — one card in two places that
+    // do not correspond to each other.
+
+    @Test
+    fun `an expanded turn does not also float its running tool`() {
+        val running = tool(id = "t2", status = ToolBlockStatus.RUNNING)
+        assertTrue(
+            "collapsed: the list hides it, so the overlay must carry it",
+            isFloatingProcessTool(running, foldAiProcess = true, processExpanded = false),
+        )
+        assertFalse(
+            "expanded: the list already shows it in place",
+            isFloatingProcessTool(running, foldAiProcess = true, processExpanded = true),
+        )
+    }
+
+    @Test
+    fun `expansion is irrelevant to the overlay when fold is off`() {
+        // With fold off the in-list rows are governed by showCompletedToolCards,
+        // not by a fold bar, so the overlay's behaviour must not change.
+        val done = tool(status = ToolBlockStatus.SUCCESS)
+        val running = tool(id = "t2", status = ToolBlockStatus.RUNNING)
+        assertTrue(isFloatingProcessTool(done, foldAiProcess = false, processExpanded = true))
+        assertTrue(isFloatingProcessTool(running, foldAiProcess = false, processExpanded = true))
+    }
+
+    @Test
+    fun `expanding restores thinking and tool rows at their own positions`() {
+        val blocks = listOf(
+            thinking(),
+            tool(id = "tool1", name = "bash", status = ToolBlockStatus.SUCCESS),
+            text(),
+        )
+        val expanded = buildFlatChatItems(
+            listOf(assistant(blocks = blocks)),
+            showCompletedToolCards = false,
+            foldAiProcess = true,
+            expandedProcessIds = setOf("m1"),
+        )
+        val k = kinds(expanded)
+
+        assertTrue("thinking must come back", k.contains("thinking"))
+        assertTrue("completed tool must come back", k.contains("tool:bash"))
+        assertTrue("fold bar stays", k.contains("summary"))
+
+        // Position correspondence: out is oldest-first, so within the turn the
+        // chronological order must be thinking -> tool -> reply text, with the
+        // fold bar appended last (visually below the reply under reverseLayout).
+        assertEquals(
+            listOf("header", "thinking", "tool:bash", "md", "summary"),
+            k.filter { it in setOf("header", "thinking", "tool:bash", "md", "summary") },
+        )
+    }
+
+    @Test
+    fun `collapsed fold still keeps completed process out of the list`() {
+        val k = kinds(
+            buildFlatChatItems(
+                listOf(assistant(blocks = listOf(thinking(), tool(), text()))),
+                showCompletedToolCards = false,
+                foldAiProcess = true,
+            ),
+        )
+        assertFalse(k.contains("thinking"))
+        assertFalse(k.contains("tool:bash"))
+        assertTrue(k.contains("summary"))
+    }
+
+    @Test
+    fun `a running tool stays in the list at its position when expanded`() {
+        // The card the user is watching must not teleport: while the turn is
+        // expanded the in-list row is the only copy, so it holds its place
+        // through RUNNING -> SUCCESS instead of jumping between the overlay and
+        // the list.
+        val blocks = listOf(thinking(), tool(id = "t2", status = ToolBlockStatus.RUNNING), text())
+        val running = kinds(
+            buildFlatChatItems(
+                listOf(assistant(streaming = true, blocks = blocks)),
+                showCompletedToolCards = false,
+                foldAiProcess = true,
+                expandedProcessIds = setOf("m1"),
+            ),
+        )
+        assertTrue("running tool must be in the list while expanded", running.contains("tool:bash"))
+    }
 }

@@ -2955,12 +2955,19 @@ fun ChatScreen(
                 // view; we mirror that semantically by checking the same
                 // filter on both sources.
                 val streamingById by viewModel.streamingById.collectAsState()
-                val hasFloatingTools = remember(messages, streamingById, foldAiProcess) {
+                // [T-android-fold-expanded-duplicate] Hoisted above
+                // `hasFloatingTools` — same composable scope, so this is a pure
+                // move, not a new state holder. The padding reservation and the
+                // overlay it reserves room for have to agree about whether the
+                // turn is expanded, otherwise the layout keeps 65dp of empty
+                // space for a bar that no longer renders.
+                var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
+                val hasFloatingTools = remember(messages, streamingById, foldAiProcess, expandedProcessIds) {
                     val merged = if (streamingById.isEmpty()) messages
                                  else mergeStreamingOverlay(messages, streamingById)
                     merged.any { msg ->
                         msg.role == "assistant" && msg.toolBlocks.any { tb ->
-                            isFloatingProcessTool(tb, foldAiProcess)
+                            isFloatingProcessTool(tb, foldAiProcess, msg.id in expandedProcessIds)
                         }
                     }
                 }
@@ -3207,7 +3214,6 @@ fun ChatScreen(
                 // scope. The flatten still runs per token (cheap-ish; ran
                 // before too), but the rebuild stays off the main UI
                 // composable's invalidation list.
-                var expandedProcessIds by remember(sessionId) { mutableStateOf(emptySet<String>()) }
                 LaunchedEffect(messages, sessionId, showCompletedToolCards, foldAiProcess, expandedProcessIds, showSubAgentBar) {
                     // [T-android-stream-pipeline-incremental] Frozen/live split.
                     //
@@ -4363,7 +4369,7 @@ fun ChatScreen(
                 // closes the detail state because the id "doesn't exist").
                 var lastToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
                 var detailToolBlocks by remember { mutableStateOf<List<AssistantBlock>>(emptyList()) }
-                LaunchedEffect(messages, foldAiProcess, showSubAgentBar) {
+                LaunchedEffect(messages, foldAiProcess, showSubAgentBar, expandedProcessIds) {
                     kotlinx.coroutines.flow.combine(
                         kotlinx.coroutines.flow.flowOf(messages),
                         viewModel.streamingById,
@@ -4374,8 +4380,17 @@ fun ChatScreen(
                         // reply, not to every tool in the session. Keep the
                         // complete list separately for historical details.
                         val latestReply = merged.lastOrNull { it.role == "assistant" }
+                        // [T-android-fold-expanded-duplicate] An expanded turn
+                        // already renders this tool in the list at its own
+                        // position, so the viewport-pinned strip would be a
+                        // second copy of the same card in a place that does not
+                        // correspond to the turn.
+                        val latestExpanded = latestReply?.id
+                            ?.let { id -> id in expandedProcessIds } == true
                         val overlay = latestReply?.toolBlocks.orEmpty()
-                            .filter { isFloatingProcessTool(it, foldAiProcess) }
+                            .filter {
+                                isFloatingProcessTool(it, foldAiProcess, processExpanded = latestExpanded)
+                            }
                             .filterNot {
                                 showSubAgentBar && isSubAgentTranscriptCard(it) &&
                                     (it.id in activeSubAgentToolIds ||
