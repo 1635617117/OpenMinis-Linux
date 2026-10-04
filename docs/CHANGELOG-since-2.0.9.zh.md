@@ -1,4 +1,4 @@
-# OpenMinis-Linux 更新日志（2.0.9 → 2.0.27）
+# OpenMinis-Linux 更新日志（2.0.9 → 2.0.29）
 
 基线 **2.0.9（versionCode 209）** 只做机械拆分：聊天、OpenAI、配置仓库与流式 Markdown 的可搬函数改为同包扩展，公开签名不变。以下按版本列出其后全部用户可见与工程变更。未列出的 versionCode 为滚动包中间态。
 
@@ -113,6 +113,15 @@
 - **Content-Type 标错的 SSE 不再崩溃**：`OpenAIRawStream` 原先只凭响应头判断"网关忽略了 `stream=true`、返回的是单个 JSON 对象"。实测某公共中继对 `stream=true` 返回 `content-type: application/json`、正文却是标准 `data: {…}` SSE（6/6 次），SSE 文本被喂给 `JSONObject()`，分词器读到的第一个值是裸词 `data` → `Value data of type java.lang.String cannot be converted to JSONObject` 从 agent loop 逃逸成用户可见报错。改为**嗅探正文字节**，只有头与字节都说是 JSON 才走 JSON 分支；用 `PushbackInputStream` 窥视最多 256 字节后原样推回，SSE 路径仍是真流式而非整包缓冲。窥视避免了两类坑：不逐字节读 socket（改批量读）；**TCP 部分读**（只交出 `dat`）不会误判为"非 SSE"，会读到足以判定为止。JSON 分支解析失败改抛 `LLMError.DecodingError`（带实际 Content-Type 与正文前 120 字符），不再抛裸 `JSONException`。识别 `data:`/`event:`/`id:`/`retry:`/`:`（注释与 keep-alive），容忍前置空行与 `\r\n`。任何隐藏或改写上游响应头的代理都会造成同样错标，故这是普适修复。
 - **401 不再一律归因为「API key 无效」**：实测同一 key、同一分钟，`deepseek-v4.1-flash` 连续 3 次 200，而 `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` / `glm-5.3` / `kimi-k3` 各连续 3 次 401，且 `GET /v1/models` 一直 200 —— **按模型确定性失败**，5 个模型里 4 个上游通道是坏的，凭据完全有效。但三家 provider 的 `mapHttpError` 把 401/403 全映射成裸 `InvalidApiKey`，UI 显示 "Invalid API key"，提示叫人去检查/重新生成一个没坏的 key；真正该做的是换模型。**不按响应体文案区分**（`Invalid token (request id: …)` vs `Unauthorized` 只是某一家的措辞，同类网关各家写法不同），改用 app 本来就握有的厂商无关证据：新增 `CredentialAcceptance`，目录拉取 2xx 时按 **host + 凭据指纹**记录（不含模型，因为变化的正是模型），TTL 10 分钟（会话中途吊销仍如实报 key 无效）、有界 512 条。`ProviderKeyGate` 加 `credentialKey` / `credentialScopeOf`，`normalizeModel` 把 `|` 换成 `/` 使"丢掉最后一段"的推导精确而非仅通常正确；`LLMProvider` 加**带默认实现**的 `credentialGateKey`，故无任何 provider 需改动。有证据时归因为"模型被拒"并提示换模型，无证据时完全保持原行为（含 403 的套餐/区域提示）；仍 `isFallbackable`、仍不 `isRetryable`。
 - 新增 `StreamContentTypeSniffTest`(13) 与 `CredentialAcceptanceTest`(12，含两个走真实 `OpenAIModelsApi`+`OpenAIProvider`+MockWebServer 的端到端用例)。全量 JVM 单测 **2143 个通过**。
+
+## 2.0.29（229）— 启动主线程阻塞、黑屏死循环、折叠展开重复
+
+> 2.0.28（228）仅滚动包、未打 tag 未发布，其全部变更包含在本版。
+
+- **启动页卡死（仅部分用户，随会话数增长）**：`MinisApp.onCreate` 的 `runBlocking(Dispatchers.IO) { warmupWorkspaceOwners() }` 挡住的是**调用方线程 = 主线程**，使进程内首次 Room 开库、20 余个待执行迁移、`SELECT * FROM sessions ORDER BY updated_at DESC`（13 列实体含 `last_message` 长文本）全部发生在 `subsystemsInitialized=true` 与 `MainActivity` 创建之前；且同一 warmup 几行后又被异步重复调用。warmup 只消费 `id`/`folder_id` 且只对**已归档**会话有意义（未归档行是对空 map 的 `remove()`）→ 新增 `listSessionFolderIds()`（两列投影 + `folder_id IS NOT NULL AND folder_id <> ''`），语义等价、开销骤降。顺序保证改由 `SessionWorkspace.awaitWarmup()`：`CompletableDeferred` 在 `finally` 释放（失败降级为"该会话看起来未归档"，绝不能把 shell 挂死在 await 上），启动解析器挂载任何目的地前 await、上限 3s。启动解析器最多三次全表加载换为 `hasAnySession()`（EXISTS）与 `newestSession()`（LIMIT 1）。
+- **黑屏死循环**：子系统块任何 throw 被 catch 后 `subsystemsInitialized=false`，`MainActivity` 分支**不调 `setContent`**，`maybeShowOnActivity` 在 `pendingShareFiles==null` 时**同步**调 `onClosed = finishAndRestartProcess()`（Toast 1.2s + finish + killProcess）。init 失败只记 log 不写 crash 文件 → `pendingShareFiles` 几乎恒为 null → 白启动页 → 无内容窗口变黑 → 进程消失，且 `onCreate` 不重跑、原因通常确定性 → 每次点击重复。修法：`MinisApp.subsystemInitFailure` 记录原因；`MainActivity` 在调用**前**读 `pendingShareFiles`（调用会消费它），有 burst 走原对话框不变，没有则 `StartupFailureScreen` 上屏原因（可复制）+ 重启 + 清数据（最后手段、带确认）。**安全模式无需新处理**：`setSafeMode(true)` 只在与 `pendingShareFiles` 赋值同一分支跑，safe-mode ON 必然意味着对话框路径（经 `finishClose` 清除）；`_safeMode` 是内存 `AtomicBoolean`，killProcess 后自然归零。
+- **折叠展开后运行中工具卡出现两次**：`shouldShowProcessToolRow(…, processExpanded=true)` 恢复列表内工具行，但 `isFloatingProcessTool` 只知 `foldAiProcess`、不知展开态，对 in-flight 工具仍返回 true → 视口底部浮动条再贴一份（锚定视口而非回合）。修法：**列表赢**，`isFloatingProcessTool(block, foldAiProcess, processExpanded)` 展开时返回 false；两个调用点必须一致（`hasFloatingTools` 为浮动条预留 65dp padding，只修浮动条会为不再渲染的 bar 留空隙）→ `expandedProcessIds` 上移（同作用域同 key，纯移动）并加入两处 remember/LaunchedEffect key；fold 关闭时行为不变（测试钉住）。
+- 全量 JVM 单测 **2148 个通过**（+5 折叠测试）。
 
 ---
 

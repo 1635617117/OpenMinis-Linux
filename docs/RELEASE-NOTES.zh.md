@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.29-linux
+
+- versionCode **229**
+- 覆盖自 2.0.27 以来的全部变更（2.0.28/228 仅滚动包、未打 tag）。数据库仍为 21。**启动页卡死**：`Application.onCreate` 里 `runBlocking(Dispatchers.IO)` 挡住主线程，使进程内首次 Room 开库 + 20 余个待执行迁移 + `SELECT * FROM sessions` 全表水合（13 列实体含 `last_message` 长文本）都发生在 `subsystemsInitialized` 置位与 `MainActivity` 创建之前，开销随会话数增长，故仅部分用户命中，超 5 秒即 ANR；且同一 warmup 几行之后又异步跑了一遍。改为两列投影且只取已归档会话（未归档行本就是对空 map 的 `remove()`，语义等价），顺序保证改由 `SessionWorkspace.awaitWarmup()`（`finally` 释放、启动解析器挂载任何目的地前 await、上限 3 秒，失败降级为"该会话看起来未归档"而非挂死所有 shell）；启动解析器最多三次的全表加载换成 `hasAnySession()`（EXISTS）与 `newestSession()`（LIMIT 1）。**黑屏死循环**：子系统初始化抛异常被 catch 后 `subsystemsInitialized=false`，`MainActivity` 该分支**不调 `setContent`**，而 `maybeShowOnActivity` 在 `pendingShareFiles==null`（init 失败只记 log 不写 crash 文件，故几乎恒为 null）时同步调 `onClosed` = Toast 1.2s + finish + killProcess → 无内容窗口变黑、进程消失、每次点击精确重复。现改为：`MinisApp` 记录 `subsystemInitFailure`，`MainActivity` 在调用**前**读 `pendingShareFiles`——有 crash burst 走原对话框不变，没有则渲染 `StartupFailureScreen`（原因上屏可复制、可重启、清数据为带确认的最后手段）。**折叠展开重复**：`shouldShowProcessToolRow(processExpanded=true)` 恢复列表内工具行，但 `isFloatingProcessTool` 不知道展开态，对 in-flight 工具仍返回 true → 同一张运行中工具卡既在列表内又贴在视口底部浮动条上。改为展开时**列表赢**（锚定在回合上的那份才对）；`expandedProcessIds` 上移（同作用域同 key 纯移动）并加入两处 key，使 65dp padding 与浮动条同步重算；fold 关闭时行为一行未改（有测试钉住）。全量 JVM 单测 **2148 个通过**。详见 `docs/github-release-2.0.29-linux.md`。
+
+---
+
 # OpenMinis-Linux 2.0.27-linux
 
 - versionCode **227**
