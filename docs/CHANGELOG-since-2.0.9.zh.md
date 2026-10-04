@@ -1,4 +1,4 @@
-# OpenMinis-Linux 更新日志（2.0.9 → 2.0.26）
+# OpenMinis-Linux 更新日志（2.0.9 → 2.0.27）
 
 基线 **2.0.9（versionCode 209）** 只做机械拆分：聊天、OpenAI、配置仓库与流式 Markdown 的可搬函数改为同包扩展，公开签名不变。以下按版本列出其后全部用户可见与工程变更。未列出的 versionCode 为滚动包中间态。
 
@@ -108,6 +108,12 @@
 - 新增 `ModelListUrlShapeTest`(5)：强制刷新路径断言 `RecordedRequest.path` **恰好**为 `/v1/models`（`path` 含查询串，任何重新引入的 `?…` 当场失败），并钉住破缓存由请求头承担、`/v1` 不重复追加也不漏追加。全量 JVM 单测 **2118 个通过**。
 - 与 2.0.25 的关系：2.0.25 修的是间歇性 401 被当成"密钥无效"，本版修的是 404。**404 按设计不重试**（重发字节相同的请求不会改变答案），所以 2.0.25 的重试救不了本版的场景；两个缺陷叠加才构成完整现象。
 
+## 2.0.27（227）— 流式 Content-Type 嗅探与 401 正确归因
+
+- **Content-Type 标错的 SSE 不再崩溃**：`OpenAIRawStream` 原先只凭响应头判断"网关忽略了 `stream=true`、返回的是单个 JSON 对象"。实测某公共中继对 `stream=true` 返回 `content-type: application/json`、正文却是标准 `data: {…}` SSE（6/6 次），SSE 文本被喂给 `JSONObject()`，分词器读到的第一个值是裸词 `data` → `Value data of type java.lang.String cannot be converted to JSONObject` 从 agent loop 逃逸成用户可见报错。改为**嗅探正文字节**，只有头与字节都说是 JSON 才走 JSON 分支；用 `PushbackInputStream` 窥视最多 256 字节后原样推回，SSE 路径仍是真流式而非整包缓冲。窥视避免了两类坑：不逐字节读 socket（改批量读）；**TCP 部分读**（只交出 `dat`）不会误判为"非 SSE"，会读到足以判定为止。JSON 分支解析失败改抛 `LLMError.DecodingError`（带实际 Content-Type 与正文前 120 字符），不再抛裸 `JSONException`。识别 `data:`/`event:`/`id:`/`retry:`/`:`（注释与 keep-alive），容忍前置空行与 `\r\n`。任何隐藏或改写上游响应头的代理都会造成同样错标，故这是普适修复。
+- **401 不再一律归因为「API key 无效」**：实测同一 key、同一分钟，`deepseek-v4.1-flash` 连续 3 次 200，而 `deepseek-v4-flash-0731` / `deepseek-v4-pro-0813` / `glm-5.3` / `kimi-k3` 各连续 3 次 401，且 `GET /v1/models` 一直 200 —— **按模型确定性失败**，5 个模型里 4 个上游通道是坏的，凭据完全有效。但三家 provider 的 `mapHttpError` 把 401/403 全映射成裸 `InvalidApiKey`，UI 显示 "Invalid API key"，提示叫人去检查/重新生成一个没坏的 key；真正该做的是换模型。**不按响应体文案区分**（`Invalid token (request id: …)` vs `Unauthorized` 只是某一家的措辞，同类网关各家写法不同），改用 app 本来就握有的厂商无关证据：新增 `CredentialAcceptance`，目录拉取 2xx 时按 **host + 凭据指纹**记录（不含模型，因为变化的正是模型），TTL 10 分钟（会话中途吊销仍如实报 key 无效）、有界 512 条。`ProviderKeyGate` 加 `credentialKey` / `credentialScopeOf`，`normalizeModel` 把 `|` 换成 `/` 使"丢掉最后一段"的推导精确而非仅通常正确；`LLMProvider` 加**带默认实现**的 `credentialGateKey`，故无任何 provider 需改动。有证据时归因为"模型被拒"并提示换模型，无证据时完全保持原行为（含 403 的套餐/区域提示）；仍 `isFallbackable`、仍不 `isRetryable`。
+- 新增 `StreamContentTypeSniffTest`(13) 与 `CredentialAcceptanceTest`(12，含两个走真实 `OpenAIModelsApi`+`OpenAIProvider`+MockWebServer 的端到端用例)。全量 JVM 单测 **2143 个通过**。
+
 ---
 
-；各版本的发布说明另见 `docs/RELEASE-NOTES.zh.md` 与 `docs/github-release-<版本>.md`。
+完整逐提交历史见 `git log 074ecc5..HEAD`；各版本的发布说明另见 `docs/RELEASE-NOTES.zh.md` 与 `docs/github-release-<版本>.md`。

@@ -1,3 +1,10 @@
+# OpenMinis-Linux 2.0.27-linux
+
+- versionCode **227**
+- 两个用户实测报出的缺陷，数据库仍为 21。**流式崩溃**：`OpenAIRawStream` 靠 Content-Type 判断"网关忽略了 stream=true、返回的是单个 JSON"，而实测某中继对 stream=true 返回 `content-type: application/json` 却是标准 SSE 正文（6/6），于是 SSE 文本被喂给 `JSONObject()`、分词器读到裸词 `data`，抛出 `Value data of type java.lang.String cannot be converted to JSONObject` 并从 agent loop 逃逸。改为**嗅探正文字节**（头与字节都说是 JSON 才走 JSON 分支），用 `PushbackInputStream` 窥视 256 字节后原样推回，SSE 路径仍是真流式；窥视用批量读而非逐字节 socket 读，且对 TCP 部分读（只交出 `dat`）不会误判。**401 误归因**：实测同一 key 同一分钟，`deepseek-v4.1-flash` 3/3 返回 200 而另外 4 个模型 3/3 全 401，且 `/v1/models` 一直 200——按模型确定性失败，凭据完全有效；但 app 把这些 401 全映射成裸 `InvalidApiKey`，UI 显示 "Invalid API key" 并叫人去重新生成一个没坏的 key。不按响应体文案区分（那只是某一家的措辞），改用 app 本来就握有的厂商无关证据：新增 `CredentialAcceptance`，目录拉取 2xx 时按 host+凭据指纹记录（不含模型，TTL 10 分钟、有界 512 条），三家 provider 的 `mapHttpError` 在 401/403 时先查证据——有则归因为"模型被拒、换一个模型"，无则完全保持原行为；`LLMProvider.credentialGateKey` 带默认实现，所以没有任何 provider 需要改动。新增 25 个测试（`StreamContentTypeSniffTest` 13、`CredentialAcceptanceTest` 12），全量 JVM 单测 2143 个通过。详见 `docs/github-release-2.0.27-linux.md`。
+
+---
+
 # OpenMinis-Linux 2.0.26-linux
 
 - versionCode **226**
