@@ -1,11 +1,32 @@
 package com.openminis.app.provider.openai
 
 import com.openminis.app.data.model.LLMError
+import com.openminis.app.provider.CredentialAcceptance
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.safeOptString
 import org.json.JSONObject
 
 internal fun OpenAIProvider.mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
+    if (statusCode == 401 || statusCode == 403) {
+        // [T-llm-error-401-model-scope] A gateway fronting an upstream pool
+        // answers 401 for failures in the channel IT picked, not for anything
+        // wrong with the caller's key. When this same credential was accepted by
+        // this same host recently, "Invalid API key" is simply false, and its
+        // hint sends the user off to regenerate a key that works. Measured: one
+        // relay served 200 for a single model and 401 for the other four — same
+        // key, same minute, deterministic per model — while its own /v1/models
+        // returned 200 throughout.
+        //
+        // No acceptance evidence falls through to the historical mapping below,
+        // so nothing changes for a credential the app has never seen succeed.
+        if (CredentialAcceptance.isAccepted(credentialGateKey)) {
+            return LLMError.InvalidApiKey(
+                "HTTP $statusCode — the same credential was accepted by this host recently, " +
+                    "so the refusal is about this model, not the key",
+                credentialAccepted = true,
+            )
+        }
+    }
     if (statusCode == 401) return LLMError.InvalidApiKey()
     if (statusCode == 403) {
         // [T-llm-error-403] OpenRouter / self-hosted gateways answer 403 for

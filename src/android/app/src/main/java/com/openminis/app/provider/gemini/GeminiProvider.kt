@@ -4,6 +4,7 @@ import android.util.Base64
 import com.openminis.app.data.model.AgentContentPart
 import com.openminis.app.data.model.AgentToolDefinition
 import com.openminis.app.data.model.LLMError
+import com.openminis.app.provider.CredentialAcceptance
 import com.openminis.app.provider.HttpRetryAfter
 import com.openminis.app.provider.ProviderKeyGate
 import com.openminis.app.provider.ImageBudget
@@ -513,7 +514,18 @@ class GeminiProvider(
     }
 
     private fun mapHttpError(statusCode: Int, body: String, retryAfterHeader: String? = null): LLMError {
-        if (statusCode == 401 || statusCode == 403) return LLMError.InvalidApiKey()
+        if (statusCode == 401 || statusCode == 403) {
+            // [T-llm-error-401-model-scope] See OpenAIProviderErrors: an
+            // upstream-pool gateway's 401 is often about the model, not the key.
+            if (CredentialAcceptance.isAccepted(credentialGateKey)) {
+                return LLMError.InvalidApiKey(
+                    "HTTP $statusCode — the same credential was accepted by this host recently, " +
+                        "so the refusal is about this model, not the key",
+                    credentialAccepted = true,
+                )
+            }
+            return LLMError.InvalidApiKey()
+        }
         if (statusCode == 429) return HttpRetryAfter.map429(body, retryAfterHeader)
         val message = "Gemini API error $statusCode: ${body.take(200)}"
         // [T-llm-error-classification] 细分 Gemini 400 类错误。

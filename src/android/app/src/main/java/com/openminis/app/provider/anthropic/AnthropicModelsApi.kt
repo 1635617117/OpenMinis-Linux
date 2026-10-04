@@ -2,6 +2,7 @@ package com.openminis.app.provider.anthropic
 
 import com.openminis.app.provider.ModelListFetchIsolation
 import com.openminis.app.provider.ModelListFetchRetry
+import com.openminis.app.provider.ProviderKeyGate
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.provider.ModelsDevApi
@@ -108,6 +109,7 @@ object AnthropicModelsApi {
                     request,
                     "AnthropicModels",
                     totalBudgetMillis = ModelListFetchRetry.TOTAL_BUDGET_MILLIS / candidateBases.size,
+                    credentialKey = ProviderKeyGate.credentialKey(candidate.orEmpty(), apiKey),
                 )
             } catch (e: Exception) {
                 android.util.Log.e("AnthropicModels", "Fetch error (level=$idx): ${e.message}")

@@ -2,6 +2,7 @@ package com.openminis.app.provider.openrouter
 
 import com.openminis.app.provider.ModelListFetchIsolation
 import com.openminis.app.provider.ModelListFetchRetry
+import com.openminis.app.provider.ProviderKeyGate
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.normalizeModalities
@@ -54,7 +55,12 @@ object OpenRouterModelsApi {
 
         // [T-models-fetch-transient-auth] Bounded retry: a single non-2xx used
         // to be final, which invalidated the cache and returned an empty list.
-        val response = ModelListFetchRetry.execute(client, request, "OpenRouterModels")
+        val response = ModelListFetchRetry.execute(
+            client,
+            request,
+            "OpenRouterModels",
+            credentialKey = ProviderKeyGate.credentialKey("https://openrouter.ai/api/v1", apiKey),
+        )
         val body = response.body?.string() ?: return@withContext emptyList()
 
         if (!response.isSuccessful) {

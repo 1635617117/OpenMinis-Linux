@@ -8,8 +8,26 @@ package com.openminis.app.data.model
  */
 sealed class LLMError(message: String, cause: Throwable? = null) : Exception(message, cause) {
     /** API key is missing, revoked, or expired. */
-    class InvalidApiKey(val detail: String = "") : LLMError(
-        if (detail.isBlank()) "Invalid API key" else "Invalid API key: $detail",
+    class InvalidApiKey(
+        val detail: String = "",
+        /**
+         * [T-llm-error-401-model-scope] True when the SAME credential was
+         * accepted by this host recently (see
+         * [com.openminis.app.provider.CredentialAcceptance]). The refusal is
+         * then about *this model* — typically a gateway whose upstream channel
+         * for it is broken — and not about the key, so both the message and the
+         * hint must say so instead of sending the user to regenerate a
+         * credential that was never the problem.
+         */
+        val credentialAccepted: Boolean = false,
+    ) : LLMError(
+        when {
+            credentialAccepted && detail.isNotBlank() -> detail
+            credentialAccepted ->
+                "Model refused by the gateway (the credential itself was accepted)"
+            detail.isBlank() -> "Invalid API key"
+            else -> "Invalid API key: $detail"
+        },
     )
 
     /** TCP/DNS layer failed before the HTTP request was sent. */
@@ -97,7 +115,8 @@ sealed class LLMError(message: String, cause: Throwable? = null) : Exception(mes
     val fallbackReason: String
         get() = when (this) {
             is RateLimited -> "Rate limited"
-            is InvalidApiKey -> "Invalid API key"
+            is InvalidApiKey ->
+                if (credentialAccepted) "Model refused by gateway" else "Invalid API key"
             is Timeout -> "Timed out"
             is ContextLengthExceeded -> "Context window exceeded"
             is ContentFiltered -> "Content filtered"
@@ -117,6 +136,13 @@ sealed class LLMError(message: String, cause: Throwable? = null) : Exception(mes
     val actionableHint: String
         get() = when (this) {
             is InvalidApiKey -> when {
+                // Checked before the 403 branch: a credential we have seen
+                // accepted is the stronger evidence, and its remedy (pick
+                // another model) is different from either key branch.
+                credentialAccepted ->
+                    "Your API key is fine — this server accepted it moments ago. It refused THIS MODEL, " +
+                        "which usually means the gateway's upstream channel for it is broken or the model " +
+                        "is not on your plan. Pick a different model; only check the key if every model fails."
                 detail.contains("403", ignoreCase = true) || detail.contains("forbidden", ignoreCase = true) ->
                     "The credential was accepted but access was denied (403): this model or region may not be allowed on your plan. Check the provider's model access settings."
                 else -> "Check your API key in Settings → Providers, or regenerate it at your provider's dashboard."

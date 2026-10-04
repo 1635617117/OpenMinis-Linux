@@ -44,8 +44,26 @@ object ProviderKeyGate {
         return "$h|$fp|$m"
     }
 
+    /**
+     * [T-llm-error-401-model-scope] Credential scope of [key]: host +
+     * fingerprint, **without** the model. Acceptance of a credential is a
+     * property of the credential, so this is the scope
+     * [CredentialAcceptance] records and queries.
+     */
+    fun credentialKey(host: String, secret: String?): String =
+        "${hostOf(host)}|${fingerprint(secret)}"
+
+    /**
+     * Derive [credentialKey] from an already-built [key] by dropping its final
+     * segment. Exact because neither [hostOf] (a lowercased DNS name) nor
+     * [fingerprint] (lowercase hex, or `anon`) can contain `|`, and
+     * [normalizeModel] now maps `|` to `/` — so the model is the only segment
+     * that could ever hold one, and it is last.
+     */
+    fun credentialScopeOf(gateKey: String): String = gateKey.substringBeforeLast('|')
+
     fun normalizeModel(modelId: String?): String =
-        modelId?.trim()?.lowercase().orEmpty()
+        modelId?.trim()?.lowercase()?.replace("|", "/").orEmpty()
 
     fun fingerprint(secret: String?): String {
         val s = secret?.trim().orEmpty()

@@ -70,6 +70,18 @@ interface LLMProvider : ModelProvider {
     val callGateKey: String get() = ""
 
     /**
+     * [T-llm-error-401-model-scope] [callGateKey] minus its model segment: the
+     * host + credential fingerprint alone. Lets an error mapper ask
+     * [CredentialAcceptance] "was this credential accepted by this host?" even
+     * though the call that failed was for one specific model.
+     *
+     * Derived by default so no provider has to opt in; providers that override
+     * [callGateKey] get this for free.
+     */
+    val credentialGateKey: String
+        get() = ProviderKeyGate.credentialScopeOf(callGateKey)
+
+    /**
      * Effective max output tokens ceiling for the given model.
      * Priority: model.maxOutputTokens > models.dev (normalized id) >
      * family heuristic > provider-level default.

@@ -136,6 +136,14 @@ object ModelListFetchRetry {
         request: Request,
         tag: String,
         totalBudgetMillis: Long = TOTAL_BUDGET_MILLIS,
+        /**
+         * [T-llm-error-401-model-scope] Credential scope for
+         * [CredentialAcceptance]. A 2xx here proves the credential is valid at
+         * this host, which is what lets a later 401 on a *chat* call be
+         * attributed to the model's upstream channel instead of to the key.
+         * Null skips the recording.
+         */
+        credentialKey: String? = null,
     ): Response {
         val startedAt = System.nanoTime()
         var attempt = 0
@@ -161,6 +169,7 @@ object ModelListFetchRetry {
                     if (attempt > 1) {
                         android.util.Log.i(tag, "models fetch recovered on attempt $attempt (HTTP $code)")
                     }
+                    CredentialAcceptance.note(credentialKey)
                     return response!!
                 }
 

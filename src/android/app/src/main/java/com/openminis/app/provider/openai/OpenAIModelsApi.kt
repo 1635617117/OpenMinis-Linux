@@ -2,6 +2,7 @@ package com.openminis.app.provider.openai
 
 import com.openminis.app.provider.ModelListFetchIsolation
 import com.openminis.app.provider.ModelListFetchRetry
+import com.openminis.app.provider.ProviderKeyGate
 import android.content.Context
 import com.openminis.app.data.model.LLMModel
 import com.openminis.app.data.model.normalizeModalities
@@ -115,7 +116,15 @@ object OpenAIModelsApi {
         // [T-models-fetch-transient-auth] one 401 sample used to empty the list
         // and drop the cache; a relay in a bad channel window answers 401 for a
         // key that works minutes later.
-        val response = ModelListFetchRetry.execute(client, request, "OpenAIModels")
+        val response = ModelListFetchRetry.execute(
+            client,
+            request,
+            "OpenAIModels",
+            // [T-llm-error-401-model-scope] A 2xx proves this credential is good
+            // at this host, so a later 401 on a chat call can be blamed on the
+            // model's upstream channel instead of on the key.
+            credentialKey = ProviderKeyGate.credentialKey(baseURL.orEmpty(), apiKey),
+        )
         val body = response.body?.string() ?: return@withContext fallback
 
         if (!response.isSuccessful) {
